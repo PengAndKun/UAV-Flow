@@ -4,7 +4,7 @@ Remote control panel for `uav_control_server.py`.
 This file is the "controller side" process:
 - connects to the running UAV control server
 - sends move commands
-- fetches the latest camera frame
+- fetches the latest RGB preview and depth preview
 - triggers screenshots on the server
 """
 
@@ -12,7 +12,7 @@ import argparse
 import json
 import logging
 import tkinter as tk
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 from urllib import error, request
 
 import cv2
@@ -22,6 +22,7 @@ from PIL import Image, ImageTk
 logger = logging.getLogger(__name__)
 
 PREVIEW_WINDOW_NAME = "UAV Remote Preview"
+DEPTH_WINDOW_NAME = "UAV Depth Preview"
 
 
 class RemoteControlClient:
@@ -48,13 +49,19 @@ class RemoteControlClient:
             return json.loads(resp.read().decode("utf-8"))
 
     def get_frame(self) -> np.ndarray:
-        req = request.Request(f"{self.base_url}/frame", method="GET")
+        return self.get_image("/frame")
+
+    def get_depth_frame(self) -> np.ndarray:
+        return self.get_image("/depth_frame")
+
+    def get_image(self, path: str) -> np.ndarray:
+        req = request.Request(f"{self.base_url}{path}", method="GET")
         with request.urlopen(req, timeout=self.timeout_s) as resp:
             body = resp.read()
         data = np.frombuffer(body, dtype=np.uint8)
         frame = cv2.imdecode(data, cv2.IMREAD_COLOR)
         if frame is None:
-            raise RuntimeError("Failed to decode frame returned by server")
+            raise RuntimeError(f"Failed to decode image returned by server path={path}")
         return frame
 
 
@@ -66,13 +73,20 @@ class UAVControlPanel:
         self.client = RemoteControlClient(f"http://{args.host}:{args.port}", args.timeout_s)
         self.root = tk.Tk()
         self.root.title("UAV Remote Control Panel")
-        self.root.geometry("560x300")
+        self.root.geometry("700x390")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.status_var = tk.StringVar(value="Connecting...")
+        self.depth_var = tk.StringVar(value="Depth: waiting...")
+        self.plan_var = tk.StringVar(value="Plan: idle")
         self.last_state: Optional[Dict[str, Any]] = None
         self.preview_window: Optional[tk.Toplevel] = None
         self.preview_label: Optional[tk.Label] = None
         self.preview_photo: Optional[ImageTk.PhotoImage] = None
+        self.depth_window: Optional[tk.Toplevel] = None
+        self.depth_label: Optional[tk.Label] = None
+        self.depth_photo: Optional[ImageTk.PhotoImage] = None
+        self.task_label_var = tk.StringVar(value=args.default_task_label)
+        self.capture_label_var = tk.StringVar(value="")
 
     def safe_request(self, func, *call_args, **call_kwargs):
         try:
@@ -84,6 +98,14 @@ class UAVControlPanel:
             self.status_var.set(f"Request failed: {exc}")
             logger.warning("Request failed: %s", exc)
         return None
+
+    @staticmethod
+    def _frame_to_photo(frame: np.ndarray, width: int, height: int) -> ImageTk.PhotoImage:
+        if width > 0 and height > 0:
+            frame = cv2.resize(frame, (width, height))
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_image = Image.fromarray(frame_rgb)
+        return ImageTk.PhotoImage(image=pil_image)
 
     def send_move(
         self,
@@ -105,20 +127,60 @@ class UAVControlPanel:
             self.last_state = state
             self.update_status_from_state(state)
             self.update_preview_once()
+            self.update_depth_once()
 
     def capture(self) -> None:
-        result = self.safe_request(self.client.post_json, "/capture", {})
+        payload = {
+            "label": self.capture_label_var.get().strip(),
+            "task_label": self.task_label_var.get().strip(),
+        }
+        result = self.safe_request(self.client.post_json, "/capture", payload)
         if result:
-            self.status_var.set(f"Captured: {result['image_path']}")
+            self.status_var.set(f"Captured: {result['meta_path']}")
             self.update_preview_once()
+            self.update_depth_once()
+
+    def set_task_label(self) -> None:
+        result = self.safe_request(
+            self.client.post_json,
+            "/task",
+            {"task_label": self.task_label_var.get().strip()},
+        )
+        if result:
+            self.status_var.set(f"Task label set: {result.get('task_label', '')}")
+
+    def request_plan(self) -> None:
+        payload = {"task_label": self.task_label_var.get().strip()}
+        result = self.safe_request(self.client.post_json, "/request_plan", payload)
+        if result:
+            if isinstance(result.get("plan"), dict):
+                self.plan_var.set(self.format_plan_summary(result["plan"]))
+            self.update_state_once()
 
     def shutdown_server(self) -> None:
         result = self.safe_request(self.client.post_json, "/shutdown", {})
         if result:
             self.status_var.set("Server shutdown requested")
 
+    def format_plan_summary(self, plan: Dict[str, Any]) -> str:
+        waypoints = plan.get("candidate_waypoints") or []
+        waypoint_text = "none"
+        if waypoints:
+            wp = waypoints[0]
+            waypoint_text = f"({wp.get('x', 0.0):.0f}, {wp.get('y', 0.0):.0f}, {wp.get('z', 0.0):.0f})"
+        return (
+            f"Plan subgoal={plan.get('semantic_subgoal', 'idle')} "
+            f"sector={plan.get('sector_id', '-')} "
+            f"conf={plan.get('planner_confidence', 0.0):.2f} "
+            f"wp={waypoint_text}"
+        )
+
     def update_status_from_state(self, state: Dict[str, Any]) -> None:
         pose = state.get("pose", {})
+        depth = state.get("depth", {})
+        camera_info = state.get("camera_info", depth.get("camera_info", {}))
+        runtime_debug = state.get("runtime_debug", {})
+        plan = state.get("plan", {})
         self.status_var.set(
             "Pose "
             f"x={pose.get('x', 0.0):.1f} "
@@ -128,9 +190,20 @@ class UAVControlPanel:
             f"cmd={pose.get('command_yaw', 0.0):.1f} "
             f"task={pose.get('task_yaw', 0.0):.1f} "
             f"uav={pose.get('uav_yaw', 0.0):.1f} "
-            f"action={state.get('last_action', 'idle')} | "
+            f"action={state.get('last_action', 'idle')} "
+            f"risk={runtime_debug.get('risk_score', 0.0):.2f} "
+            f"task_label={state.get('task_label', '')} | "
             f"server={self.client.base_url}"
         )
+        self.depth_var.set(
+            f"Depth frame={depth.get('frame_id', 'n/a')} "
+            f"size={depth.get('image_width', 0)}x{depth.get('image_height', 0)} "
+            f"range={float(depth.get('min_depth', 0.0)):.1f}->{float(depth.get('max_depth', 0.0)):.1f} cm "
+            f"fov={float(depth.get('fov_deg', 0.0)):.1f} "
+            f"fx={float((camera_info.get('k') or [0.0])[0]):.1f} "
+            f"pipe={depth.get('pipeline', depth.get('source_mode', 'n/a'))}"
+        )
+        self.plan_var.set(self.format_plan_summary(plan) if plan else "Plan: idle")
 
     def update_state_once(self) -> None:
         state = self.safe_request(self.client.get_json, "/state")
@@ -139,25 +212,42 @@ class UAVControlPanel:
             self.update_status_from_state(state)
 
     def update_preview_once(self) -> None:
+        if self.args.hide_preview_window:
+            return
         frame = self.safe_request(self.client.get_frame)
         if frame is None:
             return
-        if self.args.preview_width > 0 and self.args.preview_height > 0:
-            frame = cv2.resize(frame, (self.args.preview_width, self.args.preview_height))
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil_image = Image.fromarray(frame_rgb)
-        self.preview_photo = ImageTk.PhotoImage(image=pil_image)
+        self.preview_photo = self._frame_to_photo(frame, self.args.preview_width, self.args.preview_height)
         if self.preview_label is not None:
             self.preview_label.configure(image=self.preview_photo)
             self.preview_label.image = self.preview_photo
+
+    def update_depth_once(self) -> None:
+        if self.args.hide_depth_window:
+            return
+        frame = self.safe_request(self.client.get_depth_frame)
+        if frame is None:
+            return
+        self.depth_photo = self._frame_to_photo(frame, self.args.depth_width, self.args.depth_height)
+        if self.depth_label is not None:
+            self.depth_label.configure(image=self.depth_photo)
+            self.depth_label.image = self.depth_photo
 
     def schedule_state_refresh(self) -> None:
         self.update_state_once()
         self.root.after(self.args.state_interval_ms, self.schedule_state_refresh)
 
     def schedule_preview_refresh(self) -> None:
+        if self.args.hide_preview_window:
+            return
         self.update_preview_once()
         self.root.after(self.args.preview_interval_ms, self.schedule_preview_refresh)
+
+    def schedule_depth_refresh(self) -> None:
+        if self.args.hide_depth_window:
+            return
+        self.update_depth_once()
+        self.root.after(self.args.depth_interval_ms, self.schedule_depth_refresh)
 
     def bind_keys(self) -> None:
         bindings = {
@@ -170,23 +260,33 @@ class UAVControlPanel:
             "q": lambda: self.send_move(yaw_delta_deg=-self.args.yaw_step_deg, action_name="yaw_left(Q)"),
             "e": lambda: self.send_move(yaw_delta_deg=self.args.yaw_step_deg, action_name="yaw_right(E)"),
             "c": self.capture,
-            "v": self.update_preview_once,
+            "p": self.request_plan,
+            "v": lambda: (self.update_preview_once(), self.update_depth_once()),
         }
         for key, callback in bindings.items():
             self.root.bind(f"<KeyPress-{key}>", lambda _event, cb=callback: cb())
             self.root.bind(f"<KeyPress-{key.upper()}>", lambda _event, cb=callback: cb())
 
     def build_ui(self) -> None:
-        self.preview_window = tk.Toplevel(self.root)
-        self.preview_window.title(PREVIEW_WINDOW_NAME)
-        self.preview_window.geometry(f"{self.args.preview_width}x{self.args.preview_height}")
-        self.preview_window.protocol("WM_DELETE_WINDOW", self.on_close)
-        self.preview_label = tk.Label(self.preview_window)
-        self.preview_label.pack(fill="both", expand=True)
+        if not self.args.hide_preview_window:
+            self.preview_window = tk.Toplevel(self.root)
+            self.preview_window.title(PREVIEW_WINDOW_NAME)
+            self.preview_window.geometry(f"{self.args.preview_width}x{self.args.preview_height}")
+            self.preview_window.protocol("WM_DELETE_WINDOW", self.on_close)
+            self.preview_label = tk.Label(self.preview_window)
+            self.preview_label.pack(fill="both", expand=True)
+
+        if not self.args.hide_depth_window:
+            self.depth_window = tk.Toplevel(self.root)
+            self.depth_window.title(DEPTH_WINDOW_NAME)
+            self.depth_window.geometry(f"{self.args.depth_width}x{self.args.depth_height}")
+            self.depth_window.protocol("WM_DELETE_WINDOW", self.on_close)
+            self.depth_label = tk.Label(self.depth_window)
+            self.depth_label.pack(fill="both", expand=True)
 
         header = tk.Label(
             self.root,
-            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview",
+            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan",
             anchor="w",
             justify="left",
         )
@@ -194,6 +294,36 @@ class UAVControlPanel:
 
         status = tk.Label(self.root, textvariable=self.status_var, anchor="w", justify="left")
         status.pack(fill="x", padx=12, pady=(0, 10))
+
+        depth_status = tk.Label(self.root, textvariable=self.depth_var, anchor="w", justify="left")
+        depth_status.pack(fill="x", padx=12, pady=(0, 6))
+
+        plan_status = tk.Label(self.root, textvariable=self.plan_var, anchor="w", justify="left")
+        plan_status.pack(fill="x", padx=12, pady=(0, 10))
+
+        task_frame = tk.Frame(self.root)
+        task_frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        tk.Label(task_frame, text="Task Label").grid(row=0, column=0, sticky="w")
+        tk.Entry(task_frame, textvariable=self.task_label_var).grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        tk.Button(task_frame, text="Set Task", command=self.set_task_label, width=14).grid(row=0, column=2, sticky="ew")
+
+        tk.Label(task_frame, text="Capture Label").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(task_frame, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
+        tk.Button(task_frame, text="Request Plan", command=self.request_plan, width=14).grid(row=1, column=2, sticky="ew", pady=(8, 0))
+        task_frame.grid_columnconfigure(1, weight=1)
+
+        task_help = tk.Label(
+            self.root,
+            text=(
+                "Task Label: current semantic task for planner and capture metadata. "
+                "Capture Label: one-shot note/suffix for the next saved sample. "
+                "Capture saves RGB + depth together."
+            ),
+            anchor="w",
+            justify="left",
+        )
+        task_help.pack(fill="x", padx=12, pady=(0, 8))
 
         controls = tk.Frame(self.root)
         controls.pack(fill="x", padx=12, pady=6)
@@ -208,7 +338,8 @@ class UAVControlPanel:
             ("Yaw Left (Q)", lambda: self.send_move(yaw_delta_deg=-self.args.yaw_step_deg, action_name="yaw_left(Q)")),
             ("Yaw Right (E)", lambda: self.send_move(yaw_delta_deg=self.args.yaw_step_deg, action_name="yaw_right(E)")),
             ("Capture (C)", self.capture),
-            ("Refresh (V)", self.update_preview_once),
+            ("Request Plan (P)", self.request_plan),
+            ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
             ("Shutdown Server", self.shutdown_server),
         ]
 
@@ -221,9 +352,18 @@ class UAVControlPanel:
         controls.grid_columnconfigure(0, weight=1)
         controls.grid_columnconfigure(1, weight=1)
 
+        shown_windows = []
+        if not self.args.hide_preview_window:
+            shown_windows.append(PREVIEW_WINDOW_NAME)
+        if not self.args.hide_depth_window:
+            shown_windows.append(DEPTH_WINDOW_NAME)
+        windows_text = " / ".join(shown_windows) if shown_windows else "(none)"
         hint = tk.Label(
             self.root,
-            text=f"Preview window: {PREVIEW_WINDOW_NAME}\nTarget server: {self.client.base_url}",
+            text=(
+                f"Preview windows: {windows_text}\n"
+                f"Control server: {self.client.base_url}"
+            ),
             anchor="w",
             justify="left",
         )
@@ -241,14 +381,21 @@ class UAVControlPanel:
                 self.preview_window.destroy()
             except Exception:
                 pass
+        if self.depth_window is not None:
+            try:
+                self.depth_window.destroy()
+            except Exception:
+                pass
         self.root.destroy()
 
     def run(self) -> None:
         self.build_ui()
         self.update_state_once()
         self.update_preview_once()
+        self.update_depth_once()
         self.schedule_state_refresh()
         self.schedule_preview_refresh()
+        self.schedule_depth_refresh()
         self.root.mainloop()
 
 
@@ -262,8 +409,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--yaw_step_deg", type=float, default=5.0, help="Yaw step")
     parser.add_argument("--preview_width", type=int, default=960, help="Preview display width")
     parser.add_argument("--preview_height", type=int, default=540, help="Preview display height")
+    parser.add_argument("--depth_width", type=int, default=480, help="Depth preview width")
+    parser.add_argument("--depth_height", type=int, default=360, help="Depth preview height")
     parser.add_argument("--preview_interval_ms", type=int, default=180, help="Preview refresh interval")
+    parser.add_argument("--depth_interval_ms", type=int, default=250, help="Depth preview refresh interval")
+    parser.add_argument("--hide_preview_window", action="store_true", help="Do not open or refresh the RGB preview window")
+    parser.add_argument("--hide_depth_window", action="store_true", help="Do not open or refresh the depth preview window")
     parser.add_argument("--state_interval_ms", type=int, default=500, help="State refresh interval")
+    parser.add_argument("--default_task_label", default="", help="Initial task label shown in the panel")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
     return parser.parse_args()
 
