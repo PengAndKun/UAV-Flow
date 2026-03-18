@@ -20,6 +20,7 @@ import gym
 import gym_unrealcv
 import numpy as np
 
+from archive_runtime import ArchiveRuntime
 from batch_run_act_all import (
     configure_player_viewport,
     create_obj_if_needed,
@@ -33,8 +34,8 @@ from batch_run_act_all import (
 )
 from gym_unrealcv.envs.wrappers import augmentation, configUE, time_dilation
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
-from runtime_interfaces import build_plan_state, build_runtime_debug_state, build_waypoint, now_timestamp
-from runtime_interfaces import build_plan_request, coerce_plan_payload
+from runtime_interfaces import build_plan_state, build_reflex_runtime_state, build_runtime_debug_state, build_waypoint, now_timestamp
+from runtime_interfaces import build_plan_request, build_reflex_request, build_reflex_sample, coerce_plan_payload, coerce_reflex_runtime_payload
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +160,17 @@ class UAVControlBackend:
             "last_auto_trigger_step": 0,
         }
         self.runtime_debug: Dict[str, Any] = build_runtime_debug_state()
+        self.reflex_runtime: Dict[str, Any] = build_reflex_runtime_state(
+            mode="heuristic_stub",
+            policy_name=self.args.reflex_policy_name,
+            source="local_heuristic",
+        )
+        self.archive_runtime = ArchiveRuntime(
+            pos_bin_cm=float(self.args.archive_pos_bin_cm),
+            yaw_bin_deg=float(self.args.archive_yaw_bin_deg),
+            depth_bin_cm=float(self.args.archive_depth_bin_cm),
+            recent_limit=int(self.args.archive_recent_limit),
+        )
 
         os.makedirs(self.args.capture_dir, exist_ok=True)
 
@@ -213,6 +225,17 @@ class UAVControlBackend:
         self.command_task_yaw_deg = self.get_task_pose()[3]
         self.position_free_view_once()
         self.refresh_observations()
+        if self.args.reflex_policy_url:
+            try:
+                reflex_runtime = self.request_reflex_policy(trigger="startup")
+                logger.info(
+                    "Startup reflex policy synced policy=%s source=%s suggested=%s",
+                    reflex_runtime.get("policy_name", "n/a"),
+                    reflex_runtime.get("source", "unknown"),
+                    reflex_runtime.get("suggested_action", "idle"),
+                )
+            except Exception as exc:
+                logger.warning("Startup reflex policy sync failed, keep local heuristic state: %s", exc)
 
     def apply_initial_task_or_spawn(self) -> None:
         if self.args.task_json:
@@ -251,6 +274,13 @@ class UAVControlBackend:
                 logger.info("Hid extra UAV agent %s at %s", player_name, hide_pos)
             except Exception as exc:
                 logger.warning("Failed to hide extra UAV agent %s: %s", player_name, exc)
+
+    def should_preserve_reflex_runtime(self) -> bool:
+        """Return True when the current reflex state comes from a non-local source."""
+        source = str(self.reflex_runtime.get("source", "") or "").strip().lower()
+        if not self.args.reflex_policy_url:
+            return False
+        return bool(source) and source != "local_heuristic"
 
     def get_env_yaw_deg(self) -> float:
         rotation = self.env.unwrapped.unrealcv.get_obj_rotation(self.player_name)
@@ -352,6 +382,7 @@ class UAVControlBackend:
         configured_min_depth = float(self.args.depth_min_cm)
         configured_max_depth = float(self.args.depth_max_cm)
         valid_depth = finite_depth[(finite_depth >= configured_min_depth) & (finite_depth <= configured_max_depth)]
+        front_min_depth, front_mean_depth, risk_score, shield_triggered = self.estimate_depth_risk(depth_image)
         self.last_depth_summary = {
             "frame_id": self.last_observation_id,
             "available": bool(finite_depth.size),
@@ -359,6 +390,8 @@ class UAVControlBackend:
             "max_depth": float(np.max(valid_depth)) if valid_depth.size else configured_max_depth,
             "raw_min_depth": float(np.min(finite_depth)) if finite_depth.size else 0.0,
             "raw_max_depth": float(np.max(finite_depth)) if finite_depth.size else 0.0,
+            "front_min_depth": front_min_depth,
+            "front_mean_depth": front_mean_depth,
             "image_width": int(depth_image.shape[1]),
             "image_height": int(depth_image.shape[0]),
             "fov_deg": float(depth_fov_deg),
@@ -367,6 +400,9 @@ class UAVControlBackend:
             "camera_id": int(self.policy_cam_id),
             "camera_info": camera_info,
         }
+        self.runtime_debug["risk_score"] = risk_score
+        self.runtime_debug["shield_triggered"] = shield_triggered
+        self.sync_archive_runtime()
         return depth_image, depth_fov_deg
 
     def refresh_observations(self) -> np.ndarray:
@@ -423,20 +459,24 @@ class UAVControlBackend:
             return self.last_depth_summary.get("camera_info", {})
 
     def set_task_label(self, task_label: str) -> Dict[str, Any]:
-        self.current_task_label = str(task_label or "").strip()
-        return {"status": "ok", "task_label": self.current_task_label}
+        with self.lock:
+            self.current_task_label = str(task_label or "").strip()
+            self.sync_archive_runtime()
+            return {"status": "ok", "task_label": self.current_task_label}
 
     def set_plan_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        self.current_plan = coerce_plan_payload(
-            payload,
-            default_plan_id=f"plan_{self.last_observation_id}",
-            default_planner_name=self.args.planner_name,
-            default_semantic_subgoal="idle",
-            default_radius=self.args.default_waypoint_radius_cm,
-        )
-        candidate_waypoints = self.current_plan.get("candidate_waypoints") or []
-        self.runtime_debug["current_waypoint"] = candidate_waypoints[0] if candidate_waypoints else None
-        return self.current_plan
+        with self.lock:
+            self.current_plan = coerce_plan_payload(
+                payload,
+                default_plan_id=f"plan_{self.last_observation_id}",
+                default_planner_name=self.args.planner_name,
+                default_semantic_subgoal="idle",
+                default_radius=self.args.default_waypoint_radius_cm,
+            )
+            candidate_waypoints = self.current_plan.get("candidate_waypoints") or []
+            self.runtime_debug["current_waypoint"] = candidate_waypoints[0] if candidate_waypoints else None
+            self.sync_archive_runtime()
+            return self.current_plan
 
     def request_plan(self, task_label: Optional[str] = None, trigger: str = "manual_request") -> Dict[str, Any]:
         with self.lock:
@@ -471,6 +511,13 @@ class UAVControlBackend:
                     context={
                         "movement_yaw_mode": self.args.movement_yaw_mode,
                         "preview_mode": self.args.preview_mode,
+                        "risk_score": float(self.runtime_debug.get("risk_score", 0.0)),
+                        "reflex_runtime": self.reflex_runtime,
+                        "archive": self.archive_runtime.get_planner_context(
+                            task_label=task_label_value,
+                            semantic_subgoal=self.current_plan.get("semantic_subgoal", "idle"),
+                            limit=int(self.args.archive_retrieval_limit),
+                        ),
                     },
                 )
                 self.last_plan_request = planner_request
@@ -579,23 +626,206 @@ class UAVControlBackend:
         shield_triggered: Optional[bool] = None,
         archive_cell_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if current_waypoint is not None:
-            self.runtime_debug["current_waypoint"] = current_waypoint
-        if local_policy_action is not None:
-            self.runtime_debug["local_policy_action"] = local_policy_action
-        if risk_score is not None:
-            self.runtime_debug["risk_score"] = float(risk_score)
-        if shield_triggered is not None:
-            self.runtime_debug["shield_triggered"] = bool(shield_triggered)
-        if archive_cell_id is not None:
-            self.runtime_debug["archive_cell_id"] = str(archive_cell_id)
-        return self.runtime_debug
+        with self.lock:
+            if current_waypoint is not None:
+                self.runtime_debug["current_waypoint"] = current_waypoint
+            if local_policy_action is not None:
+                self.runtime_debug["local_policy_action"] = local_policy_action
+            if risk_score is not None:
+                self.runtime_debug["risk_score"] = float(risk_score)
+            if shield_triggered is not None:
+                self.runtime_debug["shield_triggered"] = bool(shield_triggered)
+            if archive_cell_id is not None:
+                self.runtime_debug["archive_cell_id"] = str(archive_cell_id)
+            self.sync_archive_runtime()
+            return self.runtime_debug
+
+    def estimate_depth_risk(self, depth_image: np.ndarray) -> Tuple[float, float, float, bool]:
+        height, width = depth_image.shape[:2]
+        x0 = max(0, int(width * 0.35))
+        x1 = min(width, int(width * 0.65))
+        y0 = max(0, int(height * 0.30))
+        y1 = min(height, int(height * 0.85))
+        roi = depth_image[y0:y1, x0:x1]
+        finite_depth = roi[np.isfinite(roi)]
+        valid_depth = finite_depth[
+            (finite_depth >= float(self.args.depth_min_cm)) & (finite_depth <= float(self.args.depth_max_cm))
+        ]
+        if not valid_depth.size:
+            return float(self.args.depth_max_cm), float(self.args.depth_max_cm), 0.0, False
+        front_min_depth = float(np.min(valid_depth))
+        front_mean_depth = float(np.mean(valid_depth))
+        risk_near_cm = max(float(self.args.risk_near_cm), float(self.args.depth_min_cm) + 1.0)
+        normalized = 1.0 - min(front_min_depth, risk_near_cm) / risk_near_cm
+        risk_score = float(np.clip(normalized, 0.0, 1.0))
+        shield_triggered = bool(risk_score >= float(self.args.shield_risk_threshold))
+        return front_min_depth, front_mean_depth, risk_score, shield_triggered
+
+    def sync_archive_runtime(self) -> Dict[str, Any]:
+        with self.lock:
+            pose = self.get_task_pose()
+            current_waypoint = self.runtime_debug.get("current_waypoint")
+            snapshot = self.archive_runtime.register_observation(
+                timestamp=self.last_observation_time,
+                frame_id=self.last_observation_id,
+                task_label=self.current_task_label or "idle",
+                semantic_subgoal=self.current_plan.get("semantic_subgoal", "idle"),
+                pose={
+                    "x": pose[0],
+                    "y": pose[1],
+                    "z": pose[2],
+                    "yaw": pose[3],
+                },
+                depth_summary=self.last_depth_summary,
+                current_waypoint=current_waypoint if isinstance(current_waypoint, dict) else None,
+                action_label=self.last_action,
+                risk_score=float(self.runtime_debug.get("risk_score", 0.0)),
+            )
+            self.runtime_debug["archive_cell_id"] = snapshot["current_cell_id"]
+            if not self.should_preserve_reflex_runtime():
+                self.sync_reflex_runtime(snapshot, trigger="archive_sync")
+            return snapshot
+
+    def build_heuristic_reflex_runtime(self, archive_snapshot: Optional[Dict[str, Any]] = None, *, trigger: str = "") -> Dict[str, Any]:
+        pose = self.get_task_pose()
+        current_waypoint = self.runtime_debug.get("current_waypoint")
+        archive_state = archive_snapshot if isinstance(archive_snapshot, dict) else self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+        active_retrieval = archive_state.get("active_retrieval") if isinstance(archive_state.get("active_retrieval"), dict) else {}
+
+        waypoint_distance_cm = 0.0
+        yaw_error_deg = 0.0
+        vertical_error_cm = 0.0
+        progress_to_waypoint_cm = 0.0
+        suggested_action = "hold_position"
+        status = "idle"
+        should_execute = False
+
+        if isinstance(current_waypoint, dict):
+            dx = float(current_waypoint.get("x", pose[0])) - float(pose[0])
+            dy = float(current_waypoint.get("y", pose[1])) - float(pose[1])
+            dz = float(current_waypoint.get("z", pose[2])) - float(pose[2])
+            horizontal_distance = float(np.hypot(dx, dy))
+            waypoint_distance_cm = float(np.sqrt(dx * dx + dy * dy + dz * dz))
+            vertical_error_cm = dz
+            desired_yaw = normalize_angle_deg(np.degrees(np.arctan2(dy, dx))) if horizontal_distance > 1e-6 else float(pose[3])
+            yaw_error_deg = normalize_angle_deg(desired_yaw - float(pose[3]))
+            previous_distance = float(self.reflex_runtime.get("waypoint_distance_cm", waypoint_distance_cm))
+            progress_to_waypoint_cm = previous_distance - waypoint_distance_cm
+            status = "tracking_waypoint"
+
+            if bool(self.runtime_debug.get("shield_triggered", False)):
+                suggested_action = "shield_hold"
+                status = "shield_hold"
+            elif abs(yaw_error_deg) > max(10.0, float(self.args.yaw_step_deg) * 1.5):
+                suggested_action = "yaw_left" if yaw_error_deg < 0.0 else "yaw_right"
+                should_execute = True
+            elif abs(vertical_error_cm) > max(10.0, float(self.args.vertical_step_cm) * 0.5):
+                suggested_action = "down" if vertical_error_cm < 0.0 else "up"
+                should_execute = True
+            elif waypoint_distance_cm > max(20.0, float(self.args.move_step_cm) * 0.75):
+                suggested_action = "forward"
+                should_execute = True
+            else:
+                suggested_action = "hold_position"
+                status = "waypoint_arrived"
+        elif bool(self.runtime_debug.get("shield_triggered", False)):
+            suggested_action = "shield_hold"
+            status = "shield_hold"
+            should_execute = True
+
+        return build_reflex_runtime_state(
+            mode="heuristic_stub",
+            policy_name=self.args.reflex_policy_name,
+            source="local_heuristic",
+            status=status,
+            suggested_action=suggested_action,
+            should_execute=should_execute,
+            last_trigger=trigger,
+            last_latency_ms=0.0,
+            waypoint_distance_cm=waypoint_distance_cm,
+            yaw_error_deg=yaw_error_deg,
+            vertical_error_cm=vertical_error_cm,
+            progress_to_waypoint_cm=progress_to_waypoint_cm,
+            retrieval_cell_id=str(active_retrieval.get("cell_id", "")),
+            retrieval_score=float(active_retrieval.get("retrieval_score", 0.0) or 0.0),
+            retrieval_semantic_subgoal=str(active_retrieval.get("semantic_subgoal", "")),
+            risk_score=float(self.runtime_debug.get("risk_score", 0.0)),
+            shield_triggered=bool(self.runtime_debug.get("shield_triggered", False)),
+        )
+
+    def request_reflex_policy(self, *, trigger: str = "manual_request", archive_snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        with self.lock:
+            archive_state = archive_snapshot if isinstance(archive_snapshot, dict) else self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            pose = self.get_task_pose()
+            current_waypoint = self.runtime_debug.get("current_waypoint")
+            reflex_started = datetime.now().timestamp()
+
+            if self.args.reflex_policy_url:
+                reflex_request = build_reflex_request(
+                    policy_name=self.args.reflex_policy_name,
+                    frame_id=self.last_observation_id,
+                    timestamp=self.last_observation_time,
+                    task_label=self.current_task_label or "idle",
+                    pose={
+                        "x": pose[0],
+                        "y": pose[1],
+                        "z": pose[2],
+                        "yaw": pose[3],
+                    },
+                    depth=self.last_depth_summary,
+                    plan=self.current_plan,
+                    current_waypoint=current_waypoint if isinstance(current_waypoint, dict) else None,
+                    archive=archive_state,
+                    runtime_debug=self.runtime_debug,
+                    context={
+                        "trigger": trigger,
+                        "movement_yaw_mode": self.args.movement_yaw_mode,
+                        "preview_mode": self.args.preview_mode,
+                    },
+                )
+                req = request.Request(
+                    f"{self.args.reflex_policy_url.rstrip('/')}{self.args.reflex_policy_endpoint}",
+                    data=json.dumps(reflex_request).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(req, timeout=self.args.reflex_policy_timeout_s) as resp:
+                        raw = json.loads(resp.read().decode("utf-8"))
+                    payload = raw.get("reflex_runtime") if isinstance(raw, dict) and isinstance(raw.get("reflex_runtime"), dict) else raw
+                    self.reflex_runtime = coerce_reflex_runtime_payload(
+                        payload,
+                        default_mode="external_policy_stub",
+                        default_policy_name=self.args.reflex_policy_name,
+                        default_source="external",
+                    )
+                    self.reflex_runtime["last_trigger"] = trigger
+                    self.reflex_runtime["last_latency_ms"] = round((datetime.now().timestamp() - reflex_started) * 1000.0, 2)
+                    return self.reflex_runtime
+                except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+                    logger.warning("Reflex policy request failed, fallback to heuristic reflex runtime: %s", exc)
+                    fallback = self.build_heuristic_reflex_runtime(archive_state, trigger=trigger)
+                    fallback["source"] = "external_error"
+                    fallback["status"] = "fallback" if fallback.get("status") == "idle" else fallback.get("status")
+                    fallback["last_latency_ms"] = round((datetime.now().timestamp() - reflex_started) * 1000.0, 2)
+                    self.reflex_runtime = fallback
+                    return self.reflex_runtime
+
+            self.reflex_runtime = self.build_heuristic_reflex_runtime(archive_state, trigger=trigger)
+            return self.reflex_runtime
+
+    def sync_reflex_runtime(self, archive_snapshot: Optional[Dict[str, Any]] = None, *, trigger: str = "sync") -> Dict[str, Any]:
+        self.reflex_runtime = self.build_heuristic_reflex_runtime(archive_snapshot, trigger=trigger)
+        return self.reflex_runtime
 
     def get_state(self) -> Dict[str, Any]:
         with self.lock:
             task_pose = self.get_task_pose()
             env_yaw = self.get_env_yaw_deg()
             control_yaw = self.get_control_yaw_deg()
+            archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            if not self.should_preserve_reflex_runtime():
+                self.sync_reflex_runtime(archive_state, trigger="state_refresh")
             return {
                 "status": "ok",
                 "env_id": self.args.env_id,
@@ -623,6 +853,8 @@ class UAVControlBackend:
                 "camera_info": self.last_depth_summary.get("camera_info", {}),
                 "plan": self.current_plan,
                 "planner_runtime": self.plan_execution_state,
+                "archive": archive_state,
+                "reflex_runtime": self.reflex_runtime,
                 "last_plan_request": {
                     "schema_version": self.last_plan_request.get("schema_version", ""),
                     "trigger": self.last_plan_request.get("trigger", ""),
@@ -661,6 +893,7 @@ class UAVControlBackend:
                 "up_cm": float(up_cm),
                 "yaw_delta_deg": float(yaw_delta_deg),
             }
+            self.sync_archive_runtime()
             auto_plan: Optional[Dict[str, Any]] = None
             if self.should_auto_request_plan():
                 auto_plan = self.request_plan(trigger="step_interval")
@@ -670,6 +903,15 @@ class UAVControlBackend:
                     self.plan_execution_state.get("next_auto_trigger_step", 0),
                     auto_plan.get("planner_name", "n/a") if isinstance(auto_plan, dict) else "n/a",
                     auto_plan.get("semantic_subgoal", "idle") if isinstance(auto_plan, dict) else "idle",
+                )
+            if self.args.reflex_auto_mode == "on_move":
+                reflex_runtime = self.request_reflex_policy(trigger="on_move")
+                logger.info(
+                    "Auto reflex policy updated at step=%s policy=%s source=%s suggested=%s",
+                    self.plan_execution_state.get("step_index", 0),
+                    reflex_runtime.get("policy_name", "n/a"),
+                    reflex_runtime.get("source", "unknown"),
+                    reflex_runtime.get("suggested_action", "idle"),
                 )
             actual_task_yaw_after = self.get_task_pose()[3]
             actual_uav_yaw_after = self.get_env_yaw_deg()
@@ -751,10 +993,22 @@ class UAVControlBackend:
                 json.dump(camera_info, f, indent=2)
 
             state = self.get_state()
+            reflex_sample = build_reflex_sample(
+                capture_id=capture_id,
+                task_label=self.current_task_label,
+                action_label=self.last_action,
+                pose=state["pose"],
+                current_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else None,
+                plan=self.current_plan,
+                archive=state.get("archive", {}),
+                reflex_runtime=self.reflex_runtime,
+                runtime_debug=self.runtime_debug,
+            )
             metadata = {
                 "capture_id": capture_id,
                 "capture_time": timestamp,
                 "env_id": self.args.env_id,
+                "dataset_schema_version": "phase3.capture_bundle.v1",
                 "task_label": self.current_task_label,
                 "action_label": self.last_action,
                 "rgb_image_path": image_path,
@@ -767,6 +1021,9 @@ class UAVControlBackend:
                 "camera_info": camera_info,
                 "plan": self.current_plan,
                 "runtime_debug": self.runtime_debug,
+                "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
+                "reflex_runtime": self.reflex_runtime,
+                "reflex_sample": reflex_sample,
                 "preview_mode": self.args.preview_mode,
                 "task_json": self.args.task_json,
                 "label": label,
@@ -797,6 +1054,9 @@ class UAVControlBackend:
                 "depth": self.last_depth_summary,
                 "camera_info": camera_info,
                 "plan": self.current_plan,
+                "archive": metadata["archive"],
+                "reflex_runtime": metadata["reflex_runtime"],
+                "reflex_sample": metadata["reflex_sample"],
             }
 
     def shutdown(self) -> Dict[str, Any]:
@@ -856,6 +1116,10 @@ def make_handler(backend: UAVControlBackend):
                     self._send_json({"status": "ok", "camera_info": backend.get_camera_info()})
                 elif parsed.path == "/plan":
                     self._send_json({"status": "ok", "plan": backend.current_plan})
+                elif parsed.path == "/archive":
+                    self._send_json({"status": "ok", "archive": backend.archive_runtime.get_state(limit=int(backend.args.archive_recent_limit))})
+                elif parsed.path == "/reflex":
+                    self._send_json({"status": "ok", "reflex_runtime": backend.reflex_runtime})
                 else:
                     self._send_json({"status": "error", "message": "Not found"}, 404)
             except Exception as exc:
@@ -890,6 +1154,9 @@ def make_handler(backend: UAVControlBackend):
                 elif parsed.path == "/request_plan":
                     plan = backend.request_plan(task_label=data.get("task_label"))
                     self._send_json({"status": "ok", "plan": plan})
+                elif parsed.path == "/request_reflex":
+                    reflex_runtime = backend.request_reflex_policy(trigger=str(data.get("trigger", "manual_request")))
+                    self._send_json({"status": "ok", "reflex_runtime": reflex_runtime})
                 elif parsed.path == "/runtime_debug":
                     debug_state = backend.update_runtime_debug(
                         current_waypoint=data.get("current_waypoint") if isinstance(data.get("current_waypoint"), dict) else None,
@@ -945,6 +1212,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview_pitch", type=float, default=-12.0, help="Third-person preview pitch")
     parser.add_argument("--preview_yaw", type=float, default=0.0, help="Third-person preview yaw offset")
     parser.add_argument("--movement_yaw_mode", default="task", choices=["task", "uav", "camera"], help="Yaw frame used by WASD translation")
+    parser.add_argument("--move_step_cm", type=float, default=20.0, help="Reference local translation step used by reflex heuristics")
+    parser.add_argument("--vertical_step_cm", type=float, default=20.0, help="Reference vertical step used by reflex heuristics")
+    parser.add_argument("--yaw_step_deg", type=float, default=5.0, help="Reference yaw step used by reflex heuristics")
     parser.add_argument("--frame_jpeg_quality", type=int, default=90, help="JPEG quality used by /frame and /depth_frame")
     parser.add_argument("--default_depth_fov_deg", type=float, default=90.0, help="Fallback FOV when UnrealCV returns malformed camera FOV")
     parser.add_argument("--depth_camera_frame_id", default="PX4/CameraDepth_optical", help="Frame id used in generated depth camera_info")
@@ -968,6 +1238,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--default_plan_distance_cm", type=float, default=300.0, help="Fallback heuristic waypoint distance")
     parser.add_argument("--default_waypoint_radius_cm", type=float, default=60.0, help="Fallback waypoint acceptance radius")
     parser.add_argument("--default_sector_count", type=int, default=8, help="Fallback discrete sector count")
+    parser.add_argument("--archive_pos_bin_cm", type=float, default=200.0, help="Quantization bin size for archive x/y/z")
+    parser.add_argument("--archive_yaw_bin_deg", type=float, default=30.0, help="Quantization bin size for archive yaw")
+    parser.add_argument("--archive_depth_bin_cm", type=float, default=100.0, help="Quantization bin size for archive depth signature")
+    parser.add_argument("--archive_recent_limit", type=int, default=6, help="How many recent archive cells to expose")
+    parser.add_argument("--archive_retrieval_limit", type=int, default=3, help="How many archive candidates to include in planner context")
+    parser.add_argument("--risk_near_cm", type=float, default=250.0, help="Distance threshold used for heuristic collision risk estimation")
+    parser.add_argument("--shield_risk_threshold", type=float, default=0.85, help="Heuristic shield trigger threshold for runtime debug")
+    parser.add_argument("--reflex_policy_name", default="phase3-reflex", help="Policy name stored in reflex runtime state")
+    parser.add_argument("--reflex_policy_url", default=None, help="Optional external reflex policy base URL")
+    parser.add_argument("--reflex_policy_endpoint", default="/reflex_policy", help="Reflex policy endpoint path used with reflex_policy_url")
+    parser.add_argument("--reflex_policy_timeout_s", type=float, default=3.0, help="Timeout for reflex policy requests")
+    parser.add_argument("--reflex_auto_mode", default="manual", choices=["manual", "on_move"], help="manual=only request reflex on /request_reflex, on_move=refresh reflex state after each move")
     parser.add_argument("--task_json", default=None, help="Optional task JSON used to place the UAV and target")
     parser.add_argument("--spawn_x", type=float, default=None, help="Optional UAV spawn x")
     parser.add_argument("--spawn_y", type=float, default=None, help="Optional UAV spawn y")

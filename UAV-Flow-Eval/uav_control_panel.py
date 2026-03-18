@@ -73,11 +73,13 @@ class UAVControlPanel:
         self.client = RemoteControlClient(f"http://{args.host}:{args.port}", args.timeout_s)
         self.root = tk.Tk()
         self.root.title("UAV Remote Control Panel")
-        self.root.geometry("700x390")
+        self.root.geometry("760x470")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.status_var = tk.StringVar(value="Connecting...")
         self.depth_var = tk.StringVar(value="Depth: waiting...")
         self.plan_var = tk.StringVar(value="Plan: idle")
+        self.archive_var = tk.StringVar(value="Archive: idle")
+        self.reflex_var = tk.StringVar(value="Reflex: idle")
         self.last_state: Optional[Dict[str, Any]] = None
         self.preview_window: Optional[tk.Toplevel] = None
         self.preview_label: Optional[tk.Label] = None
@@ -157,6 +159,11 @@ class UAVControlPanel:
                 self.plan_var.set(self.format_plan_summary(result["plan"]))
             self.update_state_once()
 
+    def request_reflex(self) -> None:
+        result = self.safe_request(self.client.post_json, "/request_reflex", {"trigger": "manual_request"})
+        if result:
+            self.update_state_once()
+
     def shutdown_server(self) -> None:
         result = self.safe_request(self.client.post_json, "/shutdown", {})
         if result:
@@ -176,6 +183,13 @@ class UAVControlPanel:
             f"wp={waypoint_text}"
         )
 
+    @staticmethod
+    def shorten_cell_id(cell_id: str, limit: int = 52) -> str:
+        text = str(cell_id or "")
+        if len(text) <= limit:
+            return text
+        return f"{text[:24]}...{text[-18:]}"
+
     def update_status_from_state(self, state: Dict[str, Any]) -> None:
         pose = state.get("pose", {})
         depth = state.get("depth", {})
@@ -183,6 +197,16 @@ class UAVControlPanel:
         runtime_debug = state.get("runtime_debug", {})
         plan = state.get("plan", {})
         planner_runtime = state.get("planner_runtime", {})
+        archive = state.get("archive", {})
+        reflex_runtime = state.get("reflex_runtime", {})
+        archive_current = archive.get("current_cell") if isinstance(archive.get("current_cell"), dict) else {}
+        archive_candidates = archive.get("top_cells") or []
+        archive_hint = "none"
+        if archive_candidates:
+            archive_hint = ",".join(
+                self.shorten_cell_id(str(item.get("cell_id", "")), limit=18)
+                for item in archive_candidates[:2]
+            )
         self.status_var.set(
             "Pose "
             f"x={pose.get('x', 0.0):.1f} "
@@ -217,6 +241,29 @@ class UAVControlPanel:
             )
         else:
             self.plan_var.set("Plan: idle")
+        self.archive_var.set(
+            "Archive "
+            f"cell={self.shorten_cell_id(str(runtime_debug.get('archive_cell_id', archive.get('current_cell_id', '')))) or 'none'} "
+            f"visits={int(archive_current.get('visit_count', 0))} "
+            f"cells={int(archive.get('cell_count', 0))} "
+            f"transitions={int(archive.get('transition_count', 0))} "
+            f"recent={len(archive.get('recent_cell_ids', [])) if isinstance(archive.get('recent_cell_ids'), list) else 0} "
+            f"hint={archive_hint}"
+        )
+        self.reflex_var.set(
+            "Reflex "
+            f"mode={reflex_runtime.get('mode', 'n/a')} "
+            f"policy={reflex_runtime.get('policy_name', 'n/a')} "
+            f"source={reflex_runtime.get('source', 'n/a')} "
+            f"status={reflex_runtime.get('status', 'idle')} "
+            f"suggested={reflex_runtime.get('suggested_action', 'idle')} "
+            f"exec={int(bool(reflex_runtime.get('should_execute', False)))} "
+            f"lat={float(reflex_runtime.get('last_latency_ms', 0.0)):.1f}ms "
+            f"wp_dist={float(reflex_runtime.get('waypoint_distance_cm', 0.0)):.1f} "
+            f"yaw_err={float(reflex_runtime.get('yaw_error_deg', 0.0)):.1f} "
+            f"progress={float(reflex_runtime.get('progress_to_waypoint_cm', 0.0)):.1f} "
+            f"retrieval={self.shorten_cell_id(str(reflex_runtime.get('retrieval_cell_id', '')), limit=18) or 'none'}"
+        )
 
     def update_state_once(self) -> None:
         state = self.safe_request(self.client.get_json, "/state")
@@ -274,6 +321,7 @@ class UAVControlPanel:
             "e": lambda: self.send_move(yaw_delta_deg=self.args.yaw_step_deg, action_name="yaw_right(E)"),
             "c": self.capture,
             "p": self.request_plan,
+            "t": self.request_reflex,
             "v": lambda: (self.update_preview_once(), self.update_depth_once()),
         }
         for key, callback in bindings.items():
@@ -299,7 +347,7 @@ class UAVControlPanel:
 
         header = tk.Label(
             self.root,
-            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan",
+            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan, T request reflex",
             anchor="w",
             justify="left",
         )
@@ -312,7 +360,13 @@ class UAVControlPanel:
         depth_status.pack(fill="x", padx=12, pady=(0, 6))
 
         plan_status = tk.Label(self.root, textvariable=self.plan_var, anchor="w", justify="left")
-        plan_status.pack(fill="x", padx=12, pady=(0, 10))
+        plan_status.pack(fill="x", padx=12, pady=(0, 6))
+
+        archive_status = tk.Label(self.root, textvariable=self.archive_var, anchor="w", justify="left")
+        archive_status.pack(fill="x", padx=12, pady=(0, 10))
+
+        reflex_status = tk.Label(self.root, textvariable=self.reflex_var, anchor="w", justify="left")
+        reflex_status.pack(fill="x", padx=12, pady=(0, 10))
 
         task_frame = tk.Frame(self.root)
         task_frame.pack(fill="x", padx=12, pady=(0, 8))
@@ -324,6 +378,7 @@ class UAVControlPanel:
         tk.Label(task_frame, text="Capture Label").grid(row=1, column=0, sticky="w", pady=(8, 0))
         tk.Entry(task_frame, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
         tk.Button(task_frame, text="Request Plan", command=self.request_plan, width=14).grid(row=1, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="Request Reflex", command=self.request_reflex, width=14).grid(row=2, column=2, sticky="ew", pady=(8, 0))
         task_frame.grid_columnconfigure(1, weight=1)
 
         task_help = tk.Label(
@@ -331,7 +386,8 @@ class UAVControlPanel:
             text=(
                 "Task Label: current semantic task for planner and capture metadata. "
                 "Capture Label: one-shot note/suffix for the next saved sample. "
-                "Capture saves RGB + depth together."
+                "Capture saves RGB + depth together. "
+                "Request Reflex refreshes the local policy suggestion state."
             ),
             anchor="w",
             justify="left",
@@ -352,6 +408,7 @@ class UAVControlPanel:
             ("Yaw Right (E)", lambda: self.send_move(yaw_delta_deg=self.args.yaw_step_deg, action_name="yaw_right(E)")),
             ("Capture (C)", self.capture),
             ("Request Plan (P)", self.request_plan),
+            ("Request Reflex (T)", self.request_reflex),
             ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
             ("Shutdown Server", self.shutdown_server),
         ]
