@@ -34,6 +34,7 @@ from batch_run_act_all import (
 from gym_unrealcv.envs.wrappers import augmentation, configUE, time_dilation
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
 from runtime_interfaces import build_plan_state, build_runtime_debug_state, build_waypoint, now_timestamp
+from runtime_interfaces import build_plan_request, coerce_plan_payload
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,21 @@ class UAVControlBackend:
             planner_name=args.planner_name,
             semantic_subgoal="idle",
         )
+        self.last_plan_request: Dict[str, Any] = {}
+        self.plan_execution_state: Dict[str, Any] = {
+            "planner_status": "idle",
+            "planner_source": "none",
+            "last_trigger": "startup",
+            "request_count": 0,
+            "auto_request_count": 0,
+            "last_latency_ms": 0.0,
+            "last_error": "",
+            "step_index": 0,
+            "auto_mode": args.planner_auto_mode,
+            "auto_interval_steps": int(args.planner_interval_steps),
+            "next_auto_trigger_step": 1 if args.planner_auto_mode == "k_step" else 0,
+            "last_auto_trigger_step": 0,
+        }
         self.runtime_debug: Dict[str, Any] = build_runtime_debug_state()
 
         os.makedirs(self.args.capture_dir, exist_ok=True)
@@ -411,36 +427,18 @@ class UAVControlBackend:
         return {"status": "ok", "task_label": self.current_task_label}
 
     def set_plan_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        candidate_waypoints_raw = payload.get("candidate_waypoints") or []
-        candidate_waypoints: List[Dict[str, Any]] = []
-        for waypoint in candidate_waypoints_raw:
-            if not isinstance(waypoint, dict):
-                continue
-            candidate_waypoints.append(
-                build_waypoint(
-                    waypoint.get("x", 0.0),
-                    waypoint.get("y", 0.0),
-                    waypoint.get("z", 0.0),
-                    waypoint.get("yaw", 0.0),
-                    waypoint.get("radius", 50.0),
-                    str(waypoint.get("semantic_label", "")),
-                )
-            )
-        self.current_plan = build_plan_state(
-            plan_id=str(payload.get("plan_id", f"plan_{self.last_observation_id}")),
-            planner_name=str(payload.get("planner_name", self.args.planner_name)),
-            generated_at=str(payload.get("generated_at", now_timestamp())),
-            sector_id=payload.get("sector_id"),
-            candidate_waypoints=candidate_waypoints,
-            semantic_subgoal=str(payload.get("semantic_subgoal", "idle")),
-            planner_confidence=float(payload.get("planner_confidence", 0.0)),
-            should_replan=bool(payload.get("should_replan", False)),
-            debug=payload.get("debug") if isinstance(payload.get("debug"), dict) else {},
+        self.current_plan = coerce_plan_payload(
+            payload,
+            default_plan_id=f"plan_{self.last_observation_id}",
+            default_planner_name=self.args.planner_name,
+            default_semantic_subgoal="idle",
+            default_radius=self.args.default_waypoint_radius_cm,
         )
+        candidate_waypoints = self.current_plan.get("candidate_waypoints") or []
         self.runtime_debug["current_waypoint"] = candidate_waypoints[0] if candidate_waypoints else None
         return self.current_plan
 
-    def request_plan(self, task_label: Optional[str] = None) -> Dict[str, Any]:
+    def request_plan(self, task_label: Optional[str] = None, trigger: str = "manual_request") -> Dict[str, Any]:
         with self.lock:
             if task_label is not None:
                 self.set_task_label(task_label)
@@ -448,23 +446,34 @@ class UAVControlBackend:
             pose = self.get_task_pose()
             task_label_value = self.current_task_label or "idle"
             plan_payload: Optional[Dict[str, Any]] = None
+            planner_started = datetime.now().timestamp()
+            self.plan_execution_state["request_count"] = int(self.plan_execution_state.get("request_count", 0)) + 1
+            self.plan_execution_state["last_trigger"] = trigger
 
             if self.args.planner_url:
-                planner_request = {
-                    "task_label": task_label_value,
-                    "instruction": task_label_value,
-                    "frame_id": self.last_observation_id,
-                    "timestamp": self.last_observation_time,
-                    "pose": {
+                planner_request = build_plan_request(
+                    task_label=task_label_value,
+                    instruction=task_label_value,
+                    frame_id=self.last_observation_id,
+                    timestamp=self.last_observation_time,
+                    pose={
                         "x": pose[0],
                         "y": pose[1],
                         "z": pose[2],
                         "yaw": pose[3],
                     },
-                    "depth": self.last_depth_summary,
-                    "camera_info": self.last_depth_summary.get("camera_info", {}),
-                    "image_b64": encode_image_b64(frame, self.args.frame_jpeg_quality),
-                }
+                    depth=self.last_depth_summary,
+                    camera_info=self.last_depth_summary.get("camera_info", {}),
+                    image_b64=encode_image_b64(frame, self.args.frame_jpeg_quality),
+                    planner_name=self.args.planner_name,
+                    trigger=trigger,
+                    step_index=int(self.plan_execution_state.get("step_index", 0)),
+                    context={
+                        "movement_yaw_mode": self.args.movement_yaw_mode,
+                        "preview_mode": self.args.preview_mode,
+                    },
+                )
+                self.last_plan_request = planner_request
                 req = request.Request(
                     f"{self.args.planner_url.rstrip('/')}{self.args.planner_endpoint}",
                     data=json.dumps(planner_request).encode("utf-8"),
@@ -476,13 +485,29 @@ class UAVControlBackend:
                         raw = json.loads(resp.read().decode("utf-8"))
                     if isinstance(raw, dict):
                         plan_payload = raw.get("plan") if isinstance(raw.get("plan"), dict) else raw
+                        self.plan_execution_state.update(
+                            {
+                                "planner_status": "ok",
+                                "planner_source": "external",
+                                "last_trigger": trigger,
+                                "last_error": "",
+                            }
+                        )
                 except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+                    self.plan_execution_state.update(
+                        {
+                            "planner_status": "fallback",
+                            "planner_source": "external_error",
+                            "last_trigger": trigger,
+                            "last_error": str(exc),
+                        }
+                    )
                     logger.warning("Planner request failed, falling back to heuristic plan: %s", exc)
 
             if plan_payload is None:
                 move_yaw = self.get_control_yaw_deg()
                 theta = np.radians(move_yaw)
-                waypoint = build_waypoint(
+                primary_waypoint = build_waypoint(
                     x=pose[0] + self.args.default_plan_distance_cm * float(np.cos(theta)),
                     y=pose[1] + self.args.default_plan_distance_cm * float(np.sin(theta)),
                     z=pose[2],
@@ -490,21 +515,60 @@ class UAVControlBackend:
                     radius=self.args.default_waypoint_radius_cm,
                     semantic_label=task_label_value or "forward_search",
                 )
+                secondary_waypoint = build_waypoint(
+                    x=pose[0] + (self.args.default_plan_distance_cm * 0.6) * float(np.cos(theta)),
+                    y=pose[1] + (self.args.default_plan_distance_cm * 0.6) * float(np.sin(theta)),
+                    z=pose[2],
+                    yaw=move_yaw,
+                    radius=self.args.default_waypoint_radius_cm,
+                    semantic_label="staging_waypoint",
+                )
                 plan_payload = build_plan_state(
                     plan_id=f"plan_{self.last_observation_id}",
                     planner_name="heuristic_fallback",
                     sector_id=int(round(((move_yaw % 360.0) / 360.0) * self.args.default_sector_count)) % self.args.default_sector_count,
-                    candidate_waypoints=[waypoint],
+                    candidate_waypoints=[primary_waypoint, secondary_waypoint],
                     semantic_subgoal=task_label_value or "move_forward",
                     planner_confidence=0.35,
                     should_replan=False,
                     debug={
                         "source": "local_heuristic",
                         "planner_interval_steps": self.args.planner_interval_steps,
+                        "trigger": trigger,
+                        "step_index": int(self.plan_execution_state.get("step_index", 0)),
                     },
                 )
+                if self.plan_execution_state.get("planner_status") != "ok":
+                    self.plan_execution_state.update(
+                        {
+                            "planner_status": "fallback",
+                            "planner_source": "local_heuristic",
+                            "last_trigger": trigger,
+                        }
+                    )
 
-            return self.set_plan_state(plan_payload)
+            self.plan_execution_state["last_latency_ms"] = round((datetime.now().timestamp() - planner_started) * 1000.0, 2)
+            if trigger != "manual_request":
+                self.plan_execution_state["auto_request_count"] = int(self.plan_execution_state.get("auto_request_count", 0)) + 1
+                self.plan_execution_state["last_auto_trigger_step"] = int(self.plan_execution_state.get("step_index", 0))
+                self.plan_execution_state["next_auto_trigger_step"] = int(self.plan_execution_state.get("step_index", 0)) + max(
+                    1, int(self.args.planner_interval_steps)
+                )
+            self.current_plan = self.set_plan_state(plan_payload)
+            return self.current_plan
+
+    def should_auto_request_plan(self) -> bool:
+        """Return True if the sparse planner should be auto-triggered now."""
+        if self.args.planner_auto_mode != "k_step":
+            return False
+        interval = max(1, int(self.args.planner_interval_steps))
+        next_trigger_step = int(self.plan_execution_state.get("next_auto_trigger_step", 1))
+        step_index = int(self.plan_execution_state.get("step_index", 0))
+        if next_trigger_step <= 0:
+            next_trigger_step = 1
+            self.plan_execution_state["next_auto_trigger_step"] = next_trigger_step
+        self.plan_execution_state["auto_interval_steps"] = interval
+        return step_index >= next_trigger_step
 
     def update_runtime_debug(
         self,
@@ -558,6 +622,14 @@ class UAVControlBackend:
                 "depth": self.last_depth_summary,
                 "camera_info": self.last_depth_summary.get("camera_info", {}),
                 "plan": self.current_plan,
+                "planner_runtime": self.plan_execution_state,
+                "last_plan_request": {
+                    "schema_version": self.last_plan_request.get("schema_version", ""),
+                    "trigger": self.last_plan_request.get("trigger", ""),
+                    "step_index": self.last_plan_request.get("step_index", 0),
+                    "task_label": self.last_plan_request.get("task_label", ""),
+                    "frame_id": self.last_plan_request.get("frame_id", ""),
+                },
                 "runtime_debug": self.runtime_debug,
                 "last_capture": self.last_capture,
             }
@@ -581,6 +653,7 @@ class UAVControlBackend:
             self.set_task_pose(new_pos, self.command_task_yaw_deg)
             self.invalidate_cached_observations()
             self.last_action = action_name
+            self.plan_execution_state["step_index"] = int(self.plan_execution_state.get("step_index", 0)) + 1
             self.runtime_debug["local_policy_action"] = {
                 "action_name": action_name,
                 "forward_cm": float(forward_cm),
@@ -588,6 +661,16 @@ class UAVControlBackend:
                 "up_cm": float(up_cm),
                 "yaw_delta_deg": float(yaw_delta_deg),
             }
+            auto_plan: Optional[Dict[str, Any]] = None
+            if self.should_auto_request_plan():
+                auto_plan = self.request_plan(trigger="step_interval")
+                logger.info(
+                    "Auto planner triggered at step=%s next_trigger_step=%s planner=%s subgoal=%s",
+                    self.plan_execution_state.get("step_index", 0),
+                    self.plan_execution_state.get("next_auto_trigger_step", 0),
+                    auto_plan.get("planner_name", "n/a") if isinstance(auto_plan, dict) else "n/a",
+                    auto_plan.get("semantic_subgoal", "idle") if isinstance(auto_plan, dict) else "idle",
+                )
             actual_task_yaw_after = self.get_task_pose()[3]
             actual_uav_yaw_after = self.get_env_yaw_deg()
             logger.info(
@@ -875,6 +958,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner_url", default=None, help="Optional external planner base URL")
     parser.add_argument("--planner_endpoint", default="/plan", help="Planner endpoint path used with planner_url")
     parser.add_argument("--planner_timeout_s", type=float, default=5.0, help="Timeout for planner requests")
+    parser.add_argument(
+        "--planner_auto_mode",
+        default="manual",
+        choices=["manual", "k_step"],
+        help="manual=only request plan on /request_plan, k_step=auto request every K local control steps",
+    )
     parser.add_argument("--planner_interval_steps", type=int, default=5, help="Target replan interval for debug/metadata")
     parser.add_argument("--default_plan_distance_cm", type=float, default=300.0, help="Fallback heuristic waypoint distance")
     parser.add_argument("--default_waypoint_radius_cm", type=float, default=60.0, help="Fallback waypoint acceptance radius")

@@ -169,7 +169,8 @@ class UAVControlPanel:
             wp = waypoints[0]
             waypoint_text = f"({wp.get('x', 0.0):.0f}, {wp.get('y', 0.0):.0f}, {wp.get('z', 0.0):.0f})"
         return (
-            f"Plan subgoal={plan.get('semantic_subgoal', 'idle')} "
+            f"Plan planner={plan.get('planner_name', 'n/a')} "
+            f"subgoal={plan.get('semantic_subgoal', 'idle')} "
             f"sector={plan.get('sector_id', '-')} "
             f"conf={plan.get('planner_confidence', 0.0):.2f} "
             f"wp={waypoint_text}"
@@ -181,6 +182,7 @@ class UAVControlPanel:
         camera_info = state.get("camera_info", depth.get("camera_info", {}))
         runtime_debug = state.get("runtime_debug", {})
         plan = state.get("plan", {})
+        planner_runtime = state.get("planner_runtime", {})
         self.status_var.set(
             "Pose "
             f"x={pose.get('x', 0.0):.1f} "
@@ -203,7 +205,18 @@ class UAVControlPanel:
             f"fx={float((camera_info.get('k') or [0.0])[0]):.1f} "
             f"pipe={depth.get('pipeline', depth.get('source_mode', 'n/a'))}"
         )
-        self.plan_var.set(self.format_plan_summary(plan) if plan else "Plan: idle")
+        if plan:
+            self.plan_var.set(
+                f"{self.format_plan_summary(plan)} | "
+                f"status={planner_runtime.get('planner_status', 'idle')} "
+                f"source={planner_runtime.get('planner_source', 'none')} "
+                f"trigger={planner_runtime.get('last_trigger', 'n/a')} "
+                f"latency={float(planner_runtime.get('last_latency_ms', 0.0)):.1f}ms "
+                f"auto={planner_runtime.get('auto_mode', 'manual')} "
+                f"next={planner_runtime.get('next_auto_trigger_step', 0)}"
+            )
+        else:
+            self.plan_var.set("Plan: idle")
 
     def update_state_once(self) -> None:
         state = self.safe_request(self.client.get_json, "/state")
