@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import tkinter as tk
+import tkinter.font as tkfont
 from typing import Any, Dict, Optional
 from urllib import error, request
 
@@ -73,8 +74,11 @@ class UAVControlPanel:
         self.client = RemoteControlClient(f"http://{args.host}:{args.port}", args.timeout_s)
         self.root = tk.Tk()
         self.root.title("UAV Remote Control Panel")
-        self.root.geometry("760x760")
+        self.root.geometry("920x780")
+        self.root.minsize(780, 620)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.status_font = tkfont.nametofont("TkFixedFont").copy()
+        self.status_font.configure(size=10)
         self.status_var = tk.StringVar(value="Connecting...")
         self.depth_var = tk.StringVar(value="Depth: waiting...")
         self.plan_var = tk.StringVar(value="Plan: idle")
@@ -91,6 +95,9 @@ class UAVControlPanel:
         self.depth_window: Optional[tk.Toplevel] = None
         self.depth_label: Optional[tk.Label] = None
         self.depth_photo: Optional[ImageTk.PhotoImage] = None
+        self.scroll_canvas: Optional[tk.Canvas] = None
+        self.scroll_content: Optional[tk.Frame] = None
+        self.scroll_window_id: Optional[int] = None
         self.task_label_var = tk.StringVar(value=args.default_task_label)
         self.capture_label_var = tk.StringVar(value="")
         self.takeover_note_var = tk.StringVar(value="")
@@ -263,6 +270,56 @@ class UAVControlPanel:
         if len(text) <= limit:
             return text
         return f"{text[:24]}...{text[-18:]}"
+
+    def adjust_status_font(self, delta: int) -> None:
+        current_size = int(self.status_font.cget("size"))
+        next_size = max(8, min(16, current_size + delta))
+        self.status_font.configure(size=next_size)
+
+    def _scroll_canvas_by(self, delta_units: int) -> None:
+        if self.scroll_canvas is not None:
+            self.scroll_canvas.yview_scroll(delta_units, "units")
+
+    def on_mousewheel(self, event: tk.Event) -> None:
+        delta = getattr(event, "delta", 0)
+        if delta:
+            steps = int(-delta / 120)
+            if steps == 0:
+                steps = -1 if delta > 0 else 1
+            self._scroll_canvas_by(steps)
+
+    def on_mousewheel_linux_up(self, _event: tk.Event) -> None:
+        self._scroll_canvas_by(-1)
+
+    def on_mousewheel_linux_down(self, _event: tk.Event) -> None:
+        self._scroll_canvas_by(1)
+
+    def refresh_scroll_region(self, _event: Optional[tk.Event] = None) -> None:
+        if self.scroll_canvas is not None:
+            self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+
+    def resize_scroll_content(self, event: tk.Event) -> None:
+        if self.scroll_canvas is not None and self.scroll_window_id is not None:
+            self.scroll_canvas.itemconfigure(self.scroll_window_id, width=event.width)
+
+    def build_status_label(self, parent: tk.Widget, textvariable: tk.StringVar) -> tk.Label:
+        label = tk.Label(
+            parent,
+            textvariable=textvariable,
+            anchor="w",
+            justify="left",
+            font=self.status_font,
+            padx=8,
+            pady=6,
+            relief="groove",
+            borderwidth=1,
+        )
+        label.pack(fill="x", pady=(0, 6))
+        label.bind(
+            "<Configure>",
+            lambda event, widget=label: widget.configure(wraplength=max(320, event.width - 16)),
+        )
+        return label
 
     def update_status_from_state(self, state: Dict[str, Any]) -> None:
         pose = state.get("pose", {})
@@ -495,86 +552,119 @@ class UAVControlPanel:
             self.depth_window.protocol("WM_DELETE_WINDOW", self.on_close)
             self.depth_label = tk.Label(self.depth_window)
             self.depth_label.pack(fill="both", expand=True)
+        canvas_frame = tk.Frame(self.root)
+        canvas_frame.pack(fill="both", expand=True)
+        self.scroll_canvas = tk.Canvas(canvas_frame, highlightthickness=0)
+        scrollbar = tk.Scrollbar(canvas_frame, orient="vertical", command=self.scroll_canvas.yview)
+        self.scroll_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.scroll_canvas.pack(side="left", fill="both", expand=True)
+        self.scroll_content = tk.Frame(self.scroll_canvas)
+        self.scroll_window_id = self.scroll_canvas.create_window((0, 0), window=self.scroll_content, anchor="nw")
+        self.scroll_content.bind("<Configure>", self.refresh_scroll_region)
+        self.scroll_canvas.bind("<Configure>", self.resize_scroll_content)
+        self.root.bind_all("<MouseWheel>", self.on_mousewheel)
+        self.root.bind_all("<Button-4>", self.on_mousewheel_linux_up)
+        self.root.bind_all("<Button-5>", self.on_mousewheel_linux_down)
+        content = self.scroll_content
 
         header = tk.Label(
-            self.root,
+            content,
             text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan, T request reflex, Y execute reflex, U start takeover, I end takeover, G suspect, H confirm person, J reject person, O reset evidence",
             anchor="w",
             justify="left",
+            wraplength=860,
         )
         header.pack(fill="x", padx=12, pady=(10, 6))
 
-        status = tk.Label(self.root, textvariable=self.status_var, anchor="w", justify="left")
-        status.pack(fill="x", padx=12, pady=(0, 10))
+        status_frame = tk.LabelFrame(content, text="Runtime Status", padx=10, pady=8)
+        status_frame.pack(fill="x", padx=12, pady=(0, 10))
+        status_toolbar = tk.Frame(status_frame)
+        status_toolbar.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            status_toolbar,
+            text="Use scroll to inspect long status blocks. Zoom changes the status text size only.",
+            anchor="w",
+            justify="left",
+        ).pack(side="left", fill="x", expand=True)
+        tk.Button(status_toolbar, text="A-", width=4, command=lambda: self.adjust_status_font(-1)).pack(side="right")
+        tk.Button(status_toolbar, text="A+", width=4, command=lambda: self.adjust_status_font(1)).pack(side="right", padx=(0, 6))
 
-        depth_status = tk.Label(self.root, textvariable=self.depth_var, anchor="w", justify="left")
-        depth_status.pack(fill="x", padx=12, pady=(0, 6))
+        self.build_status_label(status_frame, self.status_var)
+        self.build_status_label(status_frame, self.depth_var)
+        self.build_status_label(status_frame, self.plan_var)
+        self.build_status_label(status_frame, self.mission_var)
+        self.build_status_label(status_frame, self.evidence_var)
+        self.build_status_label(status_frame, self.archive_var)
+        self.build_status_label(status_frame, self.reflex_var)
+        self.build_status_label(status_frame, self.executor_var)
+        self.build_status_label(status_frame, self.takeover_var)
 
-        plan_status = tk.Label(self.root, textvariable=self.plan_var, anchor="w", justify="left")
-        plan_status.pack(fill="x", padx=12, pady=(0, 6))
-
-        mission_status = tk.Label(self.root, textvariable=self.mission_var, anchor="w", justify="left")
-        mission_status.pack(fill="x", padx=12, pady=(0, 6))
-
-        evidence_status = tk.Label(self.root, textvariable=self.evidence_var, anchor="w", justify="left")
-        evidence_status.pack(fill="x", padx=12, pady=(0, 6))
-
-        archive_status = tk.Label(self.root, textvariable=self.archive_var, anchor="w", justify="left")
-        archive_status.pack(fill="x", padx=12, pady=(0, 10))
-
-        reflex_status = tk.Label(self.root, textvariable=self.reflex_var, anchor="w", justify="left")
-        reflex_status.pack(fill="x", padx=12, pady=(0, 10))
-
-        executor_status = tk.Label(self.root, textvariable=self.executor_var, anchor="w", justify="left")
-        executor_status.pack(fill="x", padx=12, pady=(0, 10))
-
-        takeover_status = tk.Label(self.root, textvariable=self.takeover_var, anchor="w", justify="left")
-        takeover_status.pack(fill="x", padx=12, pady=(0, 10))
-
-        task_frame = tk.Frame(self.root)
-        task_frame.pack(fill="x", padx=12, pady=(0, 8))
-
-        tk.Label(task_frame, text="Task Label").grid(row=0, column=0, sticky="w")
-        tk.Entry(task_frame, textvariable=self.task_label_var).grid(row=0, column=1, sticky="ew", padx=(8, 8))
-        tk.Button(task_frame, text="Set Task", command=self.set_task_label, width=14).grid(row=0, column=2, sticky="ew")
-
-        tk.Label(task_frame, text="Capture Label").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        tk.Entry(task_frame, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
-        tk.Button(task_frame, text="Request Plan", command=self.request_plan, width=14).grid(row=1, column=2, sticky="ew", pady=(8, 0))
-        tk.Label(task_frame, text="Takeover Note").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        tk.Entry(task_frame, textvariable=self.takeover_note_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
-        tk.Button(task_frame, text="Request Reflex", command=self.request_reflex, width=14).grid(row=2, column=2, sticky="ew", pady=(8, 0))
-        tk.Label(task_frame, text="Evidence Note").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        tk.Entry(task_frame, textvariable=self.evidence_note_var).grid(row=3, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
-        tk.Button(task_frame, text="Execute Reflex", command=self.execute_reflex, width=14).grid(row=3, column=2, sticky="ew", pady=(8, 0))
-        tk.Button(task_frame, text="Start Takeover", command=self.start_takeover, width=14).grid(row=4, column=2, sticky="ew", pady=(8, 0))
-        tk.Button(task_frame, text="End Takeover", command=self.end_takeover, width=14).grid(row=5, column=2, sticky="ew", pady=(8, 0))
-        tk.Button(task_frame, text="Mark Suspect", command=self.mark_suspect, width=14).grid(row=6, column=2, sticky="ew", pady=(8, 0))
-        tk.Button(task_frame, text="Confirm Person", command=self.confirm_person, width=14).grid(row=7, column=2, sticky="ew", pady=(8, 0))
-        tk.Button(task_frame, text="Reject Person", command=self.reject_person, width=14).grid(row=8, column=2, sticky="ew", pady=(8, 0))
-        tk.Button(task_frame, text="Reset Evidence", command=self.reset_evidence, width=14).grid(row=9, column=2, sticky="ew", pady=(8, 0))
-        task_frame.grid_columnconfigure(1, weight=1)
+        mission_frame = tk.LabelFrame(content, text="Mission And Notes", padx=10, pady=8)
+        mission_frame.pack(fill="x", padx=12, pady=(0, 8))
+        tk.Label(mission_frame, text="Task Label").grid(row=0, column=0, sticky="w")
+        tk.Entry(mission_frame, textvariable=self.task_label_var).grid(row=0, column=1, sticky="ew", padx=(8, 10))
+        tk.Label(mission_frame, text="Capture Label").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(mission_frame, textvariable=self.capture_label_var).grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=(8, 10),
+            pady=(8, 0),
+        )
+        tk.Label(mission_frame, text="Takeover Note").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(mission_frame, textvariable=self.takeover_note_var).grid(
+            row=2,
+            column=1,
+            sticky="ew",
+            padx=(8, 10),
+            pady=(8, 0),
+        )
+        tk.Label(mission_frame, text="Evidence Note").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(mission_frame, textvariable=self.evidence_note_var).grid(
+            row=3,
+            column=1,
+            sticky="ew",
+            padx=(8, 10),
+            pady=(8, 0),
+        )
+        mission_actions = tk.Frame(mission_frame)
+        mission_actions.grid(row=0, column=2, rowspan=4, sticky="ns")
+        for idx, (label, callback) in enumerate(
+            [
+                ("Set Task", self.set_task_label),
+                ("Capture", self.capture),
+                ("Request Plan", self.request_plan),
+                ("Request Reflex", self.request_reflex),
+                ("Execute Reflex", self.execute_reflex),
+            ]
+        ):
+            tk.Button(mission_actions, text=label, command=callback, width=16).grid(
+                row=idx,
+                column=0,
+                sticky="ew",
+                pady=(0 if idx == 0 else 8, 0),
+            )
+        mission_frame.grid_columnconfigure(1, weight=1)
 
         task_help = tk.Label(
-            self.root,
+            content,
             text=(
-                "Task Label: current semantic task for planner and capture metadata. "
-                "Capture Label: one-shot note/suffix for the next saved sample. "
-                "Capture saves RGB + depth together. "
-                "Request Reflex refreshes the local policy suggestion state. "
-                "Execute Reflex performs one gated autonomous reflex step. "
-                "Takeover Note is used for manual takeover start/end annotations. "
-                "Evidence Note is stored with suspect/confirm/reject person annotations."
+                "Task Label controls planner/capture mission metadata. Capture Label is a one-shot suffix for the next saved sample. "
+                "Takeover Note and Evidence Note are stored with manual interventions and suspect/confirm/reject person events."
             ),
             anchor="w",
             justify="left",
+            wraplength=860,
         )
         task_help.pack(fill="x", padx=12, pady=(0, 8))
 
-        controls = tk.Frame(self.root)
-        controls.pack(fill="x", padx=12, pady=6)
+        control_groups = tk.Frame(content)
+        control_groups.pack(fill="x", padx=12, pady=6)
 
-        buttons = [
+        movement_frame = tk.LabelFrame(control_groups, text="Movement", padx=8, pady=8)
+        movement_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+        movement_buttons = [
             ("Forward (W)", lambda: self.send_move(forward_cm=self.args.move_step_cm, action_name="forward(W)")),
             ("Backward (S)", lambda: self.send_move(forward_cm=-self.args.move_step_cm, action_name="backward(S)")),
             ("Left (A)", lambda: self.send_move(right_cm=-self.args.move_step_cm, action_name="left(A)")),
@@ -583,28 +673,93 @@ class UAVControlPanel:
             ("Down (F)", lambda: self.send_move(up_cm=-self.args.vertical_step_cm, action_name="down(F)")),
             ("Yaw Left (Q)", lambda: self.send_move(yaw_delta_deg=-self.args.yaw_step_deg, action_name="yaw_left(Q)")),
             ("Yaw Right (E)", lambda: self.send_move(yaw_delta_deg=self.args.yaw_step_deg, action_name="yaw_right(E)")),
-            ("Capture (C)", self.capture),
-            ("Request Plan (P)", self.request_plan),
-            ("Request Reflex (T)", self.request_reflex),
-            ("Execute Reflex (Y)", self.execute_reflex),
-            ("Start Takeover (U)", self.start_takeover),
-            ("End Takeover (I)", self.end_takeover),
-            ("Mark Suspect (G)", self.mark_suspect),
-            ("Confirm Person (H)", self.confirm_person),
-            ("Reject Person (J)", self.reject_person),
-            ("Reset Evidence (O)", self.reset_evidence),
-            ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
-            ("Shutdown Server", self.shutdown_server),
         ]
+        for idx, (label, callback) in enumerate(movement_buttons):
+            tk.Button(movement_frame, text=label, command=callback, width=18).grid(
+                row=idx // 2,
+                column=idx % 2,
+                padx=6,
+                pady=6,
+                sticky="ew",
+            )
+        movement_frame.grid_columnconfigure(0, weight=1)
+        movement_frame.grid_columnconfigure(1, weight=1)
 
-        for idx, (label, callback) in enumerate(buttons):
-            btn = tk.Button(controls, text=label, command=callback, width=22)
-            row = idx // 2
-            col = idx % 2
-            btn.grid(row=row, column=col, padx=6, pady=6, sticky="ew")
+        planner_frame = tk.LabelFrame(control_groups, text="Planner And Reflex", padx=8, pady=8)
+        planner_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 6))
+        for idx, (label, callback) in enumerate(
+            [
+                ("Request Plan (P)", self.request_plan),
+                ("Request Reflex (T)", self.request_reflex),
+                ("Execute Reflex (Y)", self.execute_reflex),
+                ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
+            ]
+        ):
+            tk.Button(planner_frame, text=label, command=callback, width=18).grid(
+                row=idx,
+                column=0,
+                padx=6,
+                pady=6,
+                sticky="ew",
+            )
+        planner_frame.grid_columnconfigure(0, weight=1)
 
-        controls.grid_columnconfigure(0, weight=1)
-        controls.grid_columnconfigure(1, weight=1)
+        takeover_frame = tk.LabelFrame(control_groups, text="Takeover", padx=8, pady=8)
+        takeover_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
+        for idx, (label, callback) in enumerate(
+            [
+                ("Start Takeover (U)", self.start_takeover),
+                ("End Takeover (I)", self.end_takeover),
+            ]
+        ):
+            tk.Button(takeover_frame, text=label, command=callback, width=18).grid(
+                row=idx,
+                column=0,
+                padx=6,
+                pady=6,
+                sticky="ew",
+            )
+        takeover_frame.grid_columnconfigure(0, weight=1)
+
+        evidence_frame = tk.LabelFrame(control_groups, text="Evidence", padx=8, pady=8)
+        evidence_frame.grid(row=1, column=1, sticky="nsew", pady=(0, 6))
+        for idx, (label, callback) in enumerate(
+            [
+                ("Mark Suspect (G)", self.mark_suspect),
+                ("Confirm Person (H)", self.confirm_person),
+                ("Reject Person (J)", self.reject_person),
+                ("Reset Evidence (O)", self.reset_evidence),
+            ]
+        ):
+            tk.Button(evidence_frame, text=label, command=callback, width=18).grid(
+                row=idx,
+                column=0,
+                padx=6,
+                pady=6,
+                sticky="ew",
+            )
+        evidence_frame.grid_columnconfigure(0, weight=1)
+
+        system_frame = tk.LabelFrame(control_groups, text="System", padx=8, pady=8)
+        system_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        tk.Button(system_frame, text="Capture (C)", command=self.capture, width=18).grid(
+            row=0,
+            column=0,
+            padx=6,
+            pady=6,
+            sticky="ew",
+        )
+        tk.Button(system_frame, text="Shutdown Server", command=self.shutdown_server, width=18).grid(
+            row=0,
+            column=1,
+            padx=6,
+            pady=6,
+            sticky="ew",
+        )
+        system_frame.grid_columnconfigure(0, weight=1)
+        system_frame.grid_columnconfigure(1, weight=1)
+        control_groups.grid_columnconfigure(0, weight=1)
+        control_groups.grid_columnconfigure(1, weight=1)
 
         shown_windows = []
         if not self.args.hide_preview_window:
@@ -613,13 +768,15 @@ class UAVControlPanel:
             shown_windows.append(DEPTH_WINDOW_NAME)
         windows_text = " / ".join(shown_windows) if shown_windows else "(none)"
         hint = tk.Label(
-            self.root,
+            content,
             text=(
                 f"Preview windows: {windows_text}\n"
-                f"Control server: {self.client.base_url}"
+                f"Control server: {self.client.base_url}\n"
+                "The main panel supports mouse-wheel scrolling when the content becomes taller than the window."
             ),
             anchor="w",
             justify="left",
+            wraplength=860,
         )
         hint.pack(fill="x", padx=12, pady=(6, 10))
 

@@ -2255,3 +2255,89 @@ Interpretation:
 - the first 4.4 live attempt proved the event/logging route worked
 - the follow-up fixes were required so capture bundles preserve the active evidence state correctly
 - final 4.4 acceptance should be based on one rerun after these fixes
+
+### Phase 4.4 Acceptance Result (Runtime + Logging Passed)
+
+Final rerun checked:
+- `captures_remote/capture_20260319_224839_bundle.json`
+- `phase4_search_logs/search_session_20260319_223852.jsonl`
+
+Acceptance conclusion:
+- `4.4` minimal person-evidence fusion and search-result logging is accepted
+
+Evidence:
+- capture bundle now preserves the active search task correctly:
+  - `task_label = "search the house for people"`
+  - `mission.mission_type = "person_search"`
+  - `mission.search_scope = "house"`
+- capture bundle preserves the final evidence state instead of resetting on capture:
+  - `person_evidence_runtime.evidence_status = "confirmed_absent"`
+  - `search_result.result_status = "no_person_confirmed"`
+  - `search_result.person_exists = false`
+- search-session log contains a valid person-search evidence chain in the same session:
+  - `search_evt_00003 = suspect`
+  - `search_evt_00004 = suspect`
+  - `search_evt_00005 = confirm_absent`
+- the new evidence events use a non-empty mission/region context and align with the final bundle state
+
+Non-blocking note:
+- the same search-session file still contains earlier idle/navigation events from the same running server session
+- for 4.4 acceptance, the valid person-search chain is the later event segment:
+  - `search_evt_00003` to `search_evt_00005`
+
+Outcome:
+- `4.4` runtime, logging, and capture-bundle consistency are now stable enough to support later person-search experiments
+
+### Panel UX Improvement Note
+
+Observed during live testing:
+- `UAV Remote Control Panel` is now carrying too much runtime information in a fixed-height view
+- the top status area is dense and hard to read
+- the middle and lower control area has too many buttons visible at once
+
+Improvement items added for the next UI pass:
+- add scalable display support for the top status text area:
+  - larger/smaller font or zoom factor
+  - better line grouping for `Plan / Mission / Evidence / Reflex / Executor / Takeover`
+- add scroll support to the control panel window:
+  - vertical scrollbar for the full panel
+  - keep the status region readable without squeezing controls
+- consider collapsing or grouping lower action buttons:
+  - primary movement controls
+  - planning/reflex controls
+  - takeover/evidence controls
+
+Recommended next step:
+- start a small panel usability pass focused on:
+  - status readability
+  - scrollability
+  - control grouping
+
+### Panel UX Improvement Pass (Readability + Scroll + Grouping)
+
+Implemented in:
+- `UAV-Flow-Eval/uav_control_panel.py`
+
+Changes completed:
+- converted the main panel into a vertically scrollable layout
+- added status-text zoom controls:
+  - `A-`
+  - `A+`
+- moved the dense runtime lines into a dedicated `Runtime Status` section
+- grouped interactive controls into smaller sections:
+  - `Mission And Notes`
+  - `Movement`
+  - `Planner And Reflex`
+  - `Takeover`
+  - `Evidence`
+  - `System`
+- reduced the previous long stacked button column by splitting actions into semantic groups
+- added footer guidance that the main panel supports mouse-wheel scrolling
+
+Validation completed:
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py` passed
+
+Expected user-facing improvement:
+- top runtime data is easier to inspect
+- long status blocks no longer force the whole panel into a cramped fixed-height view
+- lower controls are easier to scan because they are grouped by function instead of shown as a single dense button list
