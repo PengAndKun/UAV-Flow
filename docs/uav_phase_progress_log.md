@@ -1771,7 +1771,7 @@ Phase 4 的首要任务：
 Phase 4 当前子计划与达成度：
 - `4.1 Autonomous Reflex Executor`
   - 目标：加入可切换的 reflex 自动执行模式
-  - 达成度：`0%`
+  - 达成度：`40%`
 - `4.2 Takeover And Intervention Logging`
   - 目标：记录人工接管时机、原因与纠正动作
   - 达成度：`0%`
@@ -1791,3 +1791,72 @@ Phase 4 当前子计划与达成度：
 下一步建议：
 - 直接从 `4.1 Autonomous Reflex Executor` 开始
 - 这是最小但最关键的一步，因为它决定我们是否真的从“人工驱动实验”进入“半自动闭环”
+
+### Phase 4 当前轮进展（第一批）
+
+当前状态：
+- `已完成 4.1 的第一版执行链，待做真实在线验收`
+
+本轮新增内容：
+- `uav_control_server.py`
+  - 新增 `--reflex_execute_mode {manual,assist_step}`
+  - 新增 `--reflex_execute_confidence_threshold`
+  - 新增 `--reflex_execute_max_risk`
+  - 新增 `--reflex_execute_allow_heuristic`
+  - 新增 `POST /execute_reflex`
+  - 新增 `GET /reflex_execution`
+- `uav_control_panel.py`
+  - 新增 `Execute Reflex` 按钮
+  - 新增键盘快捷键 `Y`
+  - 新增 `Executor ...` 状态行
+
+当前实现能力：
+- 手动模式保持不变：
+  - `Request Plan` 仍然只刷新 plan，不自动移动
+  - `Request Reflex` 仍然只刷新 reflex，不自动移动
+- 新增显式半自动执行入口：
+  - `Execute Reflex` 会请求当前 reflex，并在门控通过时执行一步低层动作
+- 新增可选辅助执行模式：
+  - `assist_step`
+  - 在每次人工移动后，允许系统自动追加一步 gated reflex 动作
+
+当前执行门控：
+- reflex 输出必须满足：
+  - `should_execute = true`
+  - 动作为可执行动作而不是 `idle / hold_position / shield_hold`
+- 如果是 external model，则还要满足：
+  - `policy_confidence >= reflex_execute_confidence_threshold`
+  - `risk_score <= reflex_execute_max_risk`
+- 默认不允许 heuristic reflex 直接自动执行，除非显式加：
+  - `--reflex_execute_allow_heuristic`
+
+当前可观测状态：
+- `/state` 里新增：
+  - `reflex_execution`
+- capture bundle 里也新增：
+  - `reflex_execution`
+- panel 里会显示：
+  - `mode`
+  - `last_status`
+  - `last_reason`
+  - `last_requested_action`
+  - `last_executed_action`
+  - `execution_count`
+
+本轮验证结果：
+- 已通过：
+  - `py_compile`
+  - `uav_control_server.py --help`
+  - `uav_control_panel.py --help`
+- 尚未完成：
+  - 真实在线半自动执行验收
+
+下一步建议：
+- 先用 `manual` 模式启动，验证：
+  - `Execute Reflex` 单步执行是否稳定
+- 再切到：
+  - `--reflex_execute_mode assist_step`
+- 重点观察：
+  - 是否出现不合理连跳
+  - 是否被 `confidence / risk` 正确门控
+  - `Executor ...` 状态是否与实际行为一致

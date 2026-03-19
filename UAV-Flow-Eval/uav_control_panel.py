@@ -73,13 +73,14 @@ class UAVControlPanel:
         self.client = RemoteControlClient(f"http://{args.host}:{args.port}", args.timeout_s)
         self.root = tk.Tk()
         self.root.title("UAV Remote Control Panel")
-        self.root.geometry("760x470")
+        self.root.geometry("760x520")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.status_var = tk.StringVar(value="Connecting...")
         self.depth_var = tk.StringVar(value="Depth: waiting...")
         self.plan_var = tk.StringVar(value="Plan: idle")
         self.archive_var = tk.StringVar(value="Archive: idle")
         self.reflex_var = tk.StringVar(value="Reflex: idle")
+        self.executor_var = tk.StringVar(value="Executor: idle")
         self.last_state: Optional[Dict[str, Any]] = None
         self.preview_window: Optional[tk.Toplevel] = None
         self.preview_label: Optional[tk.Label] = None
@@ -164,6 +165,27 @@ class UAVControlPanel:
         if result:
             self.update_state_once()
 
+    def execute_reflex(self) -> None:
+        result = self.safe_request(
+            self.client.post_json,
+            "/execute_reflex",
+            {
+                "trigger": "manual_execute",
+                "refresh_policy": True,
+                "allow_auto_plan": True,
+                "sync_after_execution": True,
+            },
+        )
+        if result:
+            state = result.get("state") if isinstance(result.get("state"), dict) else None
+            if state:
+                self.last_state = state
+                self.update_status_from_state(state)
+            else:
+                self.update_state_once()
+            self.update_preview_once()
+            self.update_depth_once()
+
     def shutdown_server(self) -> None:
         result = self.safe_request(self.client.post_json, "/shutdown", {})
         if result:
@@ -199,6 +221,7 @@ class UAVControlPanel:
         planner_runtime = state.get("planner_runtime", {})
         archive = state.get("archive", {})
         reflex_runtime = state.get("reflex_runtime", {})
+        reflex_execution = state.get("reflex_execution", {})
         archive_current = archive.get("current_cell") if isinstance(archive.get("current_cell"), dict) else {}
         archive_candidates = archive.get("top_cells") or []
         archive_hint = "none"
@@ -265,6 +288,15 @@ class UAVControlPanel:
             f"progress={float(reflex_runtime.get('progress_to_waypoint_cm', 0.0)):.1f} "
             f"retrieval={self.shorten_cell_id(str(reflex_runtime.get('retrieval_cell_id', '')), limit=18) or 'none'}"
         )
+        self.executor_var.set(
+            "Executor "
+            f"mode={reflex_execution.get('mode', 'manual')} "
+            f"status={reflex_execution.get('last_status', 'idle')} "
+            f"reason={reflex_execution.get('last_reason', 'none')} "
+            f"req={reflex_execution.get('last_requested_action', 'idle')} "
+            f"exec={reflex_execution.get('last_executed_action', '') or 'none'} "
+            f"count={int(reflex_execution.get('execution_count', 0))}"
+        )
 
     def update_state_once(self) -> None:
         state = self.safe_request(self.client.get_json, "/state")
@@ -323,6 +355,7 @@ class UAVControlPanel:
             "c": self.capture,
             "p": self.request_plan,
             "t": self.request_reflex,
+            "y": self.execute_reflex,
             "v": lambda: (self.update_preview_once(), self.update_depth_once()),
         }
         for key, callback in bindings.items():
@@ -348,7 +381,7 @@ class UAVControlPanel:
 
         header = tk.Label(
             self.root,
-            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan, T request reflex",
+            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan, T request reflex, Y execute reflex",
             anchor="w",
             justify="left",
         )
@@ -369,6 +402,9 @@ class UAVControlPanel:
         reflex_status = tk.Label(self.root, textvariable=self.reflex_var, anchor="w", justify="left")
         reflex_status.pack(fill="x", padx=12, pady=(0, 10))
 
+        executor_status = tk.Label(self.root, textvariable=self.executor_var, anchor="w", justify="left")
+        executor_status.pack(fill="x", padx=12, pady=(0, 10))
+
         task_frame = tk.Frame(self.root)
         task_frame.pack(fill="x", padx=12, pady=(0, 8))
 
@@ -380,6 +416,7 @@ class UAVControlPanel:
         tk.Entry(task_frame, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
         tk.Button(task_frame, text="Request Plan", command=self.request_plan, width=14).grid(row=1, column=2, sticky="ew", pady=(8, 0))
         tk.Button(task_frame, text="Request Reflex", command=self.request_reflex, width=14).grid(row=2, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="Execute Reflex", command=self.execute_reflex, width=14).grid(row=3, column=2, sticky="ew", pady=(8, 0))
         task_frame.grid_columnconfigure(1, weight=1)
 
         task_help = tk.Label(
@@ -388,7 +425,8 @@ class UAVControlPanel:
                 "Task Label: current semantic task for planner and capture metadata. "
                 "Capture Label: one-shot note/suffix for the next saved sample. "
                 "Capture saves RGB + depth together. "
-                "Request Reflex refreshes the local policy suggestion state."
+                "Request Reflex refreshes the local policy suggestion state. "
+                "Execute Reflex performs one gated autonomous reflex step."
             ),
             anchor="w",
             justify="left",
@@ -410,6 +448,7 @@ class UAVControlPanel:
             ("Capture (C)", self.capture),
             ("Request Plan (P)", self.request_plan),
             ("Request Reflex (T)", self.request_reflex),
+            ("Execute Reflex (Y)", self.execute_reflex),
             ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
             ("Shutdown Server", self.shutdown_server),
         ]

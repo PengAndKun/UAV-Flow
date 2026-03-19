@@ -39,9 +39,47 @@ from runtime_interfaces import build_plan_request, build_reflex_request, build_r
 
 logger = logging.getLogger(__name__)
 
+REFLEX_ACTION_ALIASES = {
+    "forward(w)": "forward",
+    "backward(s)": "backward",
+    "left(a)": "left",
+    "right(d)": "right",
+    "up(r)": "up",
+    "down(f)": "down",
+    "yaw_left(q)": "yaw_left",
+    "yaw_right(e)": "yaw_right",
+    "forward": "forward",
+    "backward": "backward",
+    "left": "left",
+    "right": "right",
+    "up": "up",
+    "down": "down",
+    "yaw_left": "yaw_left",
+    "yaw_right": "yaw_right",
+    "hold_position": "hold_position",
+    "shield_hold": "shield_hold",
+    "idle": "idle",
+}
+
+REFLEX_OPPOSITE_ACTIONS = {
+    "forward": "backward",
+    "backward": "forward",
+    "left": "right",
+    "right": "left",
+    "up": "down",
+    "down": "up",
+    "yaw_left": "yaw_right",
+    "yaw_right": "yaw_left",
+}
+
 
 def normalize_angle_deg(angle_deg: float) -> float:
     return (angle_deg + 180.0) % 360.0 - 180.0
+
+
+def normalize_reflex_action_name(action_name: Any) -> str:
+    text = str(action_name or "idle").strip().lower()
+    return REFLEX_ACTION_ALIASES.get(text, text or "idle")
 
 
 def build_obj_info(task_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -165,6 +203,19 @@ class UAVControlBackend:
             policy_name=self.args.reflex_policy_name,
             source="local_heuristic",
         )
+        self.reflex_execution_state: Dict[str, Any] = {
+            "mode": self.args.reflex_execute_mode,
+            "last_status": "idle",
+            "last_reason": "startup",
+            "last_trigger": "startup",
+            "last_requested_action": "idle",
+            "last_executed_action": "idle",
+            "last_source": "none",
+            "last_step_index": 0,
+            "execution_count": 0,
+            "skipped_count": 0,
+            "blocked_count": 0,
+        }
         self.archive_runtime = ArchiveRuntime(
             pos_bin_cm=float(self.args.archive_pos_bin_cm),
             yaw_bin_deg=float(self.args.archive_yaw_bin_deg),
@@ -281,6 +332,90 @@ class UAVControlBackend:
         if not self.args.reflex_policy_url:
             return False
         return bool(source) and source != "local_heuristic"
+
+    def update_reflex_execution_state(
+        self,
+        *,
+        status: str,
+        reason: str,
+        trigger: str,
+        requested_action: str,
+        executed_action: str = "",
+        source: str = "",
+    ) -> Dict[str, Any]:
+        execution_state = self.reflex_execution_state
+        execution_state["mode"] = self.args.reflex_execute_mode
+        execution_state["last_status"] = str(status)
+        execution_state["last_reason"] = str(reason)
+        execution_state["last_trigger"] = str(trigger)
+        execution_state["last_requested_action"] = str(requested_action or "idle")
+        execution_state["last_executed_action"] = str(executed_action or "")
+        execution_state["last_source"] = str(source or "")
+        execution_state["last_step_index"] = int(self.plan_execution_state.get("step_index", 0))
+        if status == "executed":
+            execution_state["execution_count"] = int(execution_state.get("execution_count", 0)) + 1
+        elif status == "blocked":
+            execution_state["blocked_count"] = int(execution_state.get("blocked_count", 0)) + 1
+        else:
+            execution_state["skipped_count"] = int(execution_state.get("skipped_count", 0)) + 1
+        return execution_state
+
+    def build_motion_payload_for_action(self, action_name: str) -> Optional[Dict[str, Any]]:
+        action = normalize_reflex_action_name(action_name)
+        if action in ("idle", "hold_position", "shield_hold", ""):
+            return None
+        if action == "forward":
+            return {"forward_cm": float(self.args.move_step_cm), "action_name": "forward"}
+        if action == "backward":
+            return {"forward_cm": -float(self.args.move_step_cm), "action_name": "backward"}
+        if action == "left":
+            return {"right_cm": -float(self.args.move_step_cm), "action_name": "left"}
+        if action == "right":
+            return {"right_cm": float(self.args.move_step_cm), "action_name": "right"}
+        if action == "up":
+            return {"up_cm": float(self.args.vertical_step_cm), "action_name": "up"}
+        if action == "down":
+            return {"up_cm": -float(self.args.vertical_step_cm), "action_name": "down"}
+        if action == "yaw_left":
+            return {"yaw_delta_deg": -float(self.args.yaw_step_deg), "action_name": "yaw_left"}
+        if action == "yaw_right":
+            return {"yaw_delta_deg": float(self.args.yaw_step_deg), "action_name": "yaw_right"}
+        return None
+
+    def get_last_manual_action_name(self) -> str:
+        action_info = self.runtime_debug.get("local_policy_action", {})
+        if not isinstance(action_info, dict):
+            return ""
+        if str(action_info.get("action_origin", "") or "") != "manual":
+            return ""
+        return normalize_reflex_action_name(action_info.get("action_name", ""))
+
+    def evaluate_reflex_execution_gate(self, reflex_runtime: Dict[str, Any]) -> Tuple[bool, str, str]:
+        action_name = normalize_reflex_action_name(reflex_runtime.get("suggested_action", "idle"))
+        source = str(reflex_runtime.get("source", "") or "")
+        if not reflex_runtime.get("should_execute", False):
+            return False, "should_execute_false", action_name
+        if action_name in ("idle", "hold_position"):
+            return False, "hold_action", action_name
+        if action_name == "shield_hold":
+            return False, "shield_hold", action_name
+        if not self.args.reflex_execute_allow_heuristic and str(source).lower() != "external_model":
+            return False, "source_not_allowed", action_name
+        confidence = float(reflex_runtime.get("policy_confidence", 0.0))
+        if str(source).lower() == "external_model" and confidence < float(self.args.reflex_execute_confidence_threshold):
+            return False, "low_confidence", action_name
+        risk_score = float(reflex_runtime.get("risk_score", self.runtime_debug.get("risk_score", 0.0)))
+        if risk_score > float(self.args.reflex_execute_max_risk):
+            return False, "high_risk", action_name
+        if bool(reflex_runtime.get("shield_triggered", False)):
+            return False, "shield_triggered", action_name
+        if self.args.reflex_execute_mode == "assist_step":
+            last_manual_action = self.get_last_manual_action_name()
+            if last_manual_action and REFLEX_OPPOSITE_ACTIONS.get(last_manual_action) == action_name:
+                return False, "opposes_manual_action", action_name
+        if self.build_motion_payload_for_action(action_name) is None:
+            return False, "unsupported_action", action_name
+        return True, "ok", action_name
 
     def get_env_yaw_deg(self) -> float:
         rotation = self.env.unwrapped.unrealcv.get_obj_rotation(self.player_name)
@@ -855,6 +990,7 @@ class UAVControlBackend:
                 "planner_runtime": self.plan_execution_state,
                 "archive": archive_state,
                 "reflex_runtime": self.reflex_runtime,
+                "reflex_execution": self.reflex_execution_state,
                 "last_plan_request": {
                     "schema_version": self.last_plan_request.get("schema_version", ""),
                     "trigger": self.last_plan_request.get("trigger", ""),
@@ -866,13 +1002,18 @@ class UAVControlBackend:
                 "last_capture": self.last_capture,
             }
 
-    def move_relative(
+    def _apply_motion_step(
         self,
+        *,
         forward_cm: float = 0.0,
         right_cm: float = 0.0,
         up_cm: float = 0.0,
         yaw_delta_deg: float = 0.0,
         action_name: str = "custom",
+        action_origin: str = "manual",
+        trigger_auto_plan: bool = True,
+        trigger_reflex_update: bool = True,
+        allow_reflex_assist: bool = False,
     ) -> Dict[str, Any]:
         with self.lock:
             x, y, z, _actual_task_yaw = self.get_task_pose()
@@ -888,6 +1029,7 @@ class UAVControlBackend:
             self.plan_execution_state["step_index"] = int(self.plan_execution_state.get("step_index", 0)) + 1
             self.runtime_debug["local_policy_action"] = {
                 "action_name": action_name,
+                "action_origin": action_origin,
                 "forward_cm": float(forward_cm),
                 "right_cm": float(right_cm),
                 "up_cm": float(up_cm),
@@ -895,7 +1037,7 @@ class UAVControlBackend:
             }
             self.sync_archive_runtime()
             auto_plan: Optional[Dict[str, Any]] = None
-            if self.should_auto_request_plan():
+            if trigger_auto_plan and self.should_auto_request_plan():
                 auto_plan = self.request_plan(trigger="step_interval")
                 logger.info(
                     "Auto planner triggered at step=%s next_trigger_step=%s planner=%s subgoal=%s",
@@ -904,7 +1046,7 @@ class UAVControlBackend:
                     auto_plan.get("planner_name", "n/a") if isinstance(auto_plan, dict) else "n/a",
                     auto_plan.get("semantic_subgoal", "idle") if isinstance(auto_plan, dict) else "idle",
                 )
-            if self.args.reflex_auto_mode == "on_move":
+            if trigger_reflex_update and self.args.reflex_auto_mode == "on_move":
                 reflex_runtime = self.request_reflex_policy(trigger="on_move")
                 logger.info(
                     "Auto reflex policy updated at step=%s policy=%s source=%s suggested=%s",
@@ -913,6 +1055,16 @@ class UAVControlBackend:
                     reflex_runtime.get("source", "unknown"),
                     reflex_runtime.get("suggested_action", "idle"),
                 )
+                if allow_reflex_assist and self.args.reflex_execute_mode == "assist_step":
+                    assist_result = self.execute_reflex_action(
+                        trigger="assist_step",
+                        refresh_policy=False,
+                        allow_auto_plan=False,
+                        sync_after_execution=True,
+                    )
+                    assisted_state = assist_result.get("state")
+                    if isinstance(assisted_state, dict):
+                        return assisted_state
             actual_task_yaw_after = self.get_task_pose()[3]
             actual_uav_yaw_after = self.get_env_yaw_deg()
             logger.info(
@@ -936,6 +1088,115 @@ class UAVControlBackend:
                 actual_uav_yaw_after,
             )
             return self.get_state()
+
+    def execute_reflex_action(
+        self,
+        *,
+        trigger: str = "manual_execute",
+        refresh_policy: bool = True,
+        allow_auto_plan: bool = True,
+        sync_after_execution: bool = True,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            reflex_runtime = self.request_reflex_policy(trigger=trigger) if refresh_policy else self.reflex_runtime
+            allowed, reason, requested_action = self.evaluate_reflex_execution_gate(reflex_runtime)
+            source = str(reflex_runtime.get("source", "") or "")
+            if not allowed:
+                execution_state = self.update_reflex_execution_state(
+                    status="blocked" if reason in ("source_not_allowed", "low_confidence", "high_risk", "shield_triggered", "opposes_manual_action") else "skipped",
+                    reason=reason,
+                    trigger=trigger,
+                    requested_action=requested_action,
+                    source=source,
+                )
+                return {
+                    "status": "ok",
+                    "executed": False,
+                    "reason": reason,
+                    "requested_action": requested_action,
+                    "reflex_runtime": self.reflex_runtime,
+                    "reflex_execution": execution_state,
+                    "state": self.get_state(),
+                }
+
+            motion_payload = self.build_motion_payload_for_action(requested_action)
+            if motion_payload is None:
+                execution_state = self.update_reflex_execution_state(
+                    status="skipped",
+                    reason="unsupported_action",
+                    trigger=trigger,
+                    requested_action=requested_action,
+                    source=source,
+                )
+                return {
+                    "status": "ok",
+                    "executed": False,
+                    "reason": "unsupported_action",
+                    "requested_action": requested_action,
+                    "reflex_runtime": self.reflex_runtime,
+                    "reflex_execution": execution_state,
+                    "state": self.get_state(),
+                }
+
+            state = self._apply_motion_step(
+                forward_cm=float(motion_payload.get("forward_cm", 0.0)),
+                right_cm=float(motion_payload.get("right_cm", 0.0)),
+                up_cm=float(motion_payload.get("up_cm", 0.0)),
+                yaw_delta_deg=float(motion_payload.get("yaw_delta_deg", 0.0)),
+                action_name=str(motion_payload.get("action_name", requested_action)),
+                action_origin="reflex_auto",
+                trigger_auto_plan=allow_auto_plan,
+                trigger_reflex_update=False,
+                allow_reflex_assist=False,
+            )
+            if sync_after_execution:
+                reflex_runtime = self.request_reflex_policy(trigger="auto_execute_sync")
+            execution_state = self.update_reflex_execution_state(
+                status="executed",
+                reason="ok",
+                trigger=trigger,
+                requested_action=requested_action,
+                executed_action=str(motion_payload.get("action_name", requested_action)),
+                source=source,
+            )
+            state = self.get_state()
+            logger.info(
+                "Reflex auto execution trigger=%s requested=%s executed=%s source=%s",
+                trigger,
+                requested_action,
+                motion_payload.get("action_name", requested_action),
+                source or "unknown",
+            )
+            return {
+                "status": "ok",
+                "executed": True,
+                "reason": "ok",
+                "requested_action": requested_action,
+                "executed_action": str(motion_payload.get("action_name", requested_action)),
+                "reflex_runtime": reflex_runtime,
+                "reflex_execution": execution_state,
+                "state": state,
+            }
+
+    def move_relative(
+        self,
+        forward_cm: float = 0.0,
+        right_cm: float = 0.0,
+        up_cm: float = 0.0,
+        yaw_delta_deg: float = 0.0,
+        action_name: str = "custom",
+    ) -> Dict[str, Any]:
+        return self._apply_motion_step(
+            forward_cm=forward_cm,
+            right_cm=right_cm,
+            up_cm=up_cm,
+            yaw_delta_deg=yaw_delta_deg,
+            action_name=action_name,
+            action_origin="manual",
+            trigger_auto_plan=True,
+            trigger_reflex_update=True,
+            allow_reflex_assist=True,
+        )
 
     def get_frame_jpeg(self) -> bytes:
         with self.lock:
@@ -1023,6 +1284,7 @@ class UAVControlBackend:
                 "runtime_debug": self.runtime_debug,
                 "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
                 "reflex_runtime": self.reflex_runtime,
+                "reflex_execution": self.reflex_execution_state,
                 "reflex_sample": reflex_sample,
                 "preview_mode": self.args.preview_mode,
                 "task_json": self.args.task_json,
@@ -1056,6 +1318,7 @@ class UAVControlBackend:
                 "plan": self.current_plan,
                 "archive": metadata["archive"],
                 "reflex_runtime": metadata["reflex_runtime"],
+                "reflex_execution": metadata["reflex_execution"],
                 "reflex_sample": metadata["reflex_sample"],
             }
 
@@ -1120,6 +1383,8 @@ def make_handler(backend: UAVControlBackend):
                     self._send_json({"status": "ok", "archive": backend.archive_runtime.get_state(limit=int(backend.args.archive_recent_limit))})
                 elif parsed.path == "/reflex":
                     self._send_json({"status": "ok", "reflex_runtime": backend.reflex_runtime})
+                elif parsed.path == "/reflex_execution":
+                    self._send_json({"status": "ok", "reflex_execution": backend.reflex_execution_state})
                 else:
                     self._send_json({"status": "error", "message": "Not found"}, 404)
             except Exception as exc:
@@ -1157,6 +1422,15 @@ def make_handler(backend: UAVControlBackend):
                 elif parsed.path == "/request_reflex":
                     reflex_runtime = backend.request_reflex_policy(trigger=str(data.get("trigger", "manual_request")))
                     self._send_json({"status": "ok", "reflex_runtime": reflex_runtime})
+                elif parsed.path == "/execute_reflex":
+                    self._send_json(
+                        backend.execute_reflex_action(
+                            trigger=str(data.get("trigger", "manual_execute")),
+                            refresh_policy=bool(data.get("refresh_policy", True)),
+                            allow_auto_plan=bool(data.get("allow_auto_plan", True)),
+                            sync_after_execution=bool(data.get("sync_after_execution", True)),
+                        )
+                    )
                 elif parsed.path == "/runtime_debug":
                     debug_state = backend.update_runtime_debug(
                         current_waypoint=data.get("current_waypoint") if isinstance(data.get("current_waypoint"), dict) else None,
@@ -1250,6 +1524,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reflex_policy_endpoint", default="/reflex_policy", help="Reflex policy endpoint path used with reflex_policy_url")
     parser.add_argument("--reflex_policy_timeout_s", type=float, default=3.0, help="Timeout for reflex policy requests")
     parser.add_argument("--reflex_auto_mode", default="manual", choices=["manual", "on_move"], help="manual=only request reflex on /request_reflex, on_move=refresh reflex state after each move")
+    parser.add_argument(
+        "--reflex_execute_mode",
+        default="manual",
+        choices=["manual", "assist_step"],
+        help="manual=only execute reflex when /execute_reflex is called, assist_step=after each manual move optionally execute one gated reflex step",
+    )
+    parser.add_argument(
+        "--reflex_execute_confidence_threshold",
+        type=float,
+        default=0.35,
+        help="Minimum external-model confidence required for reflex auto execution",
+    )
+    parser.add_argument(
+        "--reflex_execute_max_risk",
+        type=float,
+        default=0.75,
+        help="Maximum allowed risk score for reflex auto execution",
+    )
+    parser.add_argument(
+        "--reflex_execute_allow_heuristic",
+        action="store_true",
+        help="Allow local/heuristic reflex outputs to be executed by /execute_reflex or assist_step",
+    )
     parser.add_argument("--task_json", default=None, help="Optional task JSON used to place the UAV and target")
     parser.add_argument("--spawn_x", type=float, default=None, help="Optional UAV spawn x")
     parser.add_argument("--spawn_y", type=float, default=None, help="Optional UAV spawn y")
