@@ -259,6 +259,7 @@ class UAVControlPanel:
             f"suggested={reflex_runtime.get('suggested_action', 'idle')} "
             f"exec={int(bool(reflex_runtime.get('should_execute', False)))} "
             f"lat={float(reflex_runtime.get('last_latency_ms', 0.0)):.1f}ms "
+            f"conf={float(reflex_runtime.get('policy_confidence', 0.0)):.2f} "
             f"wp_dist={float(reflex_runtime.get('waypoint_distance_cm', 0.0)):.1f} "
             f"yaw_err={float(reflex_runtime.get('yaw_error_deg', 0.0)):.1f} "
             f"progress={float(reflex_runtime.get('progress_to_waypoint_cm', 0.0)):.1f} "

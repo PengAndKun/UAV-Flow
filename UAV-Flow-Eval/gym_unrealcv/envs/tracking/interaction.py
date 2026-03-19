@@ -110,9 +110,9 @@ class Tracking(Navigation):
     def get_startpoint(self, target_pos=[], distance=None, reset_area=[], exp_height=200, direction=None):
         for i in range(5):  # searching a safe point
             if direction == None:
-                direction = 2 * np.pi * np.random.sample(1)
+                direction = float(2 * np.pi * np.random.random())
             else:
-                direction = direction % (2 * np.pi)
+                direction = float(direction % (2 * np.pi))
             if distance == None:
                 x = np.random.randint(reset_area[0], reset_area[1])
                 y = np.random.randint(reset_area[2], reset_area[3])

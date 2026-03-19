@@ -136,7 +136,7 @@ def make_handler(args: argparse.Namespace, model_artifact: Optional[Dict[str, An
                         "status": "ok",
                         "service": "reflex_policy_server",
                         "policy_name": args.policy_name,
-                        "policy_mode": "prototype_model" if model_artifact else "heuristic_stub",
+                        "policy_mode": str(model_artifact.get("model_type", "prototype_model")) if model_artifact else "heuristic_stub",
                         "model_artifact_path": args.model_artifact or "",
                     }
                 )
@@ -164,7 +164,7 @@ def make_handler(args: argparse.Namespace, model_artifact: Optional[Dict[str, An
                         "status": "ok",
                         "request_example": example_request,
                         "reflex_example": example_reflex,
-                        "policy_mode": "prototype_model" if model_artifact else "heuristic_stub",
+                        "policy_mode": str(model_artifact.get("model_type", "prototype_model")) if model_artifact else "heuristic_stub",
                     }
                 )
             else:

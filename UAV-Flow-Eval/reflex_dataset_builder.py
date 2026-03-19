@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from reflex_policy_model import normalize_action_name
 from reflex_replay import discover_bundles, iter_bundles
 
 
@@ -56,6 +57,9 @@ def build_sample_record(record: Dict[str, Any], *, episode_id: str, step_index: 
     archive_current = archive.get("current_cell", {}) if isinstance(archive.get("current_cell"), dict) else {}
     plan = record.get("plan", {}) if isinstance(record.get("plan"), dict) else {}
     pose = record.get("pose", {}) if isinstance(record.get("pose"), dict) else {}
+    executed_action = str(record.get("action_label", "idle") or "idle")
+    target_action = normalize_action_name(executed_action)
+    suggested_action = str(reflex_sample.get("suggested_action", "idle") or "idle")
 
     return {
         "schema_version": "phase3.dataset_sample.v1",
@@ -63,8 +67,11 @@ def build_sample_record(record: Dict[str, Any], *, episode_id: str, step_index: 
         "step_index": int(step_index),
         "capture_id": record.get("capture_id", ""),
         "capture_time": record.get("capture_time", ""),
+        "capture_label": record.get("label", ""),
         "task_label": record.get("task_label", ""),
-        "executed_action": record.get("action_label", "idle"),
+        "executed_action": executed_action,
+        "executed_action_canonical": target_action,
+        "target_action": target_action,
         "planner_name": plan.get("planner_name", ""),
         "planner_subgoal": plan.get("semantic_subgoal", ""),
         "planner_confidence": float(plan.get("planner_confidence", 0.0)),
@@ -80,7 +87,12 @@ def build_sample_record(record: Dict[str, Any], *, episode_id: str, step_index: 
         "depth": record.get("depth", {}),
         "target_waypoint": reflex_sample.get("target_waypoint", {}),
         "current_waypoint": reflex_sample.get("current_waypoint", {}),
-        "suggested_action": reflex_sample.get("suggested_action", "idle"),
+        "suggested_action": suggested_action,
+        "teacher_action": normalize_action_name(suggested_action),
+        "policy_mode": reflex_sample.get("policy_mode", ""),
+        "policy_name": reflex_sample.get("policy_name", ""),
+        "policy_source": reflex_sample.get("policy_source", ""),
+        "policy_confidence": float(reflex_sample.get("policy_confidence", 0.0)),
         "should_execute": bool(reflex_sample.get("should_execute", False)),
         "waypoint_distance_cm": float(reflex_sample.get("waypoint_distance_cm", 0.0)),
         "yaw_error_deg": float(reflex_sample.get("yaw_error_deg", 0.0)),
@@ -137,7 +149,7 @@ def build_episode_manifest(records: List[Dict[str, Any]], *, episode_index: int)
     episode_id = f"episode_{episode_index:04d}_{task_slug}"
     sample_records = [build_sample_record(record, episode_id=episode_id, step_index=idx) for idx, record in enumerate(records, start=1)]
 
-    action_counts = Counter(sample["executed_action"] for sample in sample_records)
+    action_counts = Counter(sample["target_action"] for sample in sample_records)
     suggested_counts = Counter(sample["suggested_action"] for sample in sample_records)
     retrieval_hits = [sample for sample in sample_records if sample["retrieval_cell_id"] != "none"]
     unique_archive_cells = sorted({sample["archive_cell_id"] for sample in sample_records if sample["archive_cell_id"]})
@@ -162,6 +174,7 @@ def build_episode_manifest(records: List[Dict[str, Any]], *, episode_index: int)
         "duration_sec": duration_sec,
         "bundle_paths": [record.get("_bundle_path", "") for record in records],
         "action_counts": dict(action_counts),
+        "target_action_counts": dict(action_counts),
         "suggested_action_counts": dict(suggested_counts),
         "retrieval_hit_count": len(retrieval_hits),
         "retrieval_hit_rate": float(len(retrieval_hits) / len(sample_records)) if sample_records else 0.0,

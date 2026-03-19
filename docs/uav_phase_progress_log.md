@@ -1086,11 +1086,180 @@
 - Phase 3 第六批已经完成从“离线数据集”到“可加载的 local policy artifact”再到“主链运行时接入”的最小闭环
 - 当前 prototype baseline 已经不再只是独立脚本，而是能通过 `reflex_policy_server.py` 驱动 `uav_control_server.py`
 
+### Phase 3 第七批子计划拆分与达成度
+
+#### 子计划 3.21：新增多任务 / 多动作自动化采集脚本
+
+目标：
+
+- 让 Phase 3 不再只依赖零散的手动点按采样
+- 用可复现的任务套件快速扩充多任务、多动作覆盖
+
+主要任务：
+
+- 新增 `collect_reflex_dataset.py`
+- 内置 `basic / extended` 两套任务序列
+- 支持 `Set Task -> Request Plan -> Move -> Request Reflex -> Capture` 的自动化执行
+- 支持 dry-run 预览本轮会覆盖哪些任务和动作
+
+当前达成度：
+
+- `100%`
+
+当前状态：
+
+- 已新增 `UAV-Flow-Eval/collect_reflex_dataset.py`
+- 已支持：
+  - `--suite basic|extended`
+  - `--capture_mode each_step|task_end|none`
+  - `--request_plan_per_task`
+  - `--request_reflex_each_step`
+- 已用 dry-run 验证 `extended` 套件会覆盖：
+  - `15` 个任务
+  - `forward=21`
+  - `backward=5`
+  - `left=9`
+  - `right=9`
+  - `up=5`
+  - `down=5`
+  - `yaw_left=8`
+  - `yaw_right=8`
+
+#### 子计划 3.22：新增多任务 / 多动作覆盖报告
+
+目标：
+
+- 用结构化报告判断当前数据集的动作覆盖和任务覆盖是否足够训练 local policy
+- 为下一轮采集直接提供“缺什么动作、缺多少样本”的建议
+
+主要任务：
+
+- 新增 `reflex_coverage_report.py`
+- 统计任务数、动作数、task-action 覆盖矩阵
+- 标记全局缺失动作和每任务缺失动作
+- 输出下一轮补采建议
+
+当前达成度：
+
+- `100%`
+
+当前状态：
+
+- 已新增 `UAV-Flow-Eval/reflex_coverage_report.py`
+- 已用当前真实数据验证输出：
+  - `sample_count=1`
+  - `unique_task_count=1`
+  - 当前只覆盖 `up`
+  - 缺失 `forward/backward/left/right/down/yaw_left/yaw_right`
+- 已能直接输出下一轮补采建议
+
+#### 子计划 3.23：把 prototype baseline 升级成真实轻量 local policy 网络
+
+目标：
+
+- 不再只依赖 prototype nearest-neighbor baseline
+- 引入真正可训练的轻量网络，用作 Phase 3 的第一个神经网络 local policy baseline
+
+主要任务：
+
+- 在 `reflex_policy_model.py` 中新增轻量 `MLP classifier`
+- 让 `train_reflex_policy.py` 支持 `prototype | mlp`
+- 让 `reflex_policy_server.py` 继续沿用同一 artifact 加载路径
+
+当前达成度：
+
+- `100%`
+
+当前状态：
+
+- `UAV-Flow-Eval/reflex_policy_model.py` 已支持：
+  - `prototype`
+  - `mlp_classifier`
+- `UAV-Flow-Eval/train_reflex_policy.py` 已支持 `--model_type mlp`
+- 已生成真实 MLP artifact：
+  - `phase3_dataset_export/mlp_reflex_policy.json`
+- 已用当前数据验证训练输出：
+  - `model_type=mlp_classifier`
+  - `train_accuracy=1.0`
+  - `final_loss=0.0015662903625685463`
+
+#### 子计划 3.24：建立 Phase 3 的训练 / 回放 / 评估闭环
+
+目标：
+
+- 让 Phase 3 从“可采样 + 可训练”进一步升级为“可评估 + 可比较 baseline”
+- 形成后续替换更强 local policy 网络时的标准离线评估入口
+
+主要任务：
+
+- 新增 `evaluate_reflex_policy.py`
+- 支持 artifact 在 dataset JSONL 上离线评估
+- 输出 `action_accuracy / should_execute_accuracy / per-task accuracy / confusion`
+- 保持与现有 `reflex_replay.py` 和 `reflex_dataset_builder.py` 兼容
+
+当前达成度：
+
+- `100%`
+
+当前状态：
+
+- 已新增 `UAV-Flow-Eval/evaluate_reflex_policy.py`
+- 已用当前数据验证：
+  - `action_accuracy=1.0`
+  - `should_execute_accuracy=1.0`
+  - `avg_confidence=1.0`
+- 已做 MLP runtime smoke test：
+  - `mlp_policy mlp_reflex_policy external_model yaw_right 1.0`
+
+### Phase 3 当前轮验收结果（第七批）
+
+验收结论：
+
+- `通过（离线闭环）`
+
+本轮验收范围：
+
+- 子计划 `3.21`：多任务 / 多动作采集脚本是否已经可用
+- 子计划 `3.22`：覆盖报告是否已经能指出当前数据缺口
+- 子计划 `3.23`：轻量 MLP local policy 是否已经能训练出 artifact
+- 子计划 `3.24`：是否已经形成训练 / 回放 / 评估闭环
+
+本轮验收证据：
+
+- `collect_reflex_dataset.py --dry_run --suite extended` 已输出：
+  - `task_count=15`
+  - `executed_action_counts={forward:21, backward:5, left:9, right:9, up:5, down:5, yaw_left:8, yaw_right:8}`
+- `train_reflex_policy.py --model_type mlp` 已成功生成：
+  - `phase3_dataset_export/mlp_reflex_policy.json`
+- `evaluate_reflex_policy.py` 已成功输出：
+  - `action_accuracy=1.0`
+  - `should_execute_accuracy=1.0`
+  - `avg_confidence=1.0`
+- `reflex_coverage_report.py` 已明确指出当前真实数据仍然覆盖不足：
+  - 仅有 `1` 个任务
+  - 当前只覆盖 `up`
+  - 缺少大部分平移与偏航动作
+- MLP artifact 已可进入统一 runtime 推理路径：
+  - `mlp_policy mlp_reflex_policy external_model yaw_right 1.0`
+
+当前判断：
+
+- Phase 3 第七批已经把“多任务采集计划、覆盖诊断、轻量神经网络 baseline、离线评估”都接进了当前工程链
+- 当前 Phase 3 已经具备离线训练 / 回放 / 评估闭环
+- 当前还没有完成的不是代码链路，而是真实数据量与动作覆盖仍明显不足
+
 ### 下一步建议
 
-- 下一批优先做更丰富的训练样本采集和多任务/多动作数据覆盖
-- 再把当前 prototype baseline 替换成真实轻量 local policy 网络
-- 然后进入 Phase 3 的训练、回放和评估闭环
+- 下一批优先真正运行 `collect_reflex_dataset.py` 做一轮 `extended` 套件采集
+- 再重新执行：
+  - `reflex_dataset_builder.py`
+  - `reflex_coverage_report.py`
+  - `train_reflex_policy.py --model_type mlp`
+  - `evaluate_reflex_policy.py`
+- 然后开始比较：
+  - `prototype` vs `mlp`
+  - 不同任务子集
+  - 不同动作覆盖度下的离线效果变化
 
 ---
 
@@ -1108,14 +1277,517 @@
 
 #### 本阶段验收结论
 
-### Phase N+1 进行中：阶段名称
+---
 
-#### 阶段目标
+## Phase 3 当前轮验收结果（第八批）
 
-#### 计划完成内容
+验收结论：
+- `通过（监督口径修正后）`
 
-#### 具体开发清单
+本轮修正重点：
+- 将 Phase 3 的训练与评估监督标签从 `suggested_action` 切换为 `target_action`
+- `target_action` 统一由 `executed_action` 归一化生成
+- 保留 `suggested_action` 作为 teacher/debug 字段，但不再作为 local policy 的训练真值
 
-#### 交付物
+本轮落地内容：
+- `UAV-Flow-Eval/reflex_dataset_builder.py`
+  - 新增 `target_action`
+  - 新增 `executed_action_canonical`
+  - 新增 `teacher_action`
+- `UAV-Flow-Eval/reflex_policy_model.py`
+  - 新增统一动作归一化函数
+  - prototype / mlp 训练统一改为使用 `target_action`
+- `UAV-Flow-Eval/evaluate_reflex_policy.py`
+  - 离线评估统一改为对齐 `target_action`
+- `UAV-Flow-Eval/reflex_coverage_report.py`
+  - 新增 `target_action_counts`
+  - 明确区分 `executed_action / target_action / suggested_action`
 
-#### 验收标准
+本轮使用的真实数据：
+- `phase3_dataset_export/reflex_dataset.jsonl`
+- `phase3_dataset_export/episode_index.json`
+- 当前导出结果：
+  - `episode_count=16`
+  - `sample_count=71`
+  - `unique_task_count=15`
+
+本轮关键统计：
+- `target_action_counts`
+  - `forward=21`
+  - `backward=5`
+  - `left=9`
+  - `right=9`
+  - `up=6`
+  - `down=5`
+  - `yaw_left=8`
+  - `yaw_right=8`
+- `suggested_action_counts`
+  - `yaw_right=71`
+
+这说明：
+- 当前数据采集链已经成功覆盖多任务、多动作执行
+- 当前弱模型 teacher 仍然高度塌缩到 `yaw_right`
+- 但训练标签已经不再被 teacher 带偏，离线训练闭环语义已经纠正
+
+本轮训练与评估结果：
+- prototype baseline
+  - artifact: `phase3_dataset_export/prototype_reflex_policy_v2.json`
+  - `action_accuracy=0.5492957746478874`
+  - `avg_confidence=0.3417735971094118`
+- mlp baseline
+  - artifact: `phase3_dataset_export/mlp_reflex_policy_v2.json`
+  - `action_accuracy=0.704225352112676`
+  - `avg_confidence=0.47818709301276946`
+
+当前判断：
+- 这轮修正后，Phase 3 已经从“伪高精度的 teacher 自循环”修正为“基于真实执行动作的有效离线监督”
+- 当前 `mlp_reflex_policy_v2` 已经可以视为比 `prototype_reflex_policy_v2` 更合理的第一版轻量 local policy baseline
+- 当前离线闭环已经成立：
+  - 自动采集
+  - episode / JSONL 导出
+  - 覆盖诊断
+  - local policy 训练
+  - local policy 评估
+
+当前仍需继续补强的点：
+- 动作覆盖仍未达到 `target_per_action=12`
+  - `backward += 7`
+  - `left += 3`
+  - `right += 3`
+  - `up += 6`
+  - `down += 7`
+  - `yaw_left += 4`
+  - `yaw_right += 4`
+- 当前 `move forward and descend` 子任务离线准确率仍为 `0.0`
+- `backward / left / down` 等动作的 recall 仍然偏低，说明下一轮仍需补采并继续训练
+
+下一步建议：
+- 继续跑一轮 `collect_reflex_dataset.py --suite extended`
+- 重点补采 `backward / down / yaw_left / yaw_right`
+- 用新增样本重新执行：
+  - `reflex_dataset_builder.py`
+  - `reflex_coverage_report.py`
+  - `train_reflex_policy.py --model_type mlp`
+  - `evaluate_reflex_policy.py`
+- 当动作覆盖更均衡后，再进入 Phase 3 的在线回放 / 在线策略替换验证
+
+### Phase 3 当前轮验收结果（第九批）
+
+验收结论：
+- `通过（定向补采工具 + baseline 对比工具）`
+
+本轮新增目标：
+- 不再只依赖人工判断“下一轮该补采什么动作”
+- 让系统能根据当前数据集覆盖缺口，直接生成定向补采任务
+- 让 `prototype` 与 `mlp` 的差异不再只看单次 eval 输出，而是形成统一对比报告
+
+本轮落地内容：
+- `UAV-Flow-Eval/collect_reflex_dataset.py`
+  - 新增 `--suite weak_actions`
+  - 新增 `--coverage_dataset_jsonl`
+  - 新增 `--coverage_target_per_action`
+  - 新增 `--coverage_extra_per_action`
+- `UAV-Flow-Eval/compare_reflex_policies.py`
+  - 新增多 artifact 同数据集对比评估工具
+  - 支持输出 `ranking + pairwise delta + per_action_recall_delta + per_task_accuracy_delta`
+
+本轮关键验证：
+- `collect_reflex_dataset.py --suite weak_actions --coverage_target_per_action 12 --dry_run`
+  - 已根据当前真实数据自动生成 `11` 个补采任务
+  - 计划补采动作数：
+    - `backward=7`
+    - `left=3`
+    - `right=3`
+    - `up=6`
+    - `down=7`
+    - `yaw_left=4`
+    - `yaw_right=4`
+- `compare_reflex_policies.py`
+  - 已成功比较：
+    - `prototype_reflex_policy_v2`
+    - `mlp_reflex_policy_v2`
+  - 当前对比结果：
+    - `action_accuracy_delta = +0.15492957746478864`
+    - `avg_confidence_delta = +0.13641349590335766`
+
+当前判断：
+- Phase 3 现在已经不只是“能采、能训、能评”，而是开始具备“按缺口自动补采、按结果自动比较 baseline”的能力
+- 这让下一轮迭代会更像真正的实验闭环，而不是手动试错
+
+下一步建议：
+- 先运行一轮：
+  - `collect_reflex_dataset.py --suite weak_actions`
+- 然后重新执行：
+  - `reflex_dataset_builder.py`
+  - `reflex_coverage_report.py`
+  - `train_reflex_policy.py --model_type mlp`
+  - `compare_reflex_policies.py`
+- 当 `weak_actions` 补采后，再判断是否需要进入在线 policy 替换验证
+
+### Phase 3 当前轮验收结果（第十批）
+
+验收结论：
+- `通过（定向补采已执行，覆盖达标，完成补采后重训与比较）`
+
+本轮实际执行结果：
+- 已运行：
+  - `collect_reflex_dataset.py --suite weak_actions`
+- 实际新增采样：
+  - `capture_count=34`
+- 实际补采动作数：
+  - `backward=7`
+  - `left=3`
+  - `right=3`
+  - `up=6`
+  - `down=7`
+  - `yaw_left=4`
+  - `yaw_right=4`
+
+补采后的数据状态：
+- `sample_count=105`
+- `unique_task_count=26`
+- `target_action_counts`
+  - `forward=21`
+  - `backward=12`
+  - `left=12`
+  - `right=12`
+  - `up=12`
+  - `down=12`
+  - `yaw_left=12`
+  - `yaw_right=12`
+- `low_coverage_actions = {}`
+- 当前覆盖结论：
+  - `Coverage looks healthy for the configured target_per_action threshold.`
+
+补采后重训产物：
+- `phase3_dataset_export/prototype_reflex_policy_v3.json`
+- `phase3_dataset_export/mlp_reflex_policy_v3.json`
+
+补采后重训比较结果：
+- prototype v3
+  - `action_accuracy=0.5714285714285714`
+  - `avg_confidence=0.3206384826850657`
+- mlp v3
+  - `action_accuracy=0.5619047619047619`
+  - `avg_confidence=0.48566095985117413`
+
+本轮关键判断：
+- 定向补采本身是成功的，Phase 3 数据覆盖现在已经达标
+- 但在补采后重训场景下，`MLP v3` 没有继续保持对 `prototype` 的领先
+- 当前结果反而是：
+  - `prototype v3` 在 `action_accuracy` 上略高
+  - `mlp v3` 在 `avg_confidence` 上更高
+
+这说明：
+- 当前 MLP 路径没有偏离方向，但它还不是稳定优于 prototype 的版本
+- 现阶段更合理的表述是：
+  - `prototype` 仍然是当前更稳的强 baseline
+  - `MLP` 是已经接通、但仍需继续调参与扩特征的神经网络 baseline
+
+下一步建议：
+- 在不改主链结构的前提下，继续做两类优化：
+  - 调 MLP 训练配置：`hidden_dim / epochs / learning_rate / weight_decay`
+  - 扩输入特征：增加更稳定的局部几何与 planner/archive 上下文特征
+- 在下一轮对比里，目标不再只是“能训练”，而是“MLP 稳定超过 prototype”
+
+### Phase 3 当前状态图
+
+```mermaid
+flowchart TD
+    A["Phase 3 目标
+高层 planner 之下
+建立 archive + reflex navigator + 训练/回放/评估闭环"]
+
+    B["已完成的工程底座
+uav_control_server / panel / depth / planner
+稳定运行"]
+
+    C["Archive Runtime
+cell 注册
+transition 统计
+retrieval 命中摘要"]
+
+    D["Reflex Runtime
+risk_score
+waypoint error
+local policy 接口"]
+
+    E["数据采集闭环
+collect_reflex_dataset.py
+capture bundles
+episode / JSONL 导出"]
+
+    F["离线分析闭环
+coverage report
+retrieval report
+replay / evaluation"]
+
+    G["轻量 Local Policy Baseline
+prototype -> MLP"]
+
+    H["当前 MLP 的角色
+第一版可训练低层 policy baseline
+不是最终论文版 reflex navigator"]
+
+    I["本轮修正
+训练标签改为 target_action
+不再用塌缩的 suggested_action 做真值"]
+
+    J["当前结果
+26 tasks / 105 samples
+MLP v4 accuracy 0.857
+优于 prototype v4 0.771"]
+
+    K["还未完成
+在线闭环验证仍未完成
+组合任务仍有误差
+需要继续扩多场景样本"]
+
+    L["下一步
+接入 v4 模型到主链
+做在线回放 / 在线替换验证
+再扩多场景训练样本"]
+
+    A --> B
+    B --> C
+    B --> D
+    C --> E
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    G --> I
+    I --> J
+    J --> K
+    K --> L
+```
+
+图示说明：
+- `Archive Runtime` 和 `Reflex Runtime` 是 Phase 3 的主线能力，不是额外分支。
+- `MLP` 当前只是把“可训练 low-level policy”这件事先落地成一个真实 baseline。
+- 当前方向没有偏离，但还没有到最终论文版多模态 reflex navigator。
+
+### Phase 3 当前轮验收结果（第十一批）
+
+验收结论：
+- `通过（弱动作补采已达标，v4 MLP 已重新领先 prototype）`
+
+本轮新增工作：
+- 为 `MLP` 增加了更丰富的局部几何与 planner/archive 上下文特征。
+- 新增了 `sweep_reflex_mlp.py`，对 `hidden_dim / learning_rate / weight_decay / class_weight_power` 做小规模搜索。
+- 重新训练并导出了：
+  - `phase3_dataset_export/prototype_reflex_policy_v4.json`
+  - `phase3_dataset_export/mlp_reflex_policy_v4.json`
+
+本轮实际采样与覆盖结果：
+- 已执行：
+  - `collect_reflex_dataset.py --suite weak_actions`
+- 新增补采：
+  - `capture_count=34`
+- 当前数据规模：
+  - `sample_count=105`
+  - `unique_task_count=26`
+- 当前 `target_action_counts`
+  - `forward=21`
+  - `backward=12`
+  - `left=12`
+  - `right=12`
+  - `up=12`
+  - `down=12`
+  - `yaw_left=12`
+  - `yaw_right=12`
+- 覆盖结论：
+  - `low_coverage_actions = {}`
+  - `Coverage looks healthy for the configured target_per_action threshold.`
+
+本轮调参搜索最优结果：
+- 最优配置：
+  - `hidden_dim=64`
+  - `learning_rate=0.02`
+  - `weight_decay=0.0`
+  - `class_weight_power=0.5`
+- 验证集最优：
+  - `val_action_accuracy=0.6923076923076923`
+  - `val_avg_confidence=0.6820569966677172`
+
+v4 模型离线比较结果：
+- prototype v4
+  - `action_accuracy=0.7714285714285715`
+  - `avg_confidence=0.278598693535325`
+- mlp v4
+  - `action_accuracy=0.8571428571428571`
+  - `avg_confidence=0.703121772818446`
+- pairwise delta（mlp v4 - prototype v4）
+  - `action_accuracy_delta=0.08571428571428563`
+  - `avg_confidence_delta=0.424523079283121`
+
+当前关键判断：
+- `weak_actions` 定向补采已经把动作覆盖补齐，数据集现在符合当前阶段的训练实验要求。
+- 经扩特征与调参后，`MLP v4` 已经重新超过 `prototype v4`，说明神经网络路径没有偏离方向，且开始体现出比规则原型更强的上限。
+- 当前 Phase 3 的主问题已经从“能不能训练”转成“如何做在线闭环验证，以及如何继续扩多场景泛化”。
+
+下一步建议：
+- 先将 `mlp_reflex_policy_v4.json` 接入 `reflex_policy_server.py` 做主链在线验证。
+- 重点观察：
+  - 在线 `Reflex` 是否稳定为 `source=external_model`
+  - 组合任务中 `forward / left / right / yaw` 切换是否自然
+- 在线验证通过后，再扩新的场景与组合任务，继续拉高 `MLP` 的泛化能力。
+
+### Phase 3 当前轮验收结果（第十二批）
+
+验收结论：
+- `通过（v4 模型主链在线接入通过，在线行为质量进入持续观察阶段）`
+
+本轮在线验证配置：
+- `reflex_policy_server.py`
+  - `--model_artifact=phase3_dataset_export/mlp_reflex_policy_v4.json`
+  - `--policy_name=mlp_reflex_policy_v4`
+- `uav_control_server.py`
+  - `--reflex_policy_url=http://127.0.0.1:5022`
+  - `--reflex_auto_mode=on_move`
+
+本轮在线验证证据：
+- `uav_control_server.py` 日志稳定出现：
+  - `Auto reflex policy updated ... policy=mlp_reflex_policy_v4 source=external_model`
+- panel 在线状态显示：
+  - `Reflex mode=mlp_policy`
+  - `policy=mlp_reflex_policy_v4`
+  - `source=external_model`
+- 本轮在线任务样例：
+  - `task_label=move right 3 meters`
+  - `planner=external_heuristic_planner`
+  - `subgoal=turn_right`
+  - `archive retrieval` 已命中对应 `move_right_3_meters / turn_right` cell
+- 本轮在线采样已落盘：
+  - `captures_remote/capture_20260319_095408_bundle.json`
+
+在线表现观察：
+- 当前在线 reflex 建议已不再塌缩成单一动作，而是会随状态在：
+  - `left`
+  - `yaw_left`
+  - `forward`
+  之间变化。
+- 这说明 `MLP v4` 在在线链路里已经真正参与决策，而不是只返回固定占位动作。
+- 结合当前 waypoint 与 archive 命中状态，`left / forward / yaw_left` 的切换在几何上并非明显失真，说明模型已经具备一定的局部纠偏能力。
+
+当前仍需继续观察的问题：
+- panel 当前案例里 `conf=0.00`，与离线评估时的较高平均置信度不完全一致。
+- 对于 `move right 3 meters` 这类“横移 + 转向”混合任务，在线建议还存在来回切换，需要继续收集更多在线样本来判断：
+  - 是真实几何纠偏
+  - 还是策略仍有抖动
+
+本轮阶段判断：
+- Phase 3 现在已经正式进入：
+  - `离线训练可比较`
+  - `在线主链可接入`
+  - `在线行为可观察`
+  的阶段。
+- 当前的主问题已经不是“能不能接起来”，而是“怎样把在线行为稳定性做得更好”。
+
+下一步建议：
+- 增加一轮“在线回放/在线评估记录”，专门统计：
+  - 建议动作切换频率
+  - 置信度分布
+  - 任务完成前的 waypoint 误差变化
+- 在此基础上，再决定是：
+  - 继续扩充 `move right / strafe / turn` 场景数据
+  - 还是先修正 `confidence` 在线显示与校准
+
+### Phase 3 当前轮进展（第十三批）
+
+当前状态：
+- `已完成工具交付，待运行在线评估 session`
+
+本轮新增内容：
+- 新增在线评估记录脚本：
+  - `UAV-Flow-Eval/online_reflex_eval.py`
+- 该工具会持续读取 `GET /state`，输出：
+  - `summary.json`
+  - `trace.jsonl`
+
+当前支持的在线指标：
+- 动作切换统计
+  - `suggested_action_counts`
+  - `action_switch_count`
+  - `action_switch_rate_per_transition`
+  - `switch_by_subgoal`
+- 策略与链路状态统计
+  - `policy_mode_counts`
+  - `policy_name_counts`
+  - `source_counts`
+  - `retrieval_hit_rate`
+- 置信度与运行时统计
+  - `confidence_stats`
+  - `latency_stats_ms`
+  - `risk_stats`
+  - `zero_confidence_fraction`
+- waypoint 与几何误差统计
+  - `waypoint_distance_stats_cm`
+  - `yaw_error_abs_stats_deg`
+  - `progress_stats_cm`
+
+脚本运行方式：
+- 主链运行时，执行：
+  - `python E:\github\UAV-Flow\UAV-Flow-Eval\online_reflex_eval.py --server_url http://127.0.0.1:5020 --session_name phase3_online_eval --duration_s 45 --poll_interval_s 0.5 --only_on_change`
+- 如果当前 reflex 是 `manual` 刷新模式，也可以执行：
+  - `python E:\github\UAV-Flow\UAV-Flow-Eval\online_reflex_eval.py --server_url http://127.0.0.1:5020 --session_name phase3_online_eval --duration_s 45 --poll_interval_s 0.5 --only_on_change --request_reflex_on_poll`
+
+本轮验证结果：
+- `online_reflex_eval.py` 已通过：
+  - `py_compile`
+  - `--help`
+- 当前尚未写入真实在线 session 结果，因此本批次记录为：
+  - `工具已交付`
+  - `在线 session 待验收`
+
+下一步建议：
+- 直接对 `mlp_reflex_policy_v4` 跑一轮 `online_reflex_eval.py`
+- 本轮重点观察：
+  - `action_switch_rate_per_transition`
+  - `confidence_stats`
+  - `waypoint_distance_stats_cm.improvement_initial_minus_final`
+- 如果在线切换频率过高，再决定是否做：
+  - 输出平滑
+  - 置信度阈值门控
+  - 组合任务补采
+
+### Phase 4 入口计划
+
+当前状态：
+- `已建立正式入口计划，Phase 4 尚未开工`
+
+计划文档：
+- `docs/phase4_entry_plan.md`
+
+Phase 4 的核心方向：
+- `planner / LLM` 负责低频语义指导
+- `local reflex policy` 负责高频低层动作
+- 人从“主控制者”逐步退到“监督接管者”
+
+Phase 4 的首要任务：
+- `4.1 Autonomous Reflex Executor`
+- 也就是先让当前 reflex policy 从“只给建议”走到“可选自动执行”
+
+Phase 4 当前子计划与达成度：
+- `4.1 Autonomous Reflex Executor`
+  - 目标：加入可切换的 reflex 自动执行模式
+  - 达成度：`0%`
+- `4.2 Takeover And Intervention Logging`
+  - 目标：记录人工接管时机、原因与纠正动作
+  - 达成度：`0%`
+- `4.3 LLM / Planner Mission Guidance Adapter`
+  - 目标：将语义任务正式收入口径稳定的高层指导接口
+  - 达成度：`0%`
+- `4.4 Safety Shield And Execution Gating`
+  - 目标：用置信度、风险和规则门控保护自动执行
+  - 达成度：`0%`
+- `4.5 Online Evaluation And Acceptance Loop`
+  - 目标：把在线 summary 变成正式验收机制
+  - 达成度：`0%`
+- `4.6 Dataset Flywheel For Semi-Autonomous Episodes`
+  - 目标：让半自动 episode 成为主要训练来源
+  - 达成度：`0%`
+
+下一步建议：
+- 直接从 `4.1 Autonomous Reflex Executor` 开始
+- 这是最小但最关键的一步，因为它决定我们是否真的从“人工驱动实验”进入“半自动闭环”
