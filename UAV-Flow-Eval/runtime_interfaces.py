@@ -92,6 +92,179 @@ def build_waypoint(
     }
 
 
+def build_search_region(
+    *,
+    region_id: str = "",
+    region_label: str = "",
+    region_type: str = "area",
+    room_type: str = "",
+    priority: int = 0,
+    status: str = "unobserved",
+    rationale: str = "",
+) -> Dict[str, Any]:
+    """Build a normalized search-region descriptor for mission guidance."""
+    return {
+        "region_id": str(region_id or ""),
+        "region_label": str(region_label or ""),
+        "region_type": str(region_type or "area"),
+        "room_type": str(room_type or ""),
+        "priority": int(priority),
+        "status": str(status or "unobserved"),
+        "rationale": str(rationale or ""),
+    }
+
+
+def coerce_search_region_payload(raw: Any) -> Optional[Dict[str, Any]]:
+    """Normalize an arbitrary region-like object into the shared search-region schema."""
+    if not isinstance(raw, dict):
+        return None
+    return build_search_region(
+        region_id=str(raw.get("region_id", raw.get("id", ""))),
+        region_label=str(raw.get("region_label", raw.get("label", ""))),
+        region_type=str(raw.get("region_type", "area")),
+        room_type=str(raw.get("room_type", "")),
+        priority=int(raw.get("priority", 0) or 0),
+        status=str(raw.get("status", "unobserved")),
+        rationale=str(raw.get("rationale", raw.get("reason", ""))),
+    )
+
+
+def build_mission_state(
+    *,
+    mission_id: str = "",
+    created_at: Optional[str] = None,
+    task_label: str = "",
+    mission_text: str = "",
+    mission_type: str = "semantic_navigation",
+    target_type: str = "waypoint",
+    search_scope: str = "local",
+    priority_regions: Optional[List[Dict[str, Any]]] = None,
+    confirm_target: bool = False,
+    success_criteria: Optional[List[str]] = None,
+    constraints: Optional[List[str]] = None,
+    status: str = "idle",
+) -> Dict[str, Any]:
+    """Build a normalized mission descriptor for Phase 4 search-style guidance."""
+    return {
+        "schema_version": "phase4.mission.v1",
+        "mission_id": str(mission_id or ""),
+        "created_at": created_at or now_timestamp(),
+        "task_label": str(task_label or ""),
+        "mission_text": str(mission_text or task_label or ""),
+        "mission_type": str(mission_type or "semantic_navigation"),
+        "target_type": str(target_type or "waypoint"),
+        "search_scope": str(search_scope or "local"),
+        "priority_regions": priority_regions or [],
+        "confirm_target": bool(confirm_target),
+        "success_criteria": success_criteria or [],
+        "constraints": constraints or [],
+        "status": str(status or "idle"),
+    }
+
+
+def build_search_runtime_state(
+    *,
+    mission_id: str = "",
+    mission_type: str = "semantic_navigation",
+    mission_status: str = "idle",
+    current_search_subgoal: str = "idle",
+    priority_region: Optional[Dict[str, Any]] = None,
+    candidate_regions: Optional[List[Dict[str, Any]]] = None,
+    visited_region_count: int = 0,
+    suspect_region_count: int = 0,
+    confirmed_region_count: int = 0,
+    evidence_count: int = 0,
+    detection_state: str = "unknown",
+    estimated_person_position: Optional[Dict[str, Any]] = None,
+    last_reasoning: str = "",
+    replan_count: int = 0,
+) -> Dict[str, Any]:
+    """Build a normalized search-runtime state for mission-oriented evaluation."""
+    return {
+        "schema_version": "phase4.search_runtime.v1",
+        "mission_id": str(mission_id or ""),
+        "mission_type": str(mission_type or "semantic_navigation"),
+        "mission_status": str(mission_status or "idle"),
+        "current_search_subgoal": str(current_search_subgoal or "idle"),
+        "priority_region": priority_region or {},
+        "candidate_regions": candidate_regions or [],
+        "visited_region_count": int(visited_region_count),
+        "suspect_region_count": int(suspect_region_count),
+        "confirmed_region_count": int(confirmed_region_count),
+        "evidence_count": int(evidence_count),
+        "detection_state": str(detection_state or "unknown"),
+        "estimated_person_position": estimated_person_position or {},
+        "last_reasoning": str(last_reasoning or ""),
+        "replan_count": int(replan_count),
+    }
+
+
+def build_person_evidence_runtime_state(
+    *,
+    mission_id: str = "",
+    mission_type: str = "semantic_navigation",
+    evidence_status: str = "idle",
+    suspect_count: int = 0,
+    confirm_present_count: int = 0,
+    confirm_absent_count: int = 0,
+    evidence_event_count: int = 0,
+    confidence: float = 0.0,
+    suspect_region: Optional[Dict[str, Any]] = None,
+    estimated_person_position: Optional[Dict[str, Any]] = None,
+    evidence_capture_ids: Optional[List[str]] = None,
+    last_event_type: str = "",
+    last_reason: str = "",
+    last_note: str = "",
+    last_updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a normalized runtime view of fused person-search evidence."""
+    return {
+        "schema_version": "phase4.person_evidence.v1",
+        "mission_id": str(mission_id or ""),
+        "mission_type": str(mission_type or "semantic_navigation"),
+        "evidence_status": str(evidence_status or "idle"),
+        "suspect_count": int(suspect_count),
+        "confirm_present_count": int(confirm_present_count),
+        "confirm_absent_count": int(confirm_absent_count),
+        "evidence_event_count": int(evidence_event_count),
+        "confidence": float(confidence),
+        "suspect_region": suspect_region or {},
+        "estimated_person_position": estimated_person_position or {},
+        "evidence_capture_ids": evidence_capture_ids or [],
+        "last_event_type": str(last_event_type or ""),
+        "last_reason": str(last_reason or ""),
+        "last_note": str(last_note or ""),
+        "last_updated_at": last_updated_at or now_timestamp(),
+    }
+
+
+def build_search_result_state(
+    *,
+    mission_id: str = "",
+    mission_type: str = "semantic_navigation",
+    result_status: str = "unknown",
+    person_exists: Optional[bool] = None,
+    estimated_person_position: Optional[Dict[str, Any]] = None,
+    confidence: float = 0.0,
+    supporting_capture_ids: Optional[List[str]] = None,
+    summary: str = "",
+    last_updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a normalized search-result state for person-search episodes."""
+    return {
+        "schema_version": "phase4.search_result.v1",
+        "mission_id": str(mission_id or ""),
+        "mission_type": str(mission_type or "semantic_navigation"),
+        "result_status": str(result_status or "unknown"),
+        "person_exists": person_exists,
+        "estimated_person_position": estimated_person_position or {},
+        "confidence": float(confidence),
+        "supporting_capture_ids": supporting_capture_ids or [],
+        "summary": str(summary or ""),
+        "last_updated_at": last_updated_at or now_timestamp(),
+    }
+
+
 def coerce_waypoint_payload(raw: Any, *, default_radius: float = 50.0) -> Optional[Dict[str, Any]]:
     """Normalize an arbitrary waypoint-like object into the shared waypoint schema."""
     if not isinstance(raw, dict):
@@ -116,6 +289,12 @@ def build_plan_state(
     semantic_subgoal: str = "idle",
     planner_confidence: float = 0.0,
     should_replan: bool = False,
+    mission_type: str = "semantic_navigation",
+    search_subgoal: str = "",
+    priority_region: Optional[Dict[str, Any]] = None,
+    candidate_regions: Optional[List[Dict[str, Any]]] = None,
+    confirm_target: bool = False,
+    explanation: str = "",
     debug: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a normalized high-level planner state."""
@@ -129,6 +308,12 @@ def build_plan_state(
         "semantic_subgoal": semantic_subgoal,
         "planner_confidence": float(planner_confidence),
         "should_replan": bool(should_replan),
+        "mission_type": str(mission_type or "semantic_navigation"),
+        "search_subgoal": str(search_subgoal or semantic_subgoal or "idle"),
+        "priority_region": priority_region or {},
+        "candidate_regions": candidate_regions or [],
+        "confirm_target": bool(confirm_target),
+        "explanation": str(explanation or ""),
         "debug": debug or {},
     }
 
@@ -146,6 +331,8 @@ def build_plan_request(
     planner_name: str = "",
     trigger: str = "manual",
     step_index: int = 0,
+    mission: Optional[Dict[str, Any]] = None,
+    search_runtime: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the shared Phase 2 planner request payload."""
@@ -162,6 +349,8 @@ def build_plan_request(
         "depth": depth or {},
         "camera_info": camera_info or {},
         "image_b64": image_b64,
+        "mission": mission or {},
+        "search_runtime": search_runtime or {},
         "context": context or {},
     }
 
@@ -181,6 +370,12 @@ def coerce_plan_payload(
         normalized = coerce_waypoint_payload(waypoint, default_radius=default_radius)
         if normalized is not None:
             candidate_waypoints.append(normalized)
+    candidate_regions: List[Dict[str, Any]] = []
+    for region in payload.get("candidate_regions") or []:
+        normalized_region = coerce_search_region_payload(region)
+        if normalized_region is not None:
+            candidate_regions.append(normalized_region)
+    priority_region = coerce_search_region_payload(payload.get("priority_region")) or {}
     return build_plan_state(
         plan_id=str(payload.get("plan_id", default_plan_id)),
         planner_name=str(payload.get("planner_name", default_planner_name)),
@@ -190,6 +385,12 @@ def coerce_plan_payload(
         semantic_subgoal=str(payload.get("semantic_subgoal", default_semantic_subgoal)),
         planner_confidence=float(payload.get("planner_confidence", 0.0)),
         should_replan=bool(payload.get("should_replan", False)),
+        mission_type=str(payload.get("mission_type", "semantic_navigation")),
+        search_subgoal=str(payload.get("search_subgoal", payload.get("semantic_subgoal", default_semantic_subgoal))),
+        priority_region=priority_region,
+        candidate_regions=candidate_regions,
+        confirm_target=bool(payload.get("confirm_target", False)),
+        explanation=str(payload.get("explanation", "")),
         debug=payload.get("debug") if isinstance(payload.get("debug"), dict) else {},
     )
 

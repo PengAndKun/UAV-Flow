@@ -1860,3 +1860,398 @@ Phase 4 当前子计划与达成度：
   - 是否出现不合理连跳
   - 是否被 `confidence / risk` 正确门控
   - `Executor ...` 状态是否与实际行为一致
+
+### Phase 4 当前轮进展（第二批）
+
+当前状态：
+- `已开始落地 4.2 Takeover And Intervention Logging 的第一版记录链`
+
+本轮新增内容：
+- `uav_control_server.py`
+  - 新增 `takeover_runtime`
+  - 新增 `takeover_recent_events`
+  - 新增 `GET /takeover`
+  - 新增 `POST /takeover`
+  - 新增自动 `manual_intervention` 记录
+  - 新增 takeover JSONL 落盘目录参数：
+    - `--takeover_log_dir`
+    - `--takeover_recent_limit`
+- `uav_control_panel.py`
+  - 新增 `Takeover ...` 状态行
+  - 新增 `Takeover Note`
+  - 新增 `Start Takeover`
+  - 新增 `End Takeover`
+
+当前实现能力：
+- 手动动作现在会自动记录 intervention：
+  - 记录 `reason`
+  - 记录 `corrective_action`
+  - 记录 `before_runtime`
+  - 记录 `after_runtime`
+- takeover session 支持：
+  - 自动开始
+  - 显式开始
+  - 显式结束
+- 运行时与采集元数据中现在会带：
+  - `takeover_runtime`
+  - `takeover_recent_events`
+
+当前设计说明：
+- `assist_step` 下出现：
+  - `status=executed`
+  - `status=blocked reason=opposes_manual_action`
+  属于当前设计内的正常现象
+- 这样做的原因是：
+  - 保留人工主控优先级
+  - 防止自动辅助动作与人工动作直接对冲
+  - 为后续 takeover 数据分析保留明确因果链
+
+本轮验证结果：
+- 已通过：
+  - `py_compile`
+  - `/takeover` 接口接入
+  - 手动 intervention 自动记录链已落地
+- 当前达成度建议更新为：
+  - `4.2 Takeover And Intervention Logging = 45%`
+
+下一步建议：
+- 直接跑一轮真实 takeover 调试：
+  - 显式 `Start Takeover`
+  - 连续做 5~10 次人工纠正动作
+  - `End Takeover`
+- 然后检查：
+  - `phase4_takeover_logs/*.jsonl`
+  - `/state` 里的 `takeover_runtime`
+  - capture bundle 中的 `takeover_runtime / takeover_recent_events`
+
+补充修复（第二批）：
+- takeover 会话原因不再被单次 intervention 原因覆盖
+  - panel 现在区分：
+    - `reason` = takeover session reason
+    - `last_reason` = latest intervention reason
+- `manual_intervention.after_runtime` 现在表示人工动作之后、assist 追加之前的状态
+  - 额外新增：
+    - `post_assist_runtime`
+- 新增默认固定出生位置机制：
+  - `--fixed_spawn_pose_file`
+  - 当未提供 `task_json / spawn_x / spawn_y / spawn_z` 时：
+    - 若固定 pose 文件存在，则直接使用
+    - 若不存在，则从当前首次 reset pose 初始化并保存
+
+### Phase 4 当前轮验收结果（第三批）
+
+验收结论：
+- `通过（4.2 Takeover And Intervention Logging 第一版可验收，固定出生点机制已落地）`
+
+本轮验收依据：
+- takeover 日志文件已稳定落盘：
+  - `phase4_takeover_logs/takeover_session_20260319_165029.jsonl`
+- 固定出生点文件已生成：
+  - `uav_fixed_spawn_pose.json`
+- 联合前一轮 capture 样本可确认：
+  - capture bundle 已写入 `takeover_runtime`
+  - capture bundle 已写入 `takeover_recent_events`
+
+本轮确认通过的点：
+- `takeover_start / manual_intervention / takeover_end` 事件链已经打通
+- takeover 会话原因与单次干预原因已分离：
+  - 会话层保留 `planner drift`
+  - 单次干预层单独记录 `post_block:*` 或 `override_reflex_suggestion`
+- `manual_intervention.after_runtime` 现在表示人工纠正动作完成后的状态
+- 如有 assist 追加动作，会额外记录到：
+  - `post_assist_runtime`
+- 固定出生点已初始化成功，当前固定 pose 为：
+  - `x=2087.589`
+  - `y=-1330.534`
+  - `z=105.0`
+  - `yaw=40.87700000000001`
+
+当前仍保留的非阻塞观察：
+- `takeover_session_20260319_165029.jsonl` 在后续连续实验中被继续追加，说明 takeover 记录支持长时间重复实验，但做单轮验收时最好仍以“显式开始 + 显式结束”的闭环 session 为主
+- 最新追加段中出现：
+  - `task_label=""`
+  - `note=""`
+  这更像是后续连续实验时未重新设置任务/备注，而不是记录链断裂
+- 因此该问题当前记为：
+  - `可优化项，不阻塞 4.2 第一版验收`
+
+阶段判断：
+- `4.2 Takeover And Intervention Logging` 可从 `45%` 上调为 `75%`
+- 当前下一步最自然的工作切换到：
+  - `4.3 LLM / Planner Mission Guidance Adapter`
+- 补充方案修订文档：
+  - `docs/search_paper_revision_log.md`
+  - 用于单独记录从“分层导航系统”转向“室内房屋找人具身搜索系统”后的方案修改内容
+  - 同时给出后续最小可发表版本的系统范围、实验范围与开发顺序
+
+### Phase 4.3 Current Build (Minimal Mission/Search Adapter)
+
+Current status:
+- In progress and code-connected at the schema/runtime level.
+
+This batch added a minimal mission/search layer without replacing the current
+heuristic planner with a real LLM yet. The goal is to move the runtime from
+"navigation-only labels" toward "search-mission episodes" while keeping the
+existing planner/reflex/archive stack usable.
+
+Changes completed:
+- `runtime_interfaces.py`
+  - Added shared mission/search schemas:
+    - `build_mission_state(...)`
+    - `build_search_runtime_state(...)`
+    - `build_search_region(...)`
+  - Extended planner request and plan payloads with:
+    - `mission`
+    - `search_runtime`
+    - `mission_type`
+    - `search_subgoal`
+    - `priority_region`
+    - `candidate_regions`
+    - `confirm_target`
+    - `explanation`
+- `planner_server.py`
+  - Added minimal mission classification:
+    - `semantic_navigation`
+    - `room_search`
+    - `person_search`
+    - `target_verification`
+  - Added heuristic search-region output so the planner now returns both:
+    - waypoint guidance
+    - search-semantic guidance
+- `uav_control_server.py`
+  - Added persistent runtime states:
+    - `current_mission`
+    - `search_runtime`
+  - Planner requests now send mission/search context to the planner service.
+  - `/state` now returns:
+    - `mission`
+    - `search_runtime`
+  - capture bundle metadata now stores:
+    - `mission`
+    - `search_runtime`
+- `uav_control_panel.py`
+  - Added a `Mission ...` status line for quick inspection of:
+    - mission type
+    - mission status
+    - current search subgoal
+    - priority region
+    - detection state
+    - visited-region counter
+
+Validation completed:
+- `python -m py_compile` passed for:
+  - `runtime_interfaces.py`
+  - `planner_server.py`
+  - `uav_control_server.py`
+  - `uav_control_panel.py`
+- Planner smoke test passed:
+  - task = `search the bedroom for people`
+  - output `mission_type = person_search`
+  - output `search_subgoal = search_room`
+  - output `priority_region = bedroom`
+
+Current scope boundary:
+- This is not the final LLM mission planner yet.
+- It is the minimal adapter layer needed to:
+  - define search-mission episodes
+  - carry mission/search state through planner -> server -> panel -> capture
+  - prepare the codebase for later search experiments and LLM integration
+
+Recommended next step:
+- Start `4.3` task/schema validation with real task labels such as:
+  - `search the house for people`
+  - `search the bedroom first`
+  - `approach and verify the suspect region`
+- Then move to `4.4` style work:
+  - person evidence fusion
+  - search-result logging
+  - mission-level evaluation metrics
+
+### Phase 4.3 Current Build (Real-Task Validation Pass)
+
+Current status:
+- In progress, with real search-task prompt validation now connected.
+
+This batch pushed Phase 4.3 one step beyond schema wiring and into realistic
+task validation for the revised paper direction ("indoor house person search").
+
+Changes completed:
+- `planner_server.py`
+  - improved parsing of realistic search prompts:
+    - whole-house search
+    - room-priority search
+    - suspect-region verification
+    - multi-region search prompts
+  - task text order now affects `priority_region`
+  - verification language now maps to:
+    - `mission_type = target_verification`
+- `uav_control_server.py`
+  - aligned mission descriptor parsing with planner-side search-task parsing
+  - keeps mission-side region priorities closer to planner-side outputs
+- `validate_mission_guidance.py`
+  - new real-task validation harness for Phase 4.3 mission guidance
+  - validates mission/search semantics without requiring the full runtime stack
+
+Validation completed:
+- `python -m py_compile` passed for:
+  - `planner_server.py`
+  - `uav_control_server.py`
+  - `validate_mission_guidance.py`
+- `validate_mission_guidance.py --strict` passed
+  - `case_count = 5`
+  - `pass_count = 5`
+  - `fail_count = 0`
+
+Validated prompts:
+- `search the house for people`
+- `search the bedroom first and then check the hallway`
+- `search the living room for a survivor`
+- `approach and verify the suspect region near the bedroom door`
+- `revisit the bathroom and confirm whether a person is there`
+
+Interpretation:
+- The planner is still heuristic, not yet an actual LLM mission planner.
+- But the interface and prompt semantics now match the revised paper task much more closely.
+- This is sufficient to start live mission-level debugging with search-style task labels.
+
+Recommended next step:
+- Run a live 4.3 task loop using:
+  - `search the house for people`
+  - `search the bedroom first`
+  - `approach and verify the suspect region`
+- During those runs, inspect:
+  - panel `Mission ...` line
+  - `/state -> mission / search_runtime`
+  - capture bundle mission metadata
+
+### Phase 4.3 Live Mission Validation (Paper-Aligned Search Tasks)
+
+Current status:
+- Basically passed for mission/search semantic linkage in live runtime tests.
+
+Validated live tasks:
+- `search the house for people`
+- `search the bedroom first`
+- `approach and verify the suspect region`
+
+Observed live behavior:
+- panel `Mission ...` line matched the task semantics:
+  - `person_search -> search_house`
+  - `room_search -> search_room`
+  - `target_verification -> approach_suspect_region`
+- `uav_control_server.py` carried mission/search state through:
+  - planner
+  - `/state`
+  - capture bundle metadata
+- verified example bundle:
+  - `E:/github/UAV-Flow/captures_remote/capture_20260319_215633_bundle.json`
+  - bundle fields matched the third live panel screenshot:
+    - `mission_type = target_verification`
+    - `current_search_subgoal = approach_suspect_region`
+    - `priority_region = suspect region`
+    - `confirm_target = true`
+
+Interpretation:
+- Phase 4.3 is now past offline schema validation and into live mission-task runtime validation.
+- The semantic chain is working.
+- Remaining risk is no longer "task fields are missing", but "policy behavior quality under search tasks still needs improvement."
+
+### Phase 4.4 Current Build (Person Evidence Fusion + Search Result Logging, Minimal Version)
+
+Current status:
+- In progress, with the minimal runtime/logging loop now connected.
+
+Changes completed:
+- `runtime_interfaces.py`
+  - added shared builders for:
+    - `phase4.person_evidence.v1`
+    - `phase4.search_result.v1`
+- `uav_control_server.py`
+  - added persistent runtime states:
+    - `person_evidence_runtime`
+    - `search_result`
+    - `person_evidence_recent_events`
+  - added search evidence JSONL logging:
+    - `--search_log_dir`
+    - `--search_recent_limit`
+    - log directory default = `./phase4_search_logs`
+  - added minimal evidence actions:
+    - `suspect`
+    - `confirm_present`
+    - `confirm_absent`
+    - `reset`
+  - added `/person_evidence` GET/POST route
+  - `/state` now returns:
+    - `person_evidence_runtime`
+    - `search_result`
+    - `person_evidence_recent_events`
+  - capture bundle metadata now stores:
+    - `person_evidence_runtime`
+    - `search_result`
+    - `person_evidence_recent_events`
+- `uav_control_panel.py`
+  - added `Evidence ...` status line
+  - added `Evidence Note` input
+  - added buttons:
+    - `Mark Suspect`
+    - `Confirm Person`
+    - `Reject Person`
+    - `Reset Evidence`
+  - added shortcuts:
+    - `G` suspect
+    - `H` confirm person
+    - `J` reject person
+    - `O` reset evidence
+
+Validation completed:
+- `python -m py_compile` passed for:
+  - `runtime_interfaces.py`
+  - `uav_control_server.py`
+  - `uav_control_panel.py`
+  - `planner_server.py`
+
+Scope boundary:
+- This is the minimal first version of 4.4.
+- It is not yet a learned person detector or full multi-frame fusion module.
+- It is the runtime/logging layer needed so later person-evidence algorithms can plug into:
+  - live debugging
+  - capture bundles
+  - search-result evaluation
+
+Recommended next step:
+- Run a live 4.4 evidence loop:
+  - mark `suspect`
+  - then `confirm person` or `reject person`
+  - capture a bundle
+  - inspect:
+    - `phase4_search_logs/*.jsonl`
+    - `/state -> person_evidence_runtime / search_result`
+    - capture bundle evidence metadata
+
+### Phase 4.4 Acceptance Check (Bug Fix Follow-Up)
+
+Observed during the first live 4.4 check:
+- search evidence events were being written correctly to:
+  - `phase4_search_logs/search_session_*.jsonl`
+- but the capture bundle could still show reset/empty evidence state
+- root cause:
+  - `capture_frame()` called `set_task_label(task_label)` even when the task label had not changed
+  - this unintentionally reset:
+    - mission id
+    - person evidence runtime
+    - search result state
+- secondary issue:
+  - evidence region fallback accepted empty planner/runtime priority-region dicts, so early evidence events could log an empty region descriptor
+
+Fixes applied:
+- `uav_control_server.py`
+  - `capture_frame()` now only resets task/mission state when the requested task label is non-empty and actually different from the current task
+  - `resolve_active_region_for_evidence()` now falls back past empty region payloads instead of accepting blank planner/runtime regions
+
+Validation completed:
+- `python -m py_compile` passed after the fixes
+
+Interpretation:
+- the first 4.4 live attempt proved the event/logging route worked
+- the follow-up fixes were required so capture bundles preserve the active evidence state correctly
+- final 4.4 acceptance should be based on one rerun after these fixes

@@ -17,9 +17,156 @@ from urllib.parse import urlparse
 
 import numpy as np
 
-from runtime_interfaces import build_plan_state, build_plan_request, build_waypoint, coerce_plan_payload, now_timestamp
+from runtime_interfaces import (
+    build_plan_request,
+    build_plan_state,
+    build_search_region,
+    build_waypoint,
+    coerce_plan_payload,
+    now_timestamp,
+)
 
 logger = logging.getLogger(__name__)
+
+ROOM_REGION_HINTS = [
+    (("bedroom", "bed room"), "bedroom", "bedroom", "Bedrooms often contain likely resting or hiding targets."),
+    (("kitchen",), "kitchen", "kitchen", "Kitchens are common traversed spaces worth checking quickly."),
+    (("bathroom", "restroom"), "bathroom", "bathroom", "Bathrooms are compact rooms that need explicit confirmation."),
+    (("living room", "livingroom", "lounge"), "living_room", "living_room", "Living rooms contain large furniture and occluded corners."),
+    (("hallway", "corridor"), "hallway", "hallway", "Hallways connect multiple rooms and are useful for coverage expansion."),
+    (("stairs", "stair", "staircase"), "stairs", "stairs", "Stair areas are transition zones that often require reorientation."),
+    (("door", "doorway", "entry"), "doorway", "doorway", "Doorways are useful search pivots for entering new rooms."),
+    (("corner", "occluded corner"), "corner", "", "Occluded corners are high-value regions for search confirmation."),
+]
+
+
+def infer_mission_type(task_label: str, request_payload: Dict[str, Any]) -> str:
+    text = task_label.lower()
+    mission = request_payload.get("mission") if isinstance(request_payload.get("mission"), dict) else {}
+    if mission.get("mission_type"):
+        return str(mission.get("mission_type"))
+    if any(keyword in text for keyword in ["confirm", "verify", "approach", "closer inspection"]):
+        return "target_verification"
+    if any(keyword in text for keyword in ["person", "people", "human", "survivor", "victim"]):
+        return "person_search"
+    if any(keyword in text for keyword in ["search", "find", "inspect", "look for"]):
+        return "room_search"
+    return "semantic_navigation"
+
+
+def infer_candidate_regions(task_label: str, mission_type: str) -> List[Dict[str, Any]]:
+    text = task_label.lower()
+    candidate_regions: List[Tuple[int, Dict[str, Any]]] = []
+    if any(keyword in text for keyword in ["house", "building", "entire home", "whole house", "whole home"]):
+        candidate_regions.append(
+            (
+                text.find("house") if "house" in text else 0,
+                build_search_region(
+                    region_id="entire_house",
+                    region_label="entire house",
+                    region_type="house",
+                    room_type="house",
+                    priority=4,
+                    status="unobserved",
+                    rationale="Global mission scope requires broad house-level search coverage.",
+                ),
+            )
+        )
+    for keywords, region_label, room_type, rationale in ROOM_REGION_HINTS:
+        matches = [text.find(keyword) for keyword in keywords if keyword in text]
+        if matches:
+            candidate_regions.append(
+                (
+                    min(matches),
+                    build_search_region(
+                        region_id=f"{region_label}_{len(candidate_regions) + 1}",
+                        region_label=region_label.replace("_", " "),
+                        region_type="room" if room_type else "area",
+                        room_type=room_type,
+                        priority=0,
+                        status="suspect" if mission_type in ("person_search", "target_verification") else "unobserved",
+                        rationale=rationale,
+                    ),
+                )
+            )
+    if any(keyword in text for keyword in ["suspect", "possible person", "possible target"]) and not any(
+        region.get("region_label") == "suspect region" for _, region in candidate_regions
+    ):
+        candidate_regions.append(
+            (
+                max(0, text.find("suspect")),
+                build_search_region(
+                    region_id="suspect_region",
+                    region_label="suspect region",
+                    region_type="area",
+                    priority=0,
+                    status="suspect",
+                    rationale="The task explicitly mentions a suspect region that should be revisited or confirmed.",
+                ),
+            )
+        )
+    candidate_regions.sort(key=lambda item: item[0])
+    normalized_regions: List[Dict[str, Any]] = []
+    for index, (_position, region) in enumerate(candidate_regions):
+        region["priority"] = max(1, 4 - index)
+        normalized_regions.append(region)
+    if normalized_regions:
+        return normalized_regions
+    if mission_type in ("person_search", "room_search", "target_verification"):
+        return [
+            build_search_region(
+                region_id="forward_search_sector",
+                region_label="forward search sector",
+                region_type="sector",
+                priority=2,
+                status="unobserved",
+                rationale="Default search region derived from the current forward-facing observation.",
+            )
+        ]
+    return []
+
+
+def infer_search_subgoal(task_label: str, mission_type: str, semantic_subgoal: str, candidate_regions: List[Dict[str, Any]]) -> str:
+    text = task_label.lower()
+    if mission_type == "target_verification":
+        if any(keyword in text for keyword in ["approach", "closer", "move closer", "go closer"]):
+            return "approach_suspect_region"
+        return "confirm_suspect_region"
+    if mission_type in ("person_search", "room_search"):
+        if any(keyword in text for keyword in ["revisit", "recheck", "again"]):
+            return "revisit_suspect_region"
+        if any(keyword in text for keyword in ["confirm", "verify"]):
+            return "confirm_suspect_region"
+        if any(keyword in text for keyword in ["house", "building", "whole house", "entire house"]):
+            return "search_house"
+        if any(keyword in text for keyword in ["cover", "sweep", "scan"]):
+            return "search_frontier"
+        if candidate_regions and candidate_regions[0].get("region_type") == "room":
+            return "search_room"
+        return "search_frontier"
+    if semantic_subgoal in ("turn_left", "turn_right"):
+        return "reorient_for_navigation"
+    if semantic_subgoal.startswith("move_"):
+        return "advance_to_waypoint"
+    return semantic_subgoal or "idle"
+
+
+def build_search_explanation(
+    *,
+    mission_type: str,
+    matched_keywords: List[str],
+    candidate_regions: List[Dict[str, Any]],
+    semantic_subgoal: str,
+) -> str:
+    region_labels = [str(region.get("region_label", "")) for region in candidate_regions if region.get("region_label")]
+    if mission_type in ("person_search", "room_search", "target_verification"):
+        if region_labels:
+            return (
+                f"Mission guidance prioritizes {', '.join(region_labels[:3])} "
+                f"while preserving navigation subgoal={semantic_subgoal}."
+            )
+        return f"Mission guidance falls back to forward search frontier with subgoal={semantic_subgoal}."
+    return f"Heuristic navigation matched={','.join(matched_keywords)} subgoal={semantic_subgoal}."
 
 
 def normalize_angle_deg(angle_deg: float) -> float:
@@ -76,6 +223,7 @@ def build_heuristic_plan(request_payload: Dict[str, Any], planner_name: str, way
     step_index = int(request_payload.get("step_index", 0))
 
     offset_deg, semantic_subgoal, matched_keywords = infer_direction(task_label)
+    mission_type = infer_mission_type(task_label, request_payload)
     command_yaw = normalize_angle_deg(current_yaw + offset_deg)
     requested_distance_cm = extract_distance_cm(task_label, 300.0)
     visible_min_depth = float(depth.get("min_depth", requested_distance_cm))
@@ -111,6 +259,18 @@ def build_heuristic_plan(request_payload: Dict[str, Any], planner_name: str, way
     sector_count = 8
     sector_id = int(round(((command_yaw % 360.0) / 360.0) * sector_count)) % sector_count
     confidence = 0.55 if matched_keywords and matched_keywords[0] != "default_forward" else 0.4
+    candidate_regions = infer_candidate_regions(task_label, mission_type)
+    priority_region = candidate_regions[0] if candidate_regions else {}
+    search_subgoal = infer_search_subgoal(task_label, mission_type, semantic_subgoal, candidate_regions)
+    confirm_target = mission_type == "target_verification" or any(
+        keyword in task_label.lower() for keyword in ["confirm", "verify", "approach", "closer inspection"]
+    )
+    explanation = build_search_explanation(
+        mission_type=mission_type,
+        matched_keywords=matched_keywords,
+        candidate_regions=candidate_regions,
+        semantic_subgoal=semantic_subgoal,
+    )
 
     return build_plan_state(
         plan_id=f"external_plan_{request_payload.get('frame_id', 'unknown')}",
@@ -121,6 +281,12 @@ def build_heuristic_plan(request_payload: Dict[str, Any], planner_name: str, way
         semantic_subgoal=semantic_subgoal,
         planner_confidence=confidence,
         should_replan=False,
+        mission_type=mission_type,
+        search_subgoal=search_subgoal,
+        priority_region=priority_region,
+        candidate_regions=candidate_regions,
+        confirm_target=confirm_target,
+        explanation=explanation,
         debug={
             "source": "external_heuristic_planner",
             "matched_keywords": matched_keywords,

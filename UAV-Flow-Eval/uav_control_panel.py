@@ -73,14 +73,17 @@ class UAVControlPanel:
         self.client = RemoteControlClient(f"http://{args.host}:{args.port}", args.timeout_s)
         self.root = tk.Tk()
         self.root.title("UAV Remote Control Panel")
-        self.root.geometry("760x520")
+        self.root.geometry("760x760")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.status_var = tk.StringVar(value="Connecting...")
         self.depth_var = tk.StringVar(value="Depth: waiting...")
         self.plan_var = tk.StringVar(value="Plan: idle")
+        self.mission_var = tk.StringVar(value="Mission: idle")
+        self.evidence_var = tk.StringVar(value="Evidence: idle")
         self.archive_var = tk.StringVar(value="Archive: idle")
         self.reflex_var = tk.StringVar(value="Reflex: idle")
         self.executor_var = tk.StringVar(value="Executor: idle")
+        self.takeover_var = tk.StringVar(value="Takeover: idle")
         self.last_state: Optional[Dict[str, Any]] = None
         self.preview_window: Optional[tk.Toplevel] = None
         self.preview_label: Optional[tk.Label] = None
@@ -90,6 +93,8 @@ class UAVControlPanel:
         self.depth_photo: Optional[ImageTk.PhotoImage] = None
         self.task_label_var = tk.StringVar(value=args.default_task_label)
         self.capture_label_var = tk.StringVar(value="")
+        self.takeover_note_var = tk.StringVar(value="")
+        self.evidence_note_var = tk.StringVar(value="")
 
     def safe_request(self, func, *call_args, **call_kwargs):
         try:
@@ -186,6 +191,53 @@ class UAVControlPanel:
             self.update_preview_once()
             self.update_depth_once()
 
+    def start_takeover(self) -> None:
+        note = self.takeover_note_var.get().strip()
+        result = self.safe_request(
+            self.client.post_json,
+            "/takeover",
+            {"action": "start", "reason": note or "manual_takeover", "note": note},
+        )
+        if result:
+            self.update_state_once()
+
+    def end_takeover(self) -> None:
+        note = self.takeover_note_var.get().strip()
+        result = self.safe_request(
+            self.client.post_json,
+            "/takeover",
+            {"action": "end", "reason": "resolved", "note": note},
+        )
+        if result:
+            self.update_state_once()
+
+    def submit_person_evidence(self, action: str) -> None:
+        payload = {
+            "action": action,
+            "note": self.evidence_note_var.get().strip(),
+            "capture_label": self.capture_label_var.get().strip(),
+        }
+        result = self.safe_request(self.client.post_json, "/person_evidence", payload)
+        if result:
+            state = result.get("state") if isinstance(result.get("state"), dict) else None
+            if state:
+                self.last_state = state
+                self.update_status_from_state(state)
+            else:
+                self.update_state_once()
+
+    def mark_suspect(self) -> None:
+        self.submit_person_evidence("suspect")
+
+    def confirm_person(self) -> None:
+        self.submit_person_evidence("confirm_present")
+
+    def reject_person(self) -> None:
+        self.submit_person_evidence("confirm_absent")
+
+    def reset_evidence(self) -> None:
+        self.submit_person_evidence("reset")
+
     def shutdown_server(self) -> None:
         result = self.safe_request(self.client.post_json, "/shutdown", {})
         if result:
@@ -218,10 +270,16 @@ class UAVControlPanel:
         camera_info = state.get("camera_info", depth.get("camera_info", {}))
         runtime_debug = state.get("runtime_debug", {})
         plan = state.get("plan", {})
+        mission = state.get("mission", {})
+        search_runtime = state.get("search_runtime", {})
+        person_evidence = state.get("person_evidence_runtime", {})
+        search_result = state.get("search_result", {})
         planner_runtime = state.get("planner_runtime", {})
         archive = state.get("archive", {})
         reflex_runtime = state.get("reflex_runtime", {})
         reflex_execution = state.get("reflex_execution", {})
+        takeover_runtime = state.get("takeover_runtime", {})
+        takeover_events = state.get("takeover_recent_events", [])
         archive_current = archive.get("current_cell") if isinstance(archive.get("current_cell"), dict) else {}
         archive_candidates = archive.get("top_cells") or []
         archive_hint = "none"
@@ -264,6 +322,48 @@ class UAVControlPanel:
             )
         else:
             self.plan_var.set("Plan: idle")
+        mission_priority = mission.get("priority_regions") if isinstance(mission.get("priority_regions"), list) else []
+        runtime_candidates = search_runtime.get("candidate_regions") if isinstance(search_runtime.get("candidate_regions"), list) else []
+        priority_region = search_runtime.get("priority_region") if isinstance(search_runtime.get("priority_region"), dict) else {}
+        region_label = str(priority_region.get("region_label", "")) or "none"
+        region_status = str(priority_region.get("status", "")) or "n/a"
+        self.mission_var.set(
+            "Mission "
+            f"type={mission.get('mission_type', 'n/a')} "
+            f"status={mission.get('status', 'idle')} "
+            f"subgoal={search_runtime.get('current_search_subgoal', 'idle')} "
+            f"scope={mission.get('search_scope', 'local')} "
+            f"priority={region_label}:{region_status} "
+            f"candidates={len(runtime_candidates) or len(mission_priority)} "
+            f"detect={search_runtime.get('detection_state', 'unknown')} "
+            f"confirm={int(bool(mission.get('confirm_target', False)))} "
+            f"visited={int(search_runtime.get('visited_region_count', 0))}"
+        )
+        estimated_position = search_result.get("estimated_person_position") if isinstance(search_result.get("estimated_person_position"), dict) else {}
+        estimated_label = "none"
+        person_exists = search_result.get("person_exists")
+        if person_exists is None:
+            person_exists_label = "unknown"
+        else:
+            person_exists_label = str(int(bool(person_exists)))
+        if estimated_position:
+            estimated_label = (
+                f"({float(estimated_position.get('x', 0.0)):.0f},"
+                f"{float(estimated_position.get('y', 0.0)):.0f},"
+                f"{float(estimated_position.get('z', 0.0)):.0f})"
+            )
+        self.evidence_var.set(
+            "Evidence "
+            f"status={person_evidence.get('evidence_status', 'idle')} "
+            f"result={search_result.get('result_status', 'unknown')} "
+            f"exists={person_exists_label} "
+            f"conf={float(person_evidence.get('confidence', search_result.get('confidence', 0.0))):.2f} "
+            f"suspect={int(person_evidence.get('suspect_count', 0))} "
+            f"present={int(person_evidence.get('confirm_present_count', 0))} "
+            f"absent={int(person_evidence.get('confirm_absent_count', 0))} "
+            f"events={int(person_evidence.get('evidence_event_count', 0))} "
+            f"loc={estimated_label}"
+        )
         self.archive_var.set(
             "Archive "
             f"cell={self.shorten_cell_id(str(runtime_debug.get('archive_cell_id', archive.get('current_cell_id', '')))) or 'none'} "
@@ -296,6 +396,17 @@ class UAVControlPanel:
             f"req={reflex_execution.get('last_requested_action', 'idle')} "
             f"exec={reflex_execution.get('last_executed_action', '') or 'none'} "
             f"count={int(reflex_execution.get('execution_count', 0))}"
+        )
+        self.takeover_var.set(
+            "Takeover "
+            f"active={int(bool(takeover_runtime.get('active', False)))} "
+            f"reason={takeover_runtime.get('current_reason', 'none') or 'none'} "
+            f"last_reason={takeover_runtime.get('last_intervention_reason', takeover_runtime.get('last_event_reason', 'none')) or 'none'} "
+            f"note={takeover_runtime.get('current_note', '') or '-'} "
+            f"interventions={int(takeover_runtime.get('intervention_count', 0))} "
+            f"events={int(takeover_runtime.get('event_count', 0))} "
+            f"last={takeover_runtime.get('last_event_type', 'none')} "
+            f"recent={len(takeover_events) if isinstance(takeover_events, list) else 0}"
         )
 
     def update_state_once(self) -> None:
@@ -357,6 +468,12 @@ class UAVControlPanel:
             "t": self.request_reflex,
             "y": self.execute_reflex,
             "v": lambda: (self.update_preview_once(), self.update_depth_once()),
+            "u": self.start_takeover,
+            "i": self.end_takeover,
+            "g": self.mark_suspect,
+            "h": self.confirm_person,
+            "j": self.reject_person,
+            "o": self.reset_evidence,
         }
         for key, callback in bindings.items():
             self.root.bind(f"<KeyPress-{key}>", lambda _event, cb=callback: cb())
@@ -381,7 +498,7 @@ class UAVControlPanel:
 
         header = tk.Label(
             self.root,
-            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan, T request reflex, Y execute reflex",
+            text="Keyboard: W/S/A/D move, R/F up-down, Q/E yaw, C capture, V refresh preview, P request plan, T request reflex, Y execute reflex, U start takeover, I end takeover, G suspect, H confirm person, J reject person, O reset evidence",
             anchor="w",
             justify="left",
         )
@@ -396,6 +513,12 @@ class UAVControlPanel:
         plan_status = tk.Label(self.root, textvariable=self.plan_var, anchor="w", justify="left")
         plan_status.pack(fill="x", padx=12, pady=(0, 6))
 
+        mission_status = tk.Label(self.root, textvariable=self.mission_var, anchor="w", justify="left")
+        mission_status.pack(fill="x", padx=12, pady=(0, 6))
+
+        evidence_status = tk.Label(self.root, textvariable=self.evidence_var, anchor="w", justify="left")
+        evidence_status.pack(fill="x", padx=12, pady=(0, 6))
+
         archive_status = tk.Label(self.root, textvariable=self.archive_var, anchor="w", justify="left")
         archive_status.pack(fill="x", padx=12, pady=(0, 10))
 
@@ -404,6 +527,9 @@ class UAVControlPanel:
 
         executor_status = tk.Label(self.root, textvariable=self.executor_var, anchor="w", justify="left")
         executor_status.pack(fill="x", padx=12, pady=(0, 10))
+
+        takeover_status = tk.Label(self.root, textvariable=self.takeover_var, anchor="w", justify="left")
+        takeover_status.pack(fill="x", padx=12, pady=(0, 10))
 
         task_frame = tk.Frame(self.root)
         task_frame.pack(fill="x", padx=12, pady=(0, 8))
@@ -415,8 +541,18 @@ class UAVControlPanel:
         tk.Label(task_frame, text="Capture Label").grid(row=1, column=0, sticky="w", pady=(8, 0))
         tk.Entry(task_frame, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
         tk.Button(task_frame, text="Request Plan", command=self.request_plan, width=14).grid(row=1, column=2, sticky="ew", pady=(8, 0))
+        tk.Label(task_frame, text="Takeover Note").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(task_frame, textvariable=self.takeover_note_var).grid(row=2, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
         tk.Button(task_frame, text="Request Reflex", command=self.request_reflex, width=14).grid(row=2, column=2, sticky="ew", pady=(8, 0))
+        tk.Label(task_frame, text="Evidence Note").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(task_frame, textvariable=self.evidence_note_var).grid(row=3, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
         tk.Button(task_frame, text="Execute Reflex", command=self.execute_reflex, width=14).grid(row=3, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="Start Takeover", command=self.start_takeover, width=14).grid(row=4, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="End Takeover", command=self.end_takeover, width=14).grid(row=5, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="Mark Suspect", command=self.mark_suspect, width=14).grid(row=6, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="Confirm Person", command=self.confirm_person, width=14).grid(row=7, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="Reject Person", command=self.reject_person, width=14).grid(row=8, column=2, sticky="ew", pady=(8, 0))
+        tk.Button(task_frame, text="Reset Evidence", command=self.reset_evidence, width=14).grid(row=9, column=2, sticky="ew", pady=(8, 0))
         task_frame.grid_columnconfigure(1, weight=1)
 
         task_help = tk.Label(
@@ -426,7 +562,9 @@ class UAVControlPanel:
                 "Capture Label: one-shot note/suffix for the next saved sample. "
                 "Capture saves RGB + depth together. "
                 "Request Reflex refreshes the local policy suggestion state. "
-                "Execute Reflex performs one gated autonomous reflex step."
+                "Execute Reflex performs one gated autonomous reflex step. "
+                "Takeover Note is used for manual takeover start/end annotations. "
+                "Evidence Note is stored with suspect/confirm/reject person annotations."
             ),
             anchor="w",
             justify="left",
@@ -449,6 +587,12 @@ class UAVControlPanel:
             ("Request Plan (P)", self.request_plan),
             ("Request Reflex (T)", self.request_reflex),
             ("Execute Reflex (Y)", self.execute_reflex),
+            ("Start Takeover (U)", self.start_takeover),
+            ("End Takeover (I)", self.end_takeover),
+            ("Mark Suspect (G)", self.mark_suspect),
+            ("Confirm Person (H)", self.confirm_person),
+            ("Reject Person (J)", self.reject_person),
+            ("Reset Evidence (O)", self.reset_evidence),
             ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
             ("Shutdown Server", self.shutdown_server),
         ]

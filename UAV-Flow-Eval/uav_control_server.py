@@ -4,6 +4,7 @@ Launch and hold the Unreal UAV environment, then expose simple HTTP controls.
 
 import argparse
 import base64
+import copy
 import json
 import logging
 import os
@@ -34,8 +35,23 @@ from batch_run_act_all import (
 )
 from gym_unrealcv.envs.wrappers import augmentation, configUE, time_dilation
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
-from runtime_interfaces import build_plan_state, build_reflex_runtime_state, build_runtime_debug_state, build_waypoint, now_timestamp
-from runtime_interfaces import build_plan_request, build_reflex_request, build_reflex_sample, coerce_plan_payload, coerce_reflex_runtime_payload
+from runtime_interfaces import (
+    build_mission_state,
+    build_plan_request,
+    build_plan_state,
+    build_person_evidence_runtime_state,
+    build_reflex_request,
+    build_reflex_runtime_state,
+    build_reflex_sample,
+    build_runtime_debug_state,
+    build_search_region,
+    build_search_result_state,
+    build_search_runtime_state,
+    build_waypoint,
+    coerce_plan_payload,
+    coerce_reflex_runtime_payload,
+    now_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,14 +88,123 @@ REFLEX_OPPOSITE_ACTIONS = {
     "yaw_right": "yaw_left",
 }
 
+DEFAULT_TAKEOVER_REASON = "manual_navigation"
+MISSION_ROOM_HINTS = [
+    (("bedroom", "bed room"), "bedroom", "bedroom"),
+    (("kitchen",), "kitchen", "kitchen"),
+    (("bathroom", "restroom"), "bathroom", "bathroom"),
+    (("living room", "livingroom", "lounge"), "living room", "living_room"),
+    (("hallway", "corridor"), "hallway", "hallway"),
+    (("stairs", "stair", "staircase"), "stairs", "stairs"),
+    (("door", "doorway", "entry"), "doorway", "doorway"),
+    (("corner", "occluded corner"), "occluded corner", ""),
+]
+
 
 def normalize_angle_deg(angle_deg: float) -> float:
     return (angle_deg + 180.0) % 360.0 - 180.0
 
 
+def slugify_text(text: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", str(text or "").strip().lower()).strip("_")
+    return slug[:48] or "idle"
+
+
 def normalize_reflex_action_name(action_name: Any) -> str:
     text = str(action_name or "idle").strip().lower()
     return REFLEX_ACTION_ALIASES.get(text, text or "idle")
+
+
+def infer_mission_type_from_task_label(task_label: str) -> str:
+    text = str(task_label or "").strip().lower()
+    if not text:
+        return "semantic_navigation"
+    if any(keyword in text for keyword in ["confirm", "verify", "approach"]):
+        return "target_verification"
+    if any(keyword in text for keyword in ["person", "people", "human", "survivor", "victim"]):
+        return "person_search"
+    if any(keyword in text for keyword in ["search", "inspect", "find", "look for", "check"]):
+        return "room_search"
+    return "semantic_navigation"
+
+
+def infer_search_scope_from_task_label(task_label: str) -> str:
+    text = str(task_label or "").strip().lower()
+    if any(keyword in text for keyword in ["house", "building", "entire", "whole"]):
+        return "house"
+    if any(keyword in text for keywords, _label, _room_type in MISSION_ROOM_HINTS for keyword in keywords):
+        return "room"
+    return "local"
+
+
+def infer_priority_regions_from_task_label(task_label: str, mission_type: str) -> List[Dict[str, Any]]:
+    text = str(task_label or "").strip().lower()
+    priority_regions_with_pos: List[Tuple[int, Dict[str, Any]]] = []
+    if any(keyword in text for keyword in ["house", "building", "entire home", "whole house", "whole home"]):
+        priority_regions_with_pos.append(
+            (
+                text.find("house") if "house" in text else 0,
+                build_search_region(
+                    region_id="entire_house",
+                    region_label="entire house",
+                    region_type="house",
+                    room_type="house",
+                    priority=4,
+                    status="unobserved",
+                    rationale="Global mission scope derived from the task text.",
+                ),
+            )
+        )
+    for keywords, label, room_type in MISSION_ROOM_HINTS:
+        matches = [text.find(keyword) for keyword in keywords if keyword in text]
+        if matches:
+            priority_regions_with_pos.append(
+                (
+                    min(matches),
+                    build_search_region(
+                        region_id=f"{slugify_text(label)}_{len(priority_regions_with_pos) + 1}",
+                        region_label=label,
+                        region_type="room" if room_type else "area",
+                        room_type=room_type,
+                        priority=0,
+                        status="suspect" if mission_type in ("person_search", "target_verification") else "unobserved",
+                        rationale=f"Derived from task text keywords={','.join(keywords)}.",
+                    ),
+                )
+            )
+    if any(keyword in text for keyword in ["suspect", "possible person", "possible target"]) and not any(
+        region.get("region_label") == "suspect region" for _, region in priority_regions_with_pos
+    ):
+        priority_regions_with_pos.append(
+            (
+                max(0, text.find("suspect")),
+                build_search_region(
+                    region_id="suspect_region",
+                    region_label="suspect region",
+                    region_type="area",
+                    priority=0,
+                    status="suspect",
+                    rationale="Explicit suspect cue from the mission text.",
+                ),
+            )
+        )
+    priority_regions_with_pos.sort(key=lambda item: item[0])
+    priority_regions: List[Dict[str, Any]] = []
+    for index, (_position, region) in enumerate(priority_regions_with_pos):
+        region["priority"] = max(1, 4 - index)
+        priority_regions.append(region)
+    if not priority_regions and mission_type in ("person_search", "room_search", "target_verification"):
+        priority_regions.append(
+            build_search_region(
+                region_id="forward_search_sector",
+                region_label="forward search sector",
+                region_type="sector",
+                priority=2,
+                status="unobserved",
+                rationale="Default search frontier derived from the mission text.",
+            )
+        )
+    return priority_regions
 
 
 def build_obj_info(task_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -182,6 +307,8 @@ class UAVControlBackend:
             planner_name=args.planner_name,
             semantic_subgoal="idle",
         )
+        self.current_mission: Dict[str, Any] = self.build_mission_descriptor(self.current_task_label)
+        self.search_runtime: Dict[str, Any] = self.build_search_runtime_snapshot()
         self.last_plan_request: Dict[str, Any] = {}
         self.plan_execution_state: Dict[str, Any] = {
             "planner_status": "idle",
@@ -216,6 +343,29 @@ class UAVControlBackend:
             "skipped_count": 0,
             "blocked_count": 0,
         }
+        self.takeover_events: List[Dict[str, Any]] = []
+        self.takeover_event_counter: int = 0
+        self.takeover_state: Dict[str, Any] = {
+            "active": False,
+            "takeover_id": "",
+            "started_at": "",
+            "ended_at": "",
+            "start_trigger": "",
+            "current_reason": "",
+            "current_note": "",
+            "last_intervention_reason": "",
+            "intervention_count": 0,
+            "event_count": 0,
+            "last_event_id": "",
+            "last_event_type": "",
+            "last_event_reason": "",
+            "last_corrective_action": "",
+            "log_path": "",
+        }
+        self.person_evidence_events: List[Dict[str, Any]] = []
+        self.person_evidence_event_counter: int = 0
+        self.person_evidence_runtime: Dict[str, Any] = build_person_evidence_runtime_state()
+        self.search_result: Dict[str, Any] = build_search_result_state()
         self.archive_runtime = ArchiveRuntime(
             pos_bin_cm=float(self.args.archive_pos_bin_cm),
             yaw_bin_deg=float(self.args.archive_yaw_bin_deg),
@@ -224,6 +374,18 @@ class UAVControlBackend:
         )
 
         os.makedirs(self.args.capture_dir, exist_ok=True)
+        os.makedirs(self.args.takeover_log_dir, exist_ok=True)
+        os.makedirs(self.args.search_log_dir, exist_ok=True)
+        self.takeover_log_path = os.path.join(
+            self.args.takeover_log_dir,
+            f"takeover_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
+        )
+        self.takeover_state["log_path"] = self.takeover_log_path
+        self.search_log_path = os.path.join(
+            self.args.search_log_dir,
+            f"search_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl",
+        )
+        self.fixed_spawn_pose_path = self.args.fixed_spawn_pose_file
 
         maybe_override_env_binary(self.args.env_id, self.args.env_bin_win)
         validate_env_binary_exists(self.args.env_id)
@@ -276,6 +438,7 @@ class UAVControlBackend:
         self.command_task_yaw_deg = self.get_task_pose()[3]
         self.position_free_view_once()
         self.refresh_observations()
+        self.reset_person_search_state(reset_recent_events=True)
         if self.args.reflex_policy_url:
             try:
                 reflex_runtime = self.request_reflex_policy(trigger="startup")
@@ -287,6 +450,387 @@ class UAVControlBackend:
                 )
             except Exception as exc:
                 logger.warning("Startup reflex policy sync failed, keep local heuristic state: %s", exc)
+
+    def build_mission_descriptor(self, task_label: str, *, previous_mission_id: str = "") -> Dict[str, Any]:
+        normalized_task = str(task_label or "").strip()
+        mission_type = infer_mission_type_from_task_label(normalized_task)
+        mission_id = previous_mission_id or f"mission_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{slugify_text(normalized_task)}"
+        priority_regions = infer_priority_regions_from_task_label(normalized_task, mission_type)
+        target_type = "search_result" if mission_type in ("person_search", "room_search", "target_verification") else "waypoint"
+        success_criteria: List[str]
+        if mission_type == "person_search":
+            success_criteria = ["decide_if_person_exists", "estimate_person_location", "collect_supporting_evidence"]
+        elif mission_type == "target_verification":
+            success_criteria = ["approach_suspect_region", "confirm_or_reject_target", "record_confirmation_evidence"]
+        elif mission_type == "room_search":
+            success_criteria = ["search_requested_region", "mark_region_coverage", "prepare_follow_up_waypoint"]
+        else:
+            success_criteria = ["reach_semantic_waypoint", "maintain_safe_motion"]
+        return build_mission_state(
+            mission_id=mission_id,
+            task_label=normalized_task,
+            mission_text=normalized_task or "idle",
+            mission_type=mission_type,
+            target_type=target_type,
+            search_scope=infer_search_scope_from_task_label(normalized_task),
+            priority_regions=priority_regions,
+            confirm_target=mission_type == "target_verification",
+            success_criteria=success_criteria,
+            constraints=["avoid_collision", "respect_takeover", "low_latency_execute"],
+            status="active" if normalized_task else "idle",
+        )
+
+    def build_search_runtime_snapshot(self, archive_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        archive_payload = archive_state if isinstance(archive_state, dict) else {}
+        plan_runtime = self.plan_execution_state if isinstance(getattr(self, "plan_execution_state", None), dict) else {}
+        candidate_regions = self.current_plan.get("candidate_regions") if isinstance(self.current_plan.get("candidate_regions"), list) else []
+        priority_region = self.current_plan.get("priority_region") if isinstance(self.current_plan.get("priority_region"), dict) else {}
+        mission_priority_regions = self.current_mission.get("priority_regions") if isinstance(self.current_mission.get("priority_regions"), list) else []
+        person_evidence = (
+            getattr(self, "person_evidence_runtime", {})
+            if isinstance(getattr(self, "person_evidence_runtime", {}), dict)
+            else {}
+        )
+        search_result = getattr(self, "search_result", {}) if isinstance(getattr(self, "search_result", {}), dict) else {}
+        if not candidate_regions and mission_priority_regions:
+            candidate_regions = mission_priority_regions
+        if not priority_region and candidate_regions:
+            priority_region = candidate_regions[0]
+        visited_region_count = int(archive_payload.get("cell_count", 0)) if archive_payload else 0
+        suspect_region_count = sum(1 for region in candidate_regions if str(region.get("status", "")).lower() == "suspect")
+        confirmed_region_count = sum(1 for region in candidate_regions if str(region.get("status", "")).lower() == "confirmed")
+        plan_status = str(plan_runtime.get("planner_status", "idle") or "idle")
+        evidence_status = str(person_evidence.get("evidence_status", "idle") or "idle")
+        result_status = str(search_result.get("result_status", "unknown") or "unknown")
+        if result_status == "person_detected":
+            detection_state = "confirmed_present"
+        elif result_status == "no_person_confirmed":
+            detection_state = "confirmed_absent"
+        elif evidence_status == "suspect":
+            detection_state = "suspect"
+        elif self.current_mission.get("mission_type") in ("person_search", "room_search", "target_verification"):
+            detection_state = "confirming" if bool(self.current_plan.get("confirm_target", False)) else "searching"
+        else:
+            detection_state = "navigation"
+        return build_search_runtime_state(
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
+            mission_status=str(self.current_mission.get("status", "idle")),
+            current_search_subgoal=str(
+                self.current_plan.get("search_subgoal", self.current_plan.get("semantic_subgoal", "idle")) or "idle"
+            ),
+            priority_region=priority_region,
+            candidate_regions=candidate_regions,
+            visited_region_count=visited_region_count,
+            suspect_region_count=suspect_region_count,
+            confirmed_region_count=confirmed_region_count,
+            evidence_count=int(person_evidence.get("evidence_event_count", 0)),
+            detection_state=detection_state,
+            estimated_person_position=search_result.get("estimated_person_position", {})
+            or person_evidence.get("estimated_person_position", {}),
+            last_reasoning=str(self.current_plan.get("explanation", "")),
+            replan_count=int(plan_runtime.get("request_count", 0)) if plan_status != "idle" else 0,
+        )
+
+    def sync_search_runtime(self, archive_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        self.search_runtime = self.build_search_runtime_snapshot(archive_state)
+        return self.search_runtime
+
+    def sync_mission_from_plan(self) -> Dict[str, Any]:
+        candidate_regions = self.current_plan.get("candidate_regions") if isinstance(self.current_plan.get("candidate_regions"), list) else []
+        if candidate_regions:
+            self.current_mission["priority_regions"] = candidate_regions
+        self.current_mission["confirm_target"] = bool(self.current_plan.get("confirm_target", self.current_mission.get("confirm_target", False)))
+        if self.current_task_label:
+            self.current_mission["status"] = "active"
+        return self.current_mission
+
+    def build_default_person_evidence_runtime(self) -> Dict[str, Any]:
+        mission_type = str(self.current_mission.get("mission_type", "semantic_navigation"))
+        initial_status = "searching" if mission_type in ("person_search", "room_search", "target_verification") else "idle"
+        return build_person_evidence_runtime_state(
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            mission_type=mission_type,
+            evidence_status=initial_status,
+        )
+
+    def build_default_search_result(self) -> Dict[str, Any]:
+        mission_type = str(self.current_mission.get("mission_type", "semantic_navigation"))
+        if mission_type in ("person_search", "room_search", "target_verification"):
+            result_status = "unknown"
+            summary = "No person evidence has been confirmed yet."
+        else:
+            result_status = "not_applicable"
+            summary = "Mission type is not person-search oriented."
+        return build_search_result_state(
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            mission_type=mission_type,
+            result_status=result_status,
+            person_exists=None,
+            summary=summary,
+        )
+
+    def reset_person_search_state(self, *, reset_recent_events: bool = False) -> None:
+        self.person_evidence_runtime = self.build_default_person_evidence_runtime()
+        self.search_result = self.build_default_search_result()
+        if reset_recent_events:
+            self.person_evidence_events = []
+        self.sync_search_runtime()
+
+    def resolve_active_region_for_evidence(self) -> Dict[str, Any]:
+        runtime_priority = self.search_runtime.get("priority_region") if isinstance(self.search_runtime.get("priority_region"), dict) else {}
+        if runtime_priority and (
+            str(runtime_priority.get("region_label", "")).strip() or str(runtime_priority.get("region_id", "")).strip()
+        ):
+            return dict(runtime_priority)
+        plan_priority = self.current_plan.get("priority_region") if isinstance(self.current_plan.get("priority_region"), dict) else {}
+        if plan_priority and (
+            str(plan_priority.get("region_label", "")).strip() or str(plan_priority.get("region_id", "")).strip()
+        ):
+            return dict(plan_priority)
+        mission_regions = self.current_mission.get("priority_regions") if isinstance(self.current_mission.get("priority_regions"), list) else []
+        if mission_regions:
+            return dict(mission_regions[0])
+        return build_search_region(
+            region_id="current_view_sector",
+            region_label="current view sector",
+            region_type="sector",
+            priority=1,
+            status="unobserved",
+            rationale="Fallback evidence region derived from the current local view.",
+        )
+
+    def update_region_status(self, region_label: str, status: str, rationale: str) -> None:
+        region_label_norm = str(region_label or "").strip().lower()
+        if not region_label_norm:
+            return
+        payloads: List[Any] = [
+            self.current_mission.get("priority_regions"),
+            self.current_plan.get("candidate_regions"),
+        ]
+        for regions in payloads:
+            if not isinstance(regions, list):
+                continue
+            for region in regions:
+                if not isinstance(region, dict):
+                    continue
+                label = str(region.get("region_label", "")).strip().lower()
+                if label == region_label_norm:
+                    region["status"] = status
+                    if rationale:
+                        region["rationale"] = rationale
+        if isinstance(self.current_plan.get("priority_region"), dict):
+            plan_priority = self.current_plan["priority_region"]
+            if str(plan_priority.get("region_label", "")).strip().lower() == region_label_norm:
+                plan_priority["status"] = status
+                if rationale:
+                    plan_priority["rationale"] = rationale
+
+    def build_estimated_person_position(self) -> Dict[str, Any]:
+        task_pose = self.get_task_pose()
+        return {
+            "x": float(task_pose[0]),
+            "y": float(task_pose[1]),
+            "z": float(task_pose[2]),
+            "yaw": float(task_pose[3]),
+            "frame_id": self.last_observation_id,
+        }
+
+    def build_person_evidence_snapshot(self) -> Dict[str, Any]:
+        task_pose = self.get_task_pose()
+        priority_region = self.resolve_active_region_for_evidence()
+        return {
+            "timestamp": now_timestamp(),
+            "step_index": int(self.plan_execution_state.get("step_index", 0)),
+            "task_label": self.current_task_label,
+            "mission": {
+                "mission_id": str(self.current_mission.get("mission_id", "")),
+                "mission_type": str(self.current_mission.get("mission_type", "")),
+                "status": str(self.current_mission.get("status", "idle")),
+            },
+            "search_runtime": {
+                "current_search_subgoal": str(self.search_runtime.get("current_search_subgoal", "idle")),
+                "detection_state": str(self.search_runtime.get("detection_state", "unknown")),
+                "priority_region": priority_region,
+                "evidence_count": int(self.search_runtime.get("evidence_count", 0)),
+            },
+            "pose": {
+                "x": float(task_pose[0]),
+                "y": float(task_pose[1]),
+                "z": float(task_pose[2]),
+                "task_yaw": float(task_pose[3]),
+                "command_yaw": float(self.command_task_yaw_deg),
+                "uav_yaw": float(self.get_env_yaw_deg()),
+            },
+            "depth": {
+                "frame_id": str(self.last_depth_summary.get("frame_id", "")),
+                "min_depth": float(self.last_depth_summary.get("min_depth", 0.0)),
+                "max_depth": float(self.last_depth_summary.get("max_depth", 0.0)),
+            },
+            "plan": {
+                "semantic_subgoal": str(self.current_plan.get("semantic_subgoal", "idle")),
+                "search_subgoal": str(self.current_plan.get("search_subgoal", "idle")),
+                "planner_confidence": float(self.current_plan.get("planner_confidence", 0.0)),
+            },
+            "reflex": {
+                "suggested_action": str(self.reflex_runtime.get("suggested_action", "idle")),
+                "policy_confidence": float(self.reflex_runtime.get("policy_confidence", 0.0)),
+                "status": str(self.reflex_runtime.get("status", "idle")),
+            },
+            "runtime_debug": {
+                "risk_score": float(self.runtime_debug.get("risk_score", 0.0)),
+                "archive_cell_id": str(self.runtime_debug.get("archive_cell_id", "")),
+            },
+        }
+
+    def append_person_evidence_event(
+        self,
+        *,
+        event_type: str,
+        reason: str,
+        note: str,
+        confidence: float,
+        region: Dict[str, Any],
+        capture_label: str = "",
+        before_snapshot: Optional[Dict[str, Any]] = None,
+        after_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        self.person_evidence_event_counter += 1
+        event = {
+            "event_id": f"search_evt_{self.person_evidence_event_counter:05d}",
+            "timestamp": now_timestamp(),
+            "event_type": str(event_type or ""),
+            "reason": str(reason or ""),
+            "note": str(note or ""),
+            "confidence": float(confidence),
+            "task_label": self.current_task_label,
+            "mission_id": str(self.current_mission.get("mission_id", "")),
+            "mission_type": str(self.current_mission.get("mission_type", "")),
+            "step_index": int(self.plan_execution_state.get("step_index", 0)),
+            "capture_label": str(capture_label or ""),
+            "region": copy.deepcopy(region),
+            "before_runtime": copy.deepcopy(before_snapshot),
+            "after_runtime": copy.deepcopy(after_snapshot),
+            "search_result": copy.deepcopy(self.search_result),
+        }
+        self.person_evidence_events.append(event)
+        limit = max(1, int(self.args.search_recent_limit))
+        if len(self.person_evidence_events) > limit:
+            self.person_evidence_events = self.person_evidence_events[-limit:]
+        with open(self.search_log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(event, ensure_ascii=True) + "\n")
+        return event
+
+    def record_person_evidence(
+        self,
+        *,
+        action: str,
+        note: str = "",
+        capture_label: str = "",
+        confidence: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        normalized_action = str(action or "").strip().lower()
+        if normalized_action not in {"suspect", "confirm_present", "confirm_absent", "reset"}:
+            raise ValueError(f"Unsupported person evidence action: {action}")
+        before_snapshot = self.build_person_evidence_snapshot()
+        region = self.resolve_active_region_for_evidence()
+        region_label = str(region.get("region_label", "current view sector") or "current view sector")
+        reason = note or normalized_action
+        if normalized_action == "reset":
+            self.reset_person_search_state(reset_recent_events=True)
+            self.person_evidence_runtime["last_event_type"] = "reset"
+            self.person_evidence_runtime["last_reason"] = reason
+            self.person_evidence_runtime["last_note"] = str(note or "")
+            self.person_evidence_runtime["last_updated_at"] = now_timestamp()
+            self.search_result = self.build_default_search_result()
+            confidence_value = 0.0
+        elif normalized_action == "suspect":
+            confidence_value = float(confidence if confidence is not None else 0.55)
+            self.person_evidence_runtime["evidence_status"] = "suspect"
+            self.person_evidence_runtime["suspect_count"] = int(self.person_evidence_runtime.get("suspect_count", 0)) + 1
+            self.person_evidence_runtime["confidence"] = confidence_value
+            self.person_evidence_runtime["suspect_region"] = region
+            self.person_evidence_runtime["last_event_type"] = "suspect"
+            self.person_evidence_runtime["last_reason"] = reason
+            self.person_evidence_runtime["last_note"] = str(note or "")
+            self.person_evidence_runtime["last_updated_at"] = now_timestamp()
+            self.update_region_status(region_label, "suspect", "Marked as suspect by manual evidence annotation.")
+            self.search_result["result_status"] = "unknown"
+            self.search_result["person_exists"] = None
+            self.search_result["confidence"] = max(float(self.search_result.get("confidence", 0.0)), confidence_value)
+            self.search_result["summary"] = f"Suspect evidence recorded for {region_label}."
+            self.search_result["last_updated_at"] = now_timestamp()
+        elif normalized_action == "confirm_present":
+            confidence_value = float(confidence if confidence is not None else 0.9)
+            estimated_position = self.build_estimated_person_position()
+            self.person_evidence_runtime["evidence_status"] = "confirmed_present"
+            self.person_evidence_runtime["confirm_present_count"] = int(self.person_evidence_runtime.get("confirm_present_count", 0)) + 1
+            self.person_evidence_runtime["confidence"] = confidence_value
+            self.person_evidence_runtime["suspect_region"] = region
+            self.person_evidence_runtime["estimated_person_position"] = estimated_position
+            self.person_evidence_runtime["last_event_type"] = "confirm_present"
+            self.person_evidence_runtime["last_reason"] = reason
+            self.person_evidence_runtime["last_note"] = str(note or "")
+            self.person_evidence_runtime["last_updated_at"] = now_timestamp()
+            self.update_region_status(region_label, "confirmed", "Person presence confirmed by manual evidence annotation.")
+            self.search_result["result_status"] = "person_detected"
+            self.search_result["person_exists"] = True
+            self.search_result["confidence"] = confidence_value
+            self.search_result["estimated_person_position"] = estimated_position
+            self.search_result["summary"] = f"Person confirmed near {region_label}."
+            self.search_result["last_updated_at"] = now_timestamp()
+        else:
+            confidence_value = float(confidence if confidence is not None else 0.85)
+            self.person_evidence_runtime["evidence_status"] = "confirmed_absent"
+            self.person_evidence_runtime["confirm_absent_count"] = int(self.person_evidence_runtime.get("confirm_absent_count", 0)) + 1
+            self.person_evidence_runtime["confidence"] = confidence_value
+            self.person_evidence_runtime["suspect_region"] = region
+            self.person_evidence_runtime["last_event_type"] = "confirm_absent"
+            self.person_evidence_runtime["last_reason"] = reason
+            self.person_evidence_runtime["last_note"] = str(note or "")
+            self.person_evidence_runtime["last_updated_at"] = now_timestamp()
+            self.update_region_status(region_label, "confirmed", "Region cleared by manual no-person confirmation.")
+            if str(self.search_result.get("result_status", "unknown")) != "person_detected":
+                self.search_result["result_status"] = "no_person_confirmed"
+                self.search_result["person_exists"] = False
+                self.search_result["confidence"] = confidence_value
+                self.search_result["summary"] = f"No person confirmed in {region_label}."
+                self.search_result["last_updated_at"] = now_timestamp()
+        evidence_capture_ids = list(self.person_evidence_runtime.get("evidence_capture_ids", []))
+        supporting_capture_ids = list(self.search_result.get("supporting_capture_ids", []))
+        if capture_label:
+            evidence_capture_ids.append(str(capture_label))
+            supporting_capture_ids.append(str(capture_label))
+        self.person_evidence_runtime["evidence_capture_ids"] = evidence_capture_ids[-12:]
+        self.search_result["supporting_capture_ids"] = supporting_capture_ids[-12:]
+        self.person_evidence_runtime["evidence_event_count"] = int(self.person_evidence_runtime.get("evidence_event_count", 0)) + 1
+        self.sync_search_runtime()
+        after_snapshot = self.build_person_evidence_snapshot()
+        event = self.append_person_evidence_event(
+            event_type=normalized_action,
+            reason=reason,
+            note=str(note or ""),
+            confidence=confidence_value,
+            region=region,
+            capture_label=capture_label,
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+        )
+        logger.info(
+            "Person evidence action=%s region=%s confidence=%.2f mission=%s",
+            normalized_action,
+            region_label,
+            confidence_value,
+            self.current_mission.get("mission_type", "n/a"),
+        )
+        return {
+            "status": "ok",
+            "person_evidence_runtime": self.person_evidence_runtime,
+            "search_result": self.search_result,
+            "person_evidence_recent_events": self.person_evidence_events,
+            "event": event,
+            "state": self.get_state(),
+        }
 
     def apply_initial_task_or_spawn(self) -> None:
         if self.args.task_json:
@@ -313,6 +857,49 @@ class UAVControlBackend:
                 self.args.spawn_z,
                 spawn_yaw,
             )
+            self.save_fixed_spawn_pose(
+                {
+                    "x": float(self.args.spawn_x),
+                    "y": float(self.args.spawn_y),
+                    "z": float(self.args.spawn_z),
+                    "yaw": float(spawn_yaw),
+                }
+            )
+            return
+
+        fixed_spawn_pose = self.load_fixed_spawn_pose()
+        if fixed_spawn_pose is not None:
+            self.set_task_pose(
+                [fixed_spawn_pose["x"], fixed_spawn_pose["y"], fixed_spawn_pose["z"]],
+                fixed_spawn_pose["yaw"],
+            )
+            logger.info(
+                "Applied fixed spawn pose from file: x=%.3f y=%.3f z=%.3f yaw=%.3f path=%s",
+                fixed_spawn_pose["x"],
+                fixed_spawn_pose["y"],
+                fixed_spawn_pose["z"],
+                fixed_spawn_pose["yaw"],
+                self.fixed_spawn_pose_path,
+            )
+            return
+
+        current_pose = self.get_task_pose()
+        self.save_fixed_spawn_pose(
+            {
+                "x": float(current_pose[0]),
+                "y": float(current_pose[1]),
+                "z": float(current_pose[2]),
+                "yaw": float(current_pose[3]),
+            }
+        )
+        logger.info(
+            "Initialized fixed spawn pose file from current reset pose: x=%.3f y=%.3f z=%.3f yaw=%.3f path=%s",
+            current_pose[0],
+            current_pose[1],
+            current_pose[2],
+            current_pose[3],
+            self.fixed_spawn_pose_path,
+        )
 
     def hide_non_primary_agents(self) -> None:
         extra_players = list(self.env.unwrapped.player_list[1:])
@@ -332,6 +919,229 @@ class UAVControlBackend:
         if not self.args.reflex_policy_url:
             return False
         return bool(source) and source != "local_heuristic"
+
+    def build_takeover_snapshot(self) -> Dict[str, Any]:
+        task_pose = self.get_task_pose()
+        waypoint = self.runtime_debug.get("current_waypoint")
+        return {
+            "timestamp": now_timestamp(),
+            "step_index": int(self.plan_execution_state.get("step_index", 0)),
+            "task_label": self.current_task_label,
+            "last_action": self.last_action,
+            "pose": {
+                "x": float(task_pose[0]),
+                "y": float(task_pose[1]),
+                "z": float(task_pose[2]),
+                "task_yaw": float(task_pose[3]),
+                "command_yaw": float(self.command_task_yaw_deg),
+                "uav_yaw": float(self.get_env_yaw_deg()),
+            },
+            "plan": {
+                "semantic_subgoal": str(self.current_plan.get("semantic_subgoal", "idle")),
+                "planner_name": str(self.current_plan.get("planner_name", "")),
+                "planner_confidence": float(self.current_plan.get("planner_confidence", 0.0)),
+                "planner_status": str(self.plan_execution_state.get("planner_status", "idle")),
+                "planner_source": str(self.plan_execution_state.get("planner_source", "none")),
+            },
+            "reflex": {
+                "mode": str(self.reflex_runtime.get("mode", "")),
+                "policy_name": str(self.reflex_runtime.get("policy_name", "")),
+                "source": str(self.reflex_runtime.get("source", "")),
+                "suggested_action": str(self.reflex_runtime.get("suggested_action", "idle")),
+                "should_execute": bool(self.reflex_runtime.get("should_execute", False)),
+                "policy_confidence": float(self.reflex_runtime.get("policy_confidence", 0.0)),
+                "status": str(self.reflex_runtime.get("status", "idle")),
+            },
+            "executor": {
+                "mode": str(self.reflex_execution_state.get("mode", "manual")),
+                "last_status": str(self.reflex_execution_state.get("last_status", "idle")),
+                "last_reason": str(self.reflex_execution_state.get("last_reason", "")),
+                "last_requested_action": str(self.reflex_execution_state.get("last_requested_action", "idle")),
+                "last_executed_action": str(self.reflex_execution_state.get("last_executed_action", "")),
+            },
+            "runtime_debug": {
+                "risk_score": float(self.runtime_debug.get("risk_score", 0.0)),
+                "shield_triggered": bool(self.runtime_debug.get("shield_triggered", False)),
+                "archive_cell_id": str(self.runtime_debug.get("archive_cell_id", "")),
+                "current_waypoint": waypoint if isinstance(waypoint, dict) else None,
+            },
+        }
+
+    def load_fixed_spawn_pose(self) -> Optional[Dict[str, float]]:
+        if not self.fixed_spawn_pose_path:
+            return None
+        if not os.path.exists(self.fixed_spawn_pose_path):
+            return None
+        try:
+            with open(self.fixed_spawn_pose_path, "r", encoding="utf-8") as pose_file:
+                payload = json.load(pose_file)
+            if not isinstance(payload, dict):
+                return None
+            if not all(key in payload for key in ("x", "y", "z", "yaw")):
+                return None
+            return {
+                "x": float(payload["x"]),
+                "y": float(payload["y"]),
+                "z": float(payload["z"]),
+                "yaw": float(payload["yaw"]),
+            }
+        except Exception as exc:
+            logger.warning("Failed to load fixed spawn pose from %s: %s", self.fixed_spawn_pose_path, exc)
+            return None
+
+    def save_fixed_spawn_pose(self, pose: Dict[str, float]) -> None:
+        if not self.fixed_spawn_pose_path:
+            return
+        payload = {
+            "x": float(pose["x"]),
+            "y": float(pose["y"]),
+            "z": float(pose["z"]),
+            "yaw": float(pose["yaw"]),
+        }
+        with open(self.fixed_spawn_pose_path, "w", encoding="utf-8") as pose_file:
+            json.dump(payload, pose_file, indent=2)
+
+    def append_takeover_event(
+        self,
+        *,
+        event_type: str,
+        reason: str,
+        trigger: str,
+        corrective_action: str = "",
+        note: str = "",
+        before_snapshot: Optional[Dict[str, Any]] = None,
+        after_snapshot: Optional[Dict[str, Any]] = None,
+        post_assist_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        self.takeover_event_counter += 1
+        event = {
+            "event_id": f"takeover_evt_{self.takeover_event_counter:05d}",
+            "timestamp": now_timestamp(),
+            "event_type": str(event_type),
+            "trigger": str(trigger),
+            "reason": str(reason or DEFAULT_TAKEOVER_REASON),
+            "note": str(note or ""),
+            "corrective_action": normalize_reflex_action_name(corrective_action),
+            "takeover_id": str(self.takeover_state.get("takeover_id", "")),
+            "task_label": self.current_task_label,
+            "step_index": int(self.plan_execution_state.get("step_index", 0)),
+            "before_runtime": before_snapshot,
+            "after_runtime": after_snapshot,
+        }
+        if post_assist_snapshot is not None:
+            event["post_assist_runtime"] = post_assist_snapshot
+        self.takeover_events.append(event)
+        limit = max(1, int(self.args.takeover_recent_limit))
+        if len(self.takeover_events) > limit:
+            self.takeover_events = self.takeover_events[-limit:]
+        with open(self.takeover_log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(event, ensure_ascii=True) + "\n")
+        self.takeover_state["event_count"] = int(self.takeover_state.get("event_count", 0)) + 1
+        self.takeover_state["last_event_id"] = event["event_id"]
+        self.takeover_state["last_event_type"] = event["event_type"]
+        self.takeover_state["last_event_reason"] = event["reason"]
+        self.takeover_state["last_corrective_action"] = event["corrective_action"]
+        if event_type == "manual_intervention":
+            self.takeover_state["last_intervention_reason"] = event["reason"]
+        return event
+
+    def infer_manual_intervention_reason(self, action_name: str) -> str:
+        manual_action = normalize_reflex_action_name(action_name)
+        suggested_action = normalize_reflex_action_name(self.reflex_runtime.get("suggested_action", "idle"))
+        last_executor_status = str(self.reflex_execution_state.get("last_status", "idle"))
+        last_executor_reason = str(self.reflex_execution_state.get("last_reason", ""))
+        if last_executor_status == "blocked" and last_executor_reason:
+            return f"post_block:{last_executor_reason}"
+        if suggested_action in ("idle", "hold_position", "shield_hold", ""):
+            return DEFAULT_TAKEOVER_REASON
+        if manual_action == suggested_action:
+            return "confirm_reflex_suggestion"
+        if REFLEX_OPPOSITE_ACTIONS.get(manual_action) == suggested_action:
+            return "override_opposite_reflex"
+        return "override_reflex_suggestion"
+
+    def start_takeover(self, *, reason: str, note: str = "", trigger: str = "manual_start") -> Dict[str, Any]:
+        if self.takeover_state.get("active", False):
+            if note:
+                self.takeover_state["current_note"] = str(note)
+            return self.takeover_state
+        started_at = now_timestamp()
+        takeover_id = f"takeover_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{int(self.plan_execution_state.get('step_index', 0)):04d}"
+        self.takeover_state.update(
+            {
+                "active": True,
+                "takeover_id": takeover_id,
+                "started_at": started_at,
+                "ended_at": "",
+                "start_trigger": str(trigger),
+                "current_reason": str(reason or DEFAULT_TAKEOVER_REASON),
+                "current_note": str(note or ""),
+                "intervention_count": 0,
+            }
+        )
+        snapshot = self.build_takeover_snapshot()
+        self.append_takeover_event(
+            event_type="takeover_start",
+            reason=str(reason or DEFAULT_TAKEOVER_REASON),
+            trigger=trigger,
+            note=note,
+            before_snapshot=snapshot,
+            after_snapshot=snapshot,
+        )
+        logger.info("Takeover started id=%s reason=%s trigger=%s", takeover_id, reason or DEFAULT_TAKEOVER_REASON, trigger)
+        return self.takeover_state
+
+    def end_takeover(self, *, reason: str = "resolved", note: str = "", trigger: str = "manual_end") -> Dict[str, Any]:
+        if not self.takeover_state.get("active", False):
+            return self.takeover_state
+        snapshot = self.build_takeover_snapshot()
+        self.takeover_state["active"] = False
+        self.takeover_state["ended_at"] = now_timestamp()
+        if reason:
+            self.takeover_state["current_reason"] = str(reason)
+        if note:
+            self.takeover_state["current_note"] = str(note)
+        self.append_takeover_event(
+            event_type="takeover_end",
+            reason=str(reason or "resolved"),
+            trigger=trigger,
+            note=note,
+            before_snapshot=snapshot,
+            after_snapshot=snapshot,
+        )
+        logger.info("Takeover ended id=%s reason=%s trigger=%s", self.takeover_state.get("takeover_id", ""), reason or "resolved", trigger)
+        return self.takeover_state
+
+    def record_manual_intervention(
+        self,
+        *,
+        action_name: str,
+        before_snapshot: Dict[str, Any],
+        after_snapshot: Dict[str, Any],
+        post_assist_snapshot: Optional[Dict[str, Any]] = None,
+        trigger: str = "manual_action",
+    ) -> Dict[str, Any]:
+        reason = self.infer_manual_intervention_reason(action_name)
+        if not self.takeover_state.get("active", False):
+            self.start_takeover(reason=reason, trigger="auto_manual_intervention")
+        self.takeover_state["intervention_count"] = int(self.takeover_state.get("intervention_count", 0)) + 1
+        event = self.append_takeover_event(
+            event_type="manual_intervention",
+            reason=reason,
+            trigger=trigger,
+            corrective_action=action_name,
+            note=str(self.takeover_state.get("current_note", "")),
+            before_snapshot=before_snapshot,
+            after_snapshot=after_snapshot,
+            post_assist_snapshot=post_assist_snapshot,
+        )
+        logger.info(
+            "Takeover intervention action=%s reason=%s step=%s",
+            normalize_reflex_action_name(action_name),
+            reason,
+            self.plan_execution_state.get("step_index", 0),
+        )
+        return event
 
     def update_reflex_execution_state(
         self,
@@ -596,8 +1406,19 @@ class UAVControlBackend:
     def set_task_label(self, task_label: str) -> Dict[str, Any]:
         with self.lock:
             self.current_task_label = str(task_label or "").strip()
-            self.sync_archive_runtime()
-            return {"status": "ok", "task_label": self.current_task_label}
+            self.current_mission = self.build_mission_descriptor(self.current_task_label)
+            self.reset_person_search_state(reset_recent_events=True)
+            self.search_runtime = self.build_search_runtime_snapshot()
+            archive_state = self.sync_archive_runtime()
+            self.sync_search_runtime(archive_state)
+            return {
+                "status": "ok",
+                "task_label": self.current_task_label,
+                "mission": self.current_mission,
+                "search_runtime": self.search_runtime,
+                "person_evidence_runtime": self.person_evidence_runtime,
+                "search_result": self.search_result,
+            }
 
     def set_plan_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
@@ -610,7 +1431,9 @@ class UAVControlBackend:
             )
             candidate_waypoints = self.current_plan.get("candidate_waypoints") or []
             self.runtime_debug["current_waypoint"] = candidate_waypoints[0] if candidate_waypoints else None
-            self.sync_archive_runtime()
+            self.sync_mission_from_plan()
+            archive_state = self.sync_archive_runtime()
+            self.sync_search_runtime(archive_state)
             return self.current_plan
 
     def request_plan(self, task_label: Optional[str] = None, trigger: str = "manual_request") -> Dict[str, Any]:
@@ -643,6 +1466,8 @@ class UAVControlBackend:
                     planner_name=self.args.planner_name,
                     trigger=trigger,
                     step_index=int(self.plan_execution_state.get("step_index", 0)),
+                    mission=self.current_mission,
+                    search_runtime=self.search_runtime,
                     context={
                         "movement_yaw_mode": self.args.movement_yaw_mode,
                         "preview_mode": self.args.preview_mode,
@@ -713,6 +1538,14 @@ class UAVControlBackend:
                     semantic_subgoal=task_label_value or "move_forward",
                     planner_confidence=0.35,
                     should_replan=False,
+                    mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
+                    search_subgoal="search_frontier"
+                    if str(self.current_mission.get("mission_type", "")) in ("person_search", "room_search", "target_verification")
+                    else "advance_to_waypoint",
+                    priority_region=(self.current_mission.get("priority_regions") or [{}])[0],
+                    candidate_regions=self.current_mission.get("priority_regions") or [],
+                    confirm_target=bool(self.current_mission.get("confirm_target", False)),
+                    explanation="Local fallback plan reused the current mission descriptor.",
                     debug={
                         "source": "local_heuristic",
                         "planner_interval_steps": self.args.planner_interval_steps,
@@ -819,6 +1652,7 @@ class UAVControlBackend:
             self.runtime_debug["archive_cell_id"] = snapshot["current_cell_id"]
             if not self.should_preserve_reflex_runtime():
                 self.sync_reflex_runtime(snapshot, trigger="archive_sync")
+            self.sync_search_runtime(snapshot)
             return snapshot
 
     def build_heuristic_reflex_runtime(self, archive_snapshot: Optional[Dict[str, Any]] = None, *, trigger: str = "") -> Dict[str, Any]:
@@ -959,6 +1793,7 @@ class UAVControlBackend:
             env_yaw = self.get_env_yaw_deg()
             control_yaw = self.get_control_yaw_deg()
             archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            self.sync_search_runtime(archive_state)
             if not self.should_preserve_reflex_runtime():
                 self.sync_reflex_runtime(archive_state, trigger="state_refresh")
             return {
@@ -986,11 +1821,18 @@ class UAVControlBackend:
                 "preview_mode": self.args.preview_mode,
                 "depth": self.last_depth_summary,
                 "camera_info": self.last_depth_summary.get("camera_info", {}),
+                "mission": self.current_mission,
+                "search_runtime": self.search_runtime,
+                "person_evidence_runtime": self.person_evidence_runtime,
+                "search_result": self.search_result,
                 "plan": self.current_plan,
                 "planner_runtime": self.plan_execution_state,
                 "archive": archive_state,
                 "reflex_runtime": self.reflex_runtime,
                 "reflex_execution": self.reflex_execution_state,
+                "takeover_runtime": self.takeover_state,
+                "takeover_recent_events": self.takeover_events,
+                "person_evidence_recent_events": self.person_evidence_events,
                 "last_plan_request": {
                     "schema_version": self.last_plan_request.get("schema_version", ""),
                     "trigger": self.last_plan_request.get("trigger", ""),
@@ -1016,6 +1858,9 @@ class UAVControlBackend:
         allow_reflex_assist: bool = False,
     ) -> Dict[str, Any]:
         with self.lock:
+            before_takeover_snapshot = self.build_takeover_snapshot() if action_origin == "manual" else None
+            manual_after_takeover_snapshot: Optional[Dict[str, Any]] = None
+            post_assist_takeover_snapshot: Optional[Dict[str, Any]] = None
             x, y, z, _actual_task_yaw = self.get_task_pose()
             move_yaw_deg = self.get_control_yaw_deg()
             theta = np.radians(move_yaw_deg)
@@ -1055,6 +1900,7 @@ class UAVControlBackend:
                     reflex_runtime.get("source", "unknown"),
                     reflex_runtime.get("suggested_action", "idle"),
                 )
+                manual_after_takeover_snapshot = self.build_takeover_snapshot() if action_origin == "manual" else None
                 if allow_reflex_assist and self.args.reflex_execute_mode == "assist_step":
                     assist_result = self.execute_reflex_action(
                         trigger="assist_step",
@@ -1063,8 +1909,17 @@ class UAVControlBackend:
                         sync_after_execution=True,
                     )
                     assisted_state = assist_result.get("state")
+                    post_assist_takeover_snapshot = self.build_takeover_snapshot() if action_origin == "manual" else None
                     if isinstance(assisted_state, dict):
-                        return assisted_state
+                        final_state = assisted_state
+                    else:
+                        final_state = self.get_state()
+                else:
+                    final_state = self.get_state()
+            else:
+                if action_origin == "manual":
+                    manual_after_takeover_snapshot = self.build_takeover_snapshot()
+                final_state = self.get_state()
             actual_task_yaw_after = self.get_task_pose()[3]
             actual_uav_yaw_after = self.get_env_yaw_deg()
             logger.info(
@@ -1087,7 +1942,19 @@ class UAVControlBackend:
                 actual_task_yaw_after,
                 actual_uav_yaw_after,
             )
-            return self.get_state()
+            should_record_takeover = action_origin == "manual" and (
+                self.args.reflex_execute_mode == "assist_step" or bool(self.takeover_state.get("active", False))
+            )
+            if should_record_takeover and before_takeover_snapshot is not None:
+                self.record_manual_intervention(
+                    action_name=action_name,
+                    before_snapshot=before_takeover_snapshot,
+                    after_snapshot=manual_after_takeover_snapshot or self.build_takeover_snapshot(),
+                    post_assist_snapshot=post_assist_takeover_snapshot,
+                    trigger="manual_action",
+                )
+                final_state = self.get_state()
+            return final_state
 
     def execute_reflex_action(
         self,
@@ -1219,8 +2086,9 @@ class UAVControlBackend:
                 self.refresh_observations()
             if self.last_raw_frame is None:
                 raise RuntimeError("No frame available for capture")
-            if task_label is not None:
-                self.set_task_label(task_label)
+            requested_task_label = str(task_label or "").strip()
+            if requested_task_label and requested_task_label != self.current_task_label:
+                self.set_task_label(requested_task_label)
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             suffix = f"_{label}" if label else ""
@@ -1270,6 +2138,7 @@ class UAVControlBackend:
                 "capture_time": timestamp,
                 "env_id": self.args.env_id,
                 "dataset_schema_version": "phase3.capture_bundle.v1",
+                "search_capture_schema_version": "phase4.search_capture_bundle.v1",
                 "task_label": self.current_task_label,
                 "action_label": self.last_action,
                 "rgb_image_path": image_path,
@@ -1281,10 +2150,17 @@ class UAVControlBackend:
                 "depth": self.last_depth_summary,
                 "camera_info": camera_info,
                 "plan": self.current_plan,
+                "mission": self.current_mission,
+                "search_runtime": self.search_runtime,
+                "person_evidence_runtime": self.person_evidence_runtime,
+                "search_result": self.search_result,
                 "runtime_debug": self.runtime_debug,
                 "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
                 "reflex_runtime": self.reflex_runtime,
                 "reflex_execution": self.reflex_execution_state,
+                "takeover_runtime": self.takeover_state,
+                "takeover_recent_events": self.takeover_events,
+                "person_evidence_recent_events": self.person_evidence_events,
                 "reflex_sample": reflex_sample,
                 "preview_mode": self.args.preview_mode,
                 "task_json": self.args.task_json,
@@ -1316,9 +2192,16 @@ class UAVControlBackend:
                 "depth": self.last_depth_summary,
                 "camera_info": camera_info,
                 "plan": self.current_plan,
+                "mission": metadata["mission"],
+                "search_runtime": metadata["search_runtime"],
+                "person_evidence_runtime": metadata["person_evidence_runtime"],
+                "search_result": metadata["search_result"],
                 "archive": metadata["archive"],
                 "reflex_runtime": metadata["reflex_runtime"],
                 "reflex_execution": metadata["reflex_execution"],
+                "takeover_runtime": metadata["takeover_runtime"],
+                "takeover_recent_events": metadata["takeover_recent_events"],
+                "person_evidence_recent_events": metadata["person_evidence_recent_events"],
                 "reflex_sample": metadata["reflex_sample"],
             }
 
@@ -1385,6 +2268,23 @@ def make_handler(backend: UAVControlBackend):
                     self._send_json({"status": "ok", "reflex_runtime": backend.reflex_runtime})
                 elif parsed.path == "/reflex_execution":
                     self._send_json({"status": "ok", "reflex_execution": backend.reflex_execution_state})
+                elif parsed.path == "/takeover":
+                    self._send_json(
+                        {
+                            "status": "ok",
+                            "takeover_runtime": backend.takeover_state,
+                            "takeover_recent_events": backend.takeover_events,
+                        }
+                    )
+                elif parsed.path == "/person_evidence":
+                    self._send_json(
+                        {
+                            "status": "ok",
+                            "person_evidence_runtime": backend.person_evidence_runtime,
+                            "search_result": backend.search_result,
+                            "person_evidence_recent_events": backend.person_evidence_events,
+                        }
+                    )
                 else:
                     self._send_json({"status": "error", "message": "Not found"}, 404)
             except Exception as exc:
@@ -1429,6 +2329,40 @@ def make_handler(backend: UAVControlBackend):
                             refresh_policy=bool(data.get("refresh_policy", True)),
                             allow_auto_plan=bool(data.get("allow_auto_plan", True)),
                             sync_after_execution=bool(data.get("sync_after_execution", True)),
+                        )
+                    )
+                elif parsed.path == "/takeover":
+                    action = str(data.get("action", "start")).strip().lower()
+                    reason = str(data.get("reason", "") or "").strip()
+                    note = str(data.get("note", "") or "").strip()
+                    if action == "start":
+                        takeover_state = backend.start_takeover(
+                            reason=reason or DEFAULT_TAKEOVER_REASON,
+                            note=note,
+                            trigger="manual_request",
+                        )
+                    elif action == "end":
+                        takeover_state = backend.end_takeover(
+                            reason=reason or "resolved",
+                            note=note,
+                            trigger="manual_request",
+                        )
+                    else:
+                        raise ValueError(f"Unsupported takeover action: {action}")
+                    self._send_json(
+                        {
+                            "status": "ok",
+                            "takeover_runtime": takeover_state,
+                            "takeover_recent_events": backend.takeover_events,
+                        }
+                    )
+                elif parsed.path == "/person_evidence":
+                    self._send_json(
+                        backend.record_person_evidence(
+                            action=str(data.get("action", "") or ""),
+                            note=str(data.get("note", "") or ""),
+                            capture_label=str(data.get("capture_label", "") or ""),
+                            confidence=data.get("confidence"),
                         )
                     )
                 elif parsed.path == "/runtime_debug":
@@ -1497,6 +2431,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth_preview_width", type=int, default=480, help="Depth preview render width")
     parser.add_argument("--depth_preview_height", type=int, default=360, help="Depth preview render height")
     parser.add_argument("--capture_dir", default="./captures_remote", help="Directory used for server-side captures")
+    parser.add_argument("--takeover_log_dir", default="./phase4_takeover_logs", help="Directory used for takeover/intervention JSONL logs")
+    parser.add_argument("--takeover_recent_limit", type=int, default=12, help="How many recent takeover events to expose in /state")
+    parser.add_argument("--search_log_dir", default="./phase4_search_logs", help="Directory used for person-evidence/search JSONL logs")
+    parser.add_argument("--search_recent_limit", type=int, default=12, help="How many recent person-evidence events to expose in /state")
+    parser.add_argument("--fixed_spawn_pose_file", default="./uav_fixed_spawn_pose.json", help="Persistent fixed UAV spawn pose file used when task_json/spawn args are absent")
     parser.add_argument("--default_task_label", default="", help="Default task label used by capture/planner endpoints")
     parser.add_argument("--planner_name", default="phase2-planner", help="Planner name stored in /plan state")
     parser.add_argument("--planner_url", default=None, help="Optional external planner base URL")
