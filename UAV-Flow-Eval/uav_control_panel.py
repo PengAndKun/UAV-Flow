@@ -13,6 +13,7 @@ import json
 import logging
 import tkinter as tk
 import tkinter.font as tkfont
+import tkinter.ttk as ttk
 from typing import Any, Dict, Optional
 from urllib import error, request
 
@@ -24,6 +25,88 @@ logger = logging.getLogger(__name__)
 
 PREVIEW_WINDOW_NAME = "UAV Remote Preview"
 DEPTH_WINDOW_NAME = "UAV Depth Preview"
+
+PLANNER_PRESETS: Dict[str, Dict[str, Any]] = {
+    "Heuristic Baseline": {
+        "planner_name": "external_heuristic_planner",
+        "planner_mode": "heuristic",
+        "planner_route_mode": "heuristic_only",
+        "fallback_to_heuristic": True,
+        "planner_request_timeout_s": 5.0,
+    },
+    "Gemini Lite": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "llm",
+        "planner_route_mode": "llm_only",
+        "llm_api_style": "google_genai_sdk",
+        "llm_model": "gemini-3.1-flash-lite-preview",
+        "llm_input_mode": "text",
+        "llm_base_url": "google-genai-sdk",
+        "llm_api_key_env": "GEMINI_API_KEY",
+        "fallback_to_heuristic": False,
+        "planner_request_timeout_s": 15.0,
+    },
+    "Gemini Flash": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "llm",
+        "planner_route_mode": "llm_only",
+        "llm_api_style": "google_genai_sdk",
+        "llm_model": "gemini-3-flash-preview",
+        "llm_input_mode": "text",
+        "llm_base_url": "google-genai-sdk",
+        "llm_api_key_env": "GEMINI_API_KEY",
+        "fallback_to_heuristic": False,
+        "planner_request_timeout_s": 15.0,
+    },
+    "Search Hybrid": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "hybrid",
+        "planner_route_mode": "search_hybrid",
+        "llm_api_style": "google_genai_sdk",
+        "llm_model": "gemini-3.1-flash-lite-preview",
+        "llm_input_mode": "text",
+        "llm_base_url": "google-genai-sdk",
+        "llm_api_key_env": "GEMINI_API_KEY",
+        "fallback_to_heuristic": True,
+        "planner_request_timeout_s": 15.0,
+    },
+    "Anthropic Qwen Next": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "llm",
+        "planner_route_mode": "llm_only",
+        "llm_api_style": "anthropic_messages",
+        "llm_model": "qwen3-coder-next",
+        "llm_input_mode": "text",
+        "llm_base_url": "http://1.95.142.151:3000",
+        "llm_api_key_env": "ANTHROPIC_API_KEY",
+        "fallback_to_heuristic": False,
+        "planner_request_timeout_s": 20.0,
+    },
+    "Anthropic Sonnet": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "llm",
+        "planner_route_mode": "llm_only",
+        "llm_api_style": "anthropic_messages",
+        "llm_model": "claude-sonnet-4.6",
+        "llm_input_mode": "text",
+        "llm_base_url": "http://1.95.142.151:3000",
+        "llm_api_key_env": "ANTHROPIC_API_KEY",
+        "fallback_to_heuristic": False,
+        "planner_request_timeout_s": 20.0,
+    },
+    "Anthropic Opus": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "llm",
+        "planner_route_mode": "llm_only",
+        "llm_api_style": "anthropic_messages",
+        "llm_model": "claude-opus-4-6",
+        "llm_input_mode": "text",
+        "llm_base_url": "http://1.95.142.151:3000",
+        "llm_api_key_env": "ANTHROPIC_API_KEY",
+        "fallback_to_heuristic": False,
+        "planner_request_timeout_s": 20.0,
+    },
+}
 
 
 class RemoteControlClient:
@@ -102,6 +185,27 @@ class UAVControlPanel:
         self.capture_label_var = tk.StringVar(value="")
         self.takeover_note_var = tk.StringVar(value="")
         self.evidence_note_var = tk.StringVar(value="")
+        self.planner_name_var = tk.StringVar(value="external_llm_planner")
+        self.planner_preset_var = tk.StringVar(value="Custom")
+        self.planner_mode_var = tk.StringVar(value="heuristic")
+        self.planner_route_mode_var = tk.StringVar(value="heuristic_only")
+        self.planner_api_style_var = tk.StringVar(value="google_gemini")
+        self.planner_model_var = tk.StringVar(value="")
+        self.planner_input_mode_var = tk.StringVar(value="text")
+        self.planner_base_url_var = tk.StringVar(value="")
+        self.planner_api_key_var = tk.StringVar(value="")
+        self.planner_api_key_env_var = tk.StringVar(value="")
+        self.planner_fallback_var = tk.BooleanVar(value=True)
+        self.planner_request_timeout_var = tk.StringVar(value="5.0")
+        self.planner_config_var = tk.StringVar(value="Planner config: waiting...")
+
+    def refresh_client_timeout(self) -> None:
+        try:
+            planner_timeout = float(self.planner_request_timeout_var.get().strip() or "5.0")
+        except ValueError:
+            planner_timeout = 5.0
+        buffered_timeout = max(float(self.args.timeout_s), planner_timeout + 5.0)
+        self.client.timeout_s = buffered_timeout
 
     def safe_request(self, func, *call_args, **call_kwargs):
         try:
@@ -245,6 +349,105 @@ class UAVControlPanel:
     def reset_evidence(self) -> None:
         self.submit_person_evidence("reset")
 
+    def build_planner_config_payload(self) -> Dict[str, Any]:
+        payload = {
+            "planner_name": self.planner_name_var.get().strip() or "external_llm_planner",
+            "planner_mode": self.planner_mode_var.get().strip() or "heuristic",
+            "planner_route_mode": self.planner_route_mode_var.get().strip() or "heuristic_only",
+            "llm_api_style": self.planner_api_style_var.get().strip() or "google_gemini",
+            "llm_model": self.planner_model_var.get().strip(),
+            "llm_input_mode": self.planner_input_mode_var.get().strip() or "text",
+            "llm_base_url": self.planner_base_url_var.get().strip(),
+            "llm_api_key_env": self.planner_api_key_env_var.get().strip(),
+            "fallback_to_heuristic": bool(self.planner_fallback_var.get()),
+            "planner_request_timeout_s": float(self.planner_request_timeout_var.get().strip() or "5.0"),
+        }
+        inline_api_key = self.planner_api_key_var.get().strip()
+        if inline_api_key:
+            payload["llm_api_key"] = inline_api_key
+        return payload
+
+    def sync_planner_controls_from_config(self, config: Dict[str, Any]) -> None:
+        self.planner_name_var.set(str(config.get("planner_name", self.planner_name_var.get()) or self.planner_name_var.get()))
+        self.planner_mode_var.set(str(config.get("planner_mode", self.planner_mode_var.get()) or self.planner_mode_var.get()))
+        self.planner_route_mode_var.set(
+            str(
+                config.get(
+                    "planner_route_mode_raw",
+                    config.get("planner_route_mode", self.planner_route_mode_var.get()),
+                )
+                or self.planner_route_mode_var.get()
+            )
+        )
+        self.planner_api_style_var.set(str(config.get("llm_api_style", self.planner_api_style_var.get()) or self.planner_api_style_var.get()))
+        self.planner_model_var.set(str(config.get("llm_model", self.planner_model_var.get()) or ""))
+        self.planner_input_mode_var.set(str(config.get("llm_input_mode", self.planner_input_mode_var.get()) or self.planner_input_mode_var.get()))
+        self.planner_base_url_var.set(str(config.get("llm_base_url", self.planner_base_url_var.get()) or ""))
+        self.planner_api_key_env_var.set(str(config.get("llm_api_key_env", self.planner_api_key_env_var.get()) or ""))
+        self.planner_fallback_var.set(bool(config.get("fallback_to_heuristic", self.planner_fallback_var.get())))
+        self.planner_request_timeout_var.set(str(float(config.get("planner_request_timeout_s", self.planner_request_timeout_var.get() or 5.0))))
+        self.refresh_client_timeout()
+        key_configured = int(bool(config.get("llm_api_key_configured", False)))
+        config_summary = (
+            f"Planner config mode={self.planner_mode_var.get()} "
+            f"route={config.get('planner_route_mode', self.planner_route_mode_var.get())} "
+            f"api={self.planner_api_style_var.get() or '-'} "
+            f"model={self.planner_model_var.get() or '-'} "
+            f"key_cfg={key_configured} "
+            f"fallback={int(bool(self.planner_fallback_var.get()))} "
+            f"req_timeout={self.planner_request_timeout_var.get()}s "
+            f"enabled={int(bool(config.get('llm_enabled', False)))}"
+        )
+        self.planner_config_var.set(config_summary)
+        self.planner_preset_var.set("Custom")
+        for preset_name, preset in PLANNER_PRESETS.items():
+            if (
+                str(preset.get("planner_mode", "")) == self.planner_mode_var.get()
+                and str(preset.get("planner_route_mode", "")) == self.planner_route_mode_var.get()
+                and str(preset.get("llm_api_style", self.planner_api_style_var.get())) == self.planner_api_style_var.get()
+                and str(preset.get("llm_model", self.planner_model_var.get())) == self.planner_model_var.get()
+            ):
+                self.planner_preset_var.set(preset_name)
+                break
+
+    def refresh_planner_config(self, *, silent: bool = False) -> None:
+        result = self.safe_request(self.client.get_json, "/planner_config")
+        if not isinstance(result, dict):
+            return
+        self.sync_planner_controls_from_config(result)
+        if not silent:
+            self.status_var.set("Planner config refreshed")
+
+    def apply_planner_config(self) -> None:
+        payload = self.build_planner_config_payload()
+        result = self.safe_request(self.client.post_json, "/planner_config", payload)
+        if not isinstance(result, dict):
+            return
+        self.sync_planner_controls_from_config(result)
+        self.status_var.set(
+            f"Planner config applied: mode={self.planner_mode_var.get()} "
+            f"route={self.planner_route_mode_var.get()} model={self.planner_model_var.get() or '-'}"
+        )
+
+    def apply_planner_preset(self) -> None:
+        preset_name = self.planner_preset_var.get().strip()
+        preset = PLANNER_PRESETS.get(preset_name)
+        if not preset:
+            self.status_var.set(f"Unknown planner preset: {preset_name or 'empty'}")
+            return
+        self.planner_name_var.set(str(preset.get("planner_name", self.planner_name_var.get())))
+        self.planner_mode_var.set(str(preset.get("planner_mode", self.planner_mode_var.get())))
+        self.planner_route_mode_var.set(str(preset.get("planner_route_mode", self.planner_route_mode_var.get())))
+        self.planner_api_style_var.set(str(preset.get("llm_api_style", self.planner_api_style_var.get())))
+        self.planner_model_var.set(str(preset.get("llm_model", self.planner_model_var.get())))
+        self.planner_input_mode_var.set(str(preset.get("llm_input_mode", self.planner_input_mode_var.get())))
+        self.planner_base_url_var.set(str(preset.get("llm_base_url", self.planner_base_url_var.get())))
+        self.planner_api_key_env_var.set(str(preset.get("llm_api_key_env", self.planner_api_key_env_var.get())))
+        self.planner_fallback_var.set(bool(preset.get("fallback_to_heuristic", self.planner_fallback_var.get())))
+        self.planner_request_timeout_var.set(str(float(preset.get("planner_request_timeout_s", self.planner_request_timeout_var.get() or 5.0))))
+        self.refresh_client_timeout()
+        self.apply_planner_config()
+
     def shutdown_server(self) -> None:
         result = self.safe_request(self.client.post_json, "/shutdown", {})
         if result:
@@ -368,10 +571,40 @@ class UAVControlPanel:
             f"pipe={depth.get('pipeline', depth.get('source_mode', 'n/a'))}"
         )
         if plan:
+            planner_usage = planner_runtime.get("last_usage", {}) if isinstance(planner_runtime.get("last_usage"), dict) else {}
+            planner_tokens = int(
+                planner_usage.get(
+                    "total_tokens",
+                    planner_usage.get(
+                        "totalTokenCount",
+                        planner_usage.get(
+                            "total_token_count",
+                            planner_usage.get(
+                                "input_tokens",
+                                planner_usage.get(
+                                    "promptTokenCount",
+                                    planner_usage.get("prompt_token_count", 0),
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+                or 0
+            )
+            planner_detail = str(planner_runtime.get("planner_source_detail", "none") or "none")
+            planner_model_display = str(planner_runtime.get("last_model_name", "") or "")
+            if planner_detail not in {"llm_planner", "heuristic_fallback"}:
+                planner_model_display = ""
+                planner_tokens = 0
             self.plan_var.set(
                 f"{self.format_plan_summary(plan)} | "
                 f"status={planner_runtime.get('planner_status', 'idle')} "
                 f"source={planner_runtime.get('planner_source', 'none')} "
+                f"detail={planner_detail} "
+                f"route={planner_runtime.get('planner_route_mode', 'n/a')} "
+                f"model={planner_model_display or '-'} "
+                f"fallback={int(bool(planner_runtime.get('fallback_used', False)))} "
+                f"tokens={planner_tokens} "
                 f"trigger={planner_runtime.get('last_trigger', 'n/a')} "
                 f"latency={float(planner_runtime.get('last_latency_ms', 0.0)):.1f}ms "
                 f"auto={planner_runtime.get('auto_mode', 'manual')} "
@@ -704,6 +937,137 @@ class UAVControlPanel:
             )
         planner_frame.grid_columnconfigure(0, weight=1)
 
+        planner_config_frame = tk.LabelFrame(control_groups, text="Planner Routing", padx=8, pady=8)
+        planner_config_frame.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(6, 0), pady=(0, 6))
+        tk.Label(planner_config_frame, text="Preset").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            planner_config_frame,
+            textvariable=self.planner_preset_var,
+            state="readonly",
+            values=["Custom", *PLANNER_PRESETS.keys()],
+        ).grid(row=0, column=1, sticky="ew", padx=(8, 6))
+        tk.Button(planner_config_frame, text="Use Preset", command=self.apply_planner_preset, width=12).grid(
+            row=0,
+            column=2,
+            sticky="ew",
+        )
+
+        tk.Label(planner_config_frame, text="Mode").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            planner_config_frame,
+            textvariable=self.planner_mode_var,
+            state="readonly",
+            values=["heuristic", "llm", "hybrid"],
+        ).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        tk.Label(planner_config_frame, text="Route").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            planner_config_frame,
+            textvariable=self.planner_route_mode_var,
+            state="readonly",
+            values=["auto", "heuristic_only", "llm_only", "search_hybrid"],
+        ).grid(row=2, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        tk.Label(planner_config_frame, text="API Style").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            planner_config_frame,
+            textvariable=self.planner_api_style_var,
+            state="readonly",
+            values=["google_genai_sdk", "google_gemini", "anthropic_messages", "openai_chat", "openai_responses"],
+        ).grid(row=3, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        tk.Label(planner_config_frame, text="Model").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(planner_config_frame, textvariable=self.planner_model_var).grid(
+            row=4,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        tk.Label(planner_config_frame, text="Input").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            planner_config_frame,
+            textvariable=self.planner_input_mode_var,
+            state="readonly",
+            values=["text", "text_image"],
+        ).grid(row=5, column=1, columnspan=2, sticky="ew", padx=(8, 0), pady=(8, 0))
+
+        tk.Label(planner_config_frame, text="Base URL").grid(row=6, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(planner_config_frame, textvariable=self.planner_base_url_var).grid(
+            row=6,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        tk.Label(planner_config_frame, text="API Key").grid(row=7, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(planner_config_frame, textvariable=self.planner_api_key_var, show="*").grid(
+            row=7,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        tk.Label(planner_config_frame, text="API Env").grid(row=8, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(planner_config_frame, textvariable=self.planner_api_key_env_var).grid(
+            row=8,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        tk.Label(planner_config_frame, text="Req Timeout").grid(row=9, column=0, sticky="w", pady=(8, 0))
+        tk.Entry(planner_config_frame, textvariable=self.planner_request_timeout_var).grid(
+            row=9,
+            column=1,
+            columnspan=2,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+
+        tk.Checkbutton(
+            planner_config_frame,
+            text="Allow heuristic fallback",
+            variable=self.planner_fallback_var,
+            anchor="w",
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        planner_apply_frame = tk.Frame(planner_config_frame)
+        planner_apply_frame.grid(row=11, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        tk.Button(planner_apply_frame, text="Apply Manual", command=self.apply_planner_config, width=12).grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, 6),
+        )
+        tk.Button(planner_apply_frame, text="Refresh Planner", command=self.refresh_planner_config, width=12).grid(
+            row=0,
+            column=1,
+            sticky="ew",
+        )
+        planner_apply_frame.grid_columnconfigure(0, weight=1)
+        planner_apply_frame.grid_columnconfigure(1, weight=1)
+
+        tk.Label(
+            planner_config_frame,
+            textvariable=self.planner_config_var,
+            anchor="w",
+            justify="left",
+            wraplength=280,
+        ).grid(row=12, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+
+        for column_index in range(3):
+            planner_config_frame.grid_columnconfigure(column_index, weight=1 if column_index > 0 else 0)
+
         takeover_frame = tk.LabelFrame(control_groups, text="Takeover", padx=8, pady=8)
         takeover_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 6))
         for idx, (label, callback) in enumerate(
@@ -741,7 +1105,7 @@ class UAVControlPanel:
         evidence_frame.grid_columnconfigure(0, weight=1)
 
         system_frame = tk.LabelFrame(control_groups, text="System", padx=8, pady=8)
-        system_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        system_frame.grid(row=2, column=0, columnspan=3, sticky="ew")
         tk.Button(system_frame, text="Capture (C)", command=self.capture, width=18).grid(
             row=0,
             column=0,
@@ -760,6 +1124,7 @@ class UAVControlPanel:
         system_frame.grid_columnconfigure(1, weight=1)
         control_groups.grid_columnconfigure(0, weight=1)
         control_groups.grid_columnconfigure(1, weight=1)
+        control_groups.grid_columnconfigure(2, weight=1)
 
         shown_windows = []
         if not self.args.hide_preview_window:
@@ -802,6 +1167,7 @@ class UAVControlPanel:
     def run(self) -> None:
         self.build_ui()
         self.update_state_once()
+        self.refresh_planner_config(silent=True)
         self.update_preview_once()
         self.update_depth_once()
         self.schedule_state_refresh()

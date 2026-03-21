@@ -2341,3 +2341,340 @@ Expected user-facing improvement:
 - top runtime data is easier to inspect
 - long status blocks no longer force the whole panel into a cramped fixed-height view
 - lower controls are easier to scan because they are grouped by function instead of shown as a single dense button list
+
+### Phase 4.5 Development Plan Started (LLM High-Level Search Planner Adapter)
+
+Planning note:
+- the original `phase4_entry_plan.md` used `4.5` for online evaluation under the older phase numbering
+- the current paper-aligned development flow now uses `4.5` to mean:
+  - `LLM High-Level Search Planner Adapter`
+- to avoid ambiguity, the detailed implementation plan is tracked separately in:
+  - `docs/phase45_llm_planner_plan.md`
+
+Current goal:
+- replace the current heuristic-only high-level planner with a sparse, structured LLM planner for search missions
+
+Immediate deliverables defined:
+- `UAV-Flow-Eval/llm_planner_client.py`
+- `UAV-Flow-Eval/llm_planner_adapter.py`
+- `planner_server.py` dual-mode planner support:
+  - `heuristic`
+  - `llm`
+  - `hybrid`
+- planner metadata logging for:
+  - source
+  - latency
+  - model name
+  - usage
+  - fallback path
+
+API prerequisites identified:
+- `api_key`
+- `base_url`
+- `model_name`
+- image-input support flag
+- planner cadence / cost budget
+
+Recommended first implementation order:
+1. offline LLM adapter
+2. planner server dual mode
+3. live runtime integration
+4. heuristic vs LLM comparison experiment
+
+### Phase 4.5 Offline Implementation Update (LLM Planner Scaffold + Validation)
+
+Implemented in:
+- `UAV-Flow-Eval/llm_planner_client.py`
+- `UAV-Flow-Eval/llm_planner_adapter.py`
+- `UAV-Flow-Eval/planner_server.py`
+- `UAV-Flow-Eval/runtime_interfaces.py`
+- `UAV-Flow-Eval/uav_control_server.py`
+- `UAV-Flow-Eval/uav_control_panel.py`
+- `UAV-Flow-Eval/validate_llm_planner.py`
+
+What is now working:
+- planner server now supports three high-level planner modes:
+  - `heuristic`
+  - `llm`
+  - `hybrid`
+- LLM planner requests can now include:
+  - mission/search schema
+  - archive context
+  - reflex runtime
+  - person evidence runtime
+  - search result state
+- planner runtime metadata now propagates through the live stack:
+  - planner source detail
+  - model name
+  - fallback flag
+  - token usage
+- control panel runtime line now shows:
+  - `detail=...`
+  - `model=...`
+  - `fallback=...`
+  - `tokens=...`
+
+Multi-API compatibility implemented in the first client version:
+- OpenAI-compatible chat-completions style
+- OpenAI-compatible responses style
+- configurable endpoint path
+- configurable auth header and auth scheme
+- optional image payload support
+- structured JSON enforcement with heuristic fallback
+
+Validation completed:
+- `python -m py_compile` passed for all modified 4.5 files
+- `python UAV-Flow-Eval/validate_llm_planner.py --strict` passed
+- validation result:
+  - `case_count = 5`
+  - `pass_count = 5`
+  - `fail_count = 0`
+- malformed JSON fallback check also passed
+
+Validated mission examples:
+- `search the house for people`
+- `search the bedroom first and then check the hallway`
+- `search the living room for a survivor`
+- `approach and verify the suspect region near the bedroom door`
+- `revisit the bathroom and confirm whether a person is there`
+
+Current conclusion:
+- `4.5` offline LLM planner scaffold is stable enough to enter live API integration
+- the next blocker is no longer local planner code
+- the next blocker is obtaining and wiring a real LLM API configuration
+
+Recommended next step:
+- start live `planner_server.py --planner_mode hybrid` testing with a real OpenAI-compatible API
+- compare:
+  - `heuristic`
+  - `hybrid`
+  - `llm`
+
+### Phase 4.5 Live Backend Smoke Test Update
+
+Live smoke testing completed for the newly added multi-backend client:
+
+Backend results:
+- `google_gemini`:
+  - `gemini-3.1-flash-lite-preview` passed
+  - `gemini-3-flash-preview` passed
+- `anthropic_messages`:
+  - endpoint access worked
+  - current provided token/backend allocation did not provide a stable usable model for experiments
+
+Observed live outcomes:
+- Google Gemini simple JSON test succeeded on both tested models
+- end-to-end live planner smoke test with:
+  - `mission_type = person_search`
+  - `task_label = search the house for people`
+  returned a valid normalized planner result:
+  - `search_subgoal = search_house`
+  - `priority_region = entire house`
+  - `semantic_subgoal = systematic_room_coverage`
+  - `waypoint_strategy = broader_sweep`
+- runtime debug metadata was populated correctly:
+  - `api_style = google_gemini`
+  - `model_name = gemini-3.1-flash-lite-preview`
+  - `latency_ms ≈ 2631`
+  - `usage.totalTokenCount = 946`
+
+Anthropic-compatible diagnostic outcome:
+- `qwen3-coder-next` returned `model_not_found` for the available distributor group
+- `claude-sonnet-4.6` returned token authorization failure
+- `claude-opus-4-6` returned no available token
+
+Current recommendation:
+- use Google Gemini as the first real live backend for Phase 4.5 experiments
+- keep Anthropic-compatible support in code, but treat it as blocked by provider-side access rather than local implementation
+
+### Phase 4.5 Planner Routing Split For Multi-Model Experiments
+
+Reason for the change:
+- the previous `hybrid` behavior could silently route some requests to heuristic planning
+- this made multi-model comparison harder because the active planner source was not explicit enough during capture and panel inspection
+
+Changes completed:
+- added explicit planner routing control in `planner_server.py`:
+  - `--planner_route_mode auto`
+  - `--planner_route_mode heuristic_only`
+  - `--planner_route_mode llm_only`
+  - `--planner_route_mode search_hybrid`
+- added route metadata propagation through runtime state:
+  - `planner_route_mode`
+  - `planner_route_reason`
+- updated panel plan line to display:
+  - `route=...`
+
+Result:
+- future experiments can cleanly separate:
+  - pure heuristic baseline
+  - pure LLM planner
+  - search-task hybrid routing
+- this is better suited for later multi-model testing with:
+  - `gemini-3.1-flash-lite-preview`
+  - `gemini-3-flash-preview`
+
+### Phase 4.5 Panel Planner Switching UX
+
+Completed:
+- added planner config proxy endpoints to `uav_control_server.py`:
+  - `GET /planner_config`
+  - `POST /planner_config`
+- extended `uav_control_panel.py` with a new `Planner Routing` section
+- added natural switching controls for planner experiments:
+  - preset switching
+  - manual mode/route/API/model editing
+  - planner config refresh/apply actions
+
+Panel switching presets now available:
+- `Heuristic Baseline`
+- `Gemini Lite`
+- `Gemini Flash`
+- `Search Hybrid`
+- `Anthropic Qwen Next`
+- `Anthropic Sonnet`
+- `Anthropic Opus`
+
+Manual controls now exposed in panel:
+- planner mode
+- planner route mode
+- API style
+- model name
+- input mode
+- base URL
+- API key env var name
+- fallback toggle
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/planner_server.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_server.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+
+Expected user-facing outcome:
+- multi-model experiments no longer need command-line restarts just to switch planner routing
+- the active experiment mode can be changed directly inside the control panel
+- heuristic-only and llm-only experiments can now be separated more cleanly
+
+### Phase 4.5 Gemini Inline Key And Error Handling
+
+Completed:
+- added inline `API Key` support to the `Planner Routing` section in `uav_control_panel.py`
+- updated `planner_server.py` to accept `llm_api_key` via `/config` without echoing the key back
+- added `llm_api_key_configured` status so panel can show whether a key is currently active
+- fixed the Gemini exception path in `planner_server.py` by importing `urllib.error`
+- updated `llm_planner_client.py` Gemini requests to support both:
+  - `x-goog-api-key` header
+  - `?key=...` query parameter
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/planner_server.py`
+- `python -m py_compile UAV-Flow-Eval/llm_planner_client.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+
+Current interpretation:
+- startup warnings about an empty Gemini key are expected until the panel pushes inline planner config
+- `HTTP 403 PERMISSION_DENIED` usually indicates the running planner process still has no effective API key
+- `HTTP 400 FAILED_PRECONDITION` with `User location is not supported` is treated as a provider-side availability restriction rather than a local routing bug
+
+### Phase 4.5 Gemini Official SDK Path
+
+Completed:
+- added a new planner API style: `google_genai_sdk`
+- kept the existing REST-based `google_gemini` path for comparison
+- switched the default Gemini panel presets to the official SDK route:
+  - `Gemini Lite`
+  - `Gemini Flash`
+  - `Search Hybrid`
+- preserved multi-provider support so Anthropic-compatible and OpenAI-compatible experiments are unaffected
+
+Implementation:
+- `llm_planner_client.py` now supports the official `from google import genai` client path
+- Gemini SDK requests use `client.models.generate_content(...)`
+- planner and panel config validators now accept `google_genai_sdk`
+- panel `API Style` dropdown now exposes both:
+  - `google_genai_sdk`
+  - `google_gemini`
+
+Current caveat:
+- the current Python environment does not yet have `google-genai` installed, so the official SDK path still needs the package before live testing
+
+### Phase 4.5 Planner-Only Experiment Cleanup
+
+Completed:
+- fixed panel token display to support Google SDK usage metadata fields such as `total_token_count`
+- changed reflex request failure handling in `uav_control_server.py` to degrade into `local_heuristic`
+  instead of exposing runtime source as `external_error`
+- preserved upstream failure details in fallback runtime metadata using:
+  - `upstream_source=external_error`
+  - `upstream_error=<message>`
+
+Expected user-facing outcome:
+- pure planner experiments no longer show misleading `tokens=0` when the SDK returns token counts
+- planner-only runs in `--reflex_execute_mode manual` are less likely to be polluted by `source_not_allowed`
+  takeover noise when the external reflex service is unavailable
+
+### Phase 4.5 Gemini Flash JSON Hardening
+
+Completed:
+- strengthened `llm_planner_adapter.py` JSON parsing for `Gemini Flash`
+- added repair steps before failing parse:
+  - escape embedded newlines inside strings
+  - remove trailing commas
+  - close simple unmatched quotes/brackets/braces
+- added weak field-level extraction fallback so partial structured outputs can still be salvaged
+- added an explicit planner response JSON schema and now pass it into the LLM client
+- updated the Google SDK path in `llm_planner_client.py` to send `response_json_schema`
+- tightened prompt wording so `explanation` stays short and single-line
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/llm_planner_adapter.py`
+- `python -m py_compile UAV-Flow-Eval/llm_planner_client.py`
+- `python -m py_compile UAV-Flow-Eval/planner_server.py`
+- synthetic malformed JSON sample now parses successfully through `parse_llm_json_response(...)`
+
+Expected user-facing outcome:
+- `Gemini Flash` should be much less likely to fall back purely because of malformed JSON text
+- planner experiments can continue even when the model returns slightly noisy structured output
+
+### Phase 4.5 Panel Timeout And Socket Disconnect Cleanup
+
+Completed:
+- updated `uav_control_panel.py` so the panel HTTP client timeout now tracks planner request timeout
+  with an added safety buffer
+- `Req Timeout=15s` planner experiments no longer keep the panel client at the old fixed `5s` timeout
+- updated `uav_control_server.py` to treat `BrokenPipeError` / `ConnectionAbortedError` /
+  `ConnectionResetError` as client disconnects instead of hard server failures
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_server.py`
+
+Expected user-facing outcome:
+- fewer `WinError 10053` traces when the planner is slow but still valid
+- fewer false impressions that the control server has crashed
+- move and request-plan calls stay aligned with slower `Gemini Flash` planning latency
+
+### Phase 4.6 Planner-Driven Exploration Executor Design
+
+Completed:
+- created a dedicated design doc:
+  - [planner_driven_exploration_executor_design.md](/E:/github/UAV-Flow/docs/planner_driven_exploration_executor_design.md)
+- clarified why the current runtime is not yet genuinely LLM-driven exploration:
+  - planner is high-level only
+  - motion is still user-triggered
+  - there is no planner-owned execution loop
+- defined the next runtime object:
+  - `planner_executor_runtime`
+- defined a staged rollout:
+  - Stage A: bounded `execute_plan_segment`
+  - Stage B: continuous `auto_search`
+- defined the first concrete implementation slice:
+  - add executor runtime state
+  - add `/planner_executor`
+  - add `/execute_plan_segment`
+  - add panel controls and executor logs
+
+Current interpretation:
+- the current `WinError 10053` issue is a client-timeout/disconnect problem, not evidence that the planner stack crashed
+- the current system already has LLM-driven planning, but not LLM-driven exploration execution
+- the next meaningful milestone is a bounded planner-owned execution segment rather than jumping directly to unconstrained background autonomy

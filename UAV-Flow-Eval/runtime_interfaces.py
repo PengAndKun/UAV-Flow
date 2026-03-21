@@ -175,6 +175,8 @@ def build_search_runtime_state(
     confirmed_region_count: int = 0,
     evidence_count: int = 0,
     detection_state: str = "unknown",
+    search_status: str = "",
+    confirm_target: bool = False,
     estimated_person_position: Optional[Dict[str, Any]] = None,
     last_reasoning: str = "",
     replan_count: int = 0,
@@ -193,6 +195,8 @@ def build_search_runtime_state(
         "confirmed_region_count": int(confirmed_region_count),
         "evidence_count": int(evidence_count),
         "detection_state": str(detection_state or "unknown"),
+        "search_status": str(search_status or detection_state or "unknown"),
+        "confirm_target": bool(confirm_target),
         "estimated_person_position": estimated_person_position or {},
         "last_reasoning": str(last_reasoning or ""),
         "replan_count": int(replan_count),
@@ -333,6 +337,8 @@ def build_plan_request(
     step_index: int = 0,
     mission: Optional[Dict[str, Any]] = None,
     search_runtime: Optional[Dict[str, Any]] = None,
+    person_evidence_runtime: Optional[Dict[str, Any]] = None,
+    search_result: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the shared Phase 2 planner request payload."""
@@ -351,6 +357,8 @@ def build_plan_request(
         "image_b64": image_b64,
         "mission": mission or {},
         "search_runtime": search_runtime or {},
+        "person_evidence_runtime": person_evidence_runtime or {},
+        "search_result": search_result or {},
         "context": context or {},
     }
 
@@ -456,6 +464,7 @@ def build_reflex_runtime_state(
         "risk_score": float(risk_score),
         "shield_triggered": bool(shield_triggered),
         "policy_confidence": float(policy_confidence),
+        "confidence": float(policy_confidence),
         "prototype_distance": float(prototype_distance),
         "model_type": str(model_type or ""),
     }

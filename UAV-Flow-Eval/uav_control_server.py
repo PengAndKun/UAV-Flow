@@ -313,11 +313,19 @@ class UAVControlBackend:
         self.plan_execution_state: Dict[str, Any] = {
             "planner_status": "idle",
             "planner_source": "none",
+            "planner_source_detail": "none",
+            "planner_route_mode": "heuristic_only",
+            "planner_route_reason": "",
             "last_trigger": "startup",
             "request_count": 0,
             "auto_request_count": 0,
             "last_latency_ms": 0.0,
             "last_error": "",
+            "last_model_name": "",
+            "last_api_style": "",
+            "last_usage": {},
+            "fallback_used": False,
+            "fallback_reason": "",
             "step_index": 0,
             "auto_mode": args.planner_auto_mode,
             "auto_interval_steps": int(args.planner_interval_steps),
@@ -526,6 +534,8 @@ class UAVControlBackend:
             confirmed_region_count=confirmed_region_count,
             evidence_count=int(person_evidence.get("evidence_event_count", 0)),
             detection_state=detection_state,
+            search_status=detection_state,
+            confirm_target=bool(self.current_plan.get("confirm_target", self.current_mission.get("confirm_target", False))),
             estimated_person_position=search_result.get("estimated_person_position", {})
             or person_evidence.get("estimated_person_position", {}),
             last_reasoning=str(self.current_plan.get("explanation", "")),
@@ -1431,6 +1441,18 @@ class UAVControlBackend:
             )
             candidate_waypoints = self.current_plan.get("candidate_waypoints") or []
             self.runtime_debug["current_waypoint"] = candidate_waypoints[0] if candidate_waypoints else None
+            plan_debug = self.current_plan.get("debug") if isinstance(self.current_plan.get("debug"), dict) else {}
+            self.plan_execution_state["planner_source_detail"] = str(plan_debug.get("source", self.plan_execution_state.get("planner_source_detail", "none")) or "none")
+            self.plan_execution_state["planner_route_mode"] = str(plan_debug.get("route_mode", self.plan_execution_state.get("planner_route_mode", "heuristic_only")) or "heuristic_only")
+            self.plan_execution_state["planner_route_reason"] = str(plan_debug.get("route_reason", self.plan_execution_state.get("planner_route_reason", "")) or "")
+            plan_model_name = plan_debug.get("model_name", plan_debug.get("llm_model_name", self.plan_execution_state.get("last_model_name", "")))
+            plan_api_style = plan_debug.get("api_style", plan_debug.get("llm_api_style", self.plan_execution_state.get("last_api_style", "")))
+            plan_usage = plan_debug.get("usage", plan_debug.get("llm_usage", self.plan_execution_state.get("last_usage", {})))
+            self.plan_execution_state["last_model_name"] = str(plan_model_name or "")
+            self.plan_execution_state["last_api_style"] = str(plan_api_style or "")
+            self.plan_execution_state["last_usage"] = plan_usage if isinstance(plan_usage, dict) else {}
+            self.plan_execution_state["fallback_used"] = bool(plan_debug.get("fallback_used", self.plan_execution_state.get("fallback_used", False)))
+            self.plan_execution_state["fallback_reason"] = str(plan_debug.get("fallback_reason", self.plan_execution_state.get("fallback_reason", "")) or "")
             self.sync_mission_from_plan()
             archive_state = self.sync_archive_runtime()
             self.sync_search_runtime(archive_state)
@@ -1468,6 +1490,8 @@ class UAVControlBackend:
                     step_index=int(self.plan_execution_state.get("step_index", 0)),
                     mission=self.current_mission,
                     search_runtime=self.search_runtime,
+                    person_evidence_runtime=self.person_evidence_runtime,
+                    search_result=self.search_result,
                     context={
                         "movement_yaw_mode": self.args.movement_yaw_mode,
                         "preview_mode": self.args.preview_mode,
@@ -1496,8 +1520,13 @@ class UAVControlBackend:
                             {
                                 "planner_status": "ok",
                                 "planner_source": "external",
+                                "planner_source_detail": "external",
+                                "planner_route_mode": "external",
+                                "planner_route_reason": "",
                                 "last_trigger": trigger,
                                 "last_error": "",
+                                "fallback_used": False,
+                                "fallback_reason": "",
                             }
                         )
                 except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
@@ -1505,8 +1534,13 @@ class UAVControlBackend:
                         {
                             "planner_status": "fallback",
                             "planner_source": "external_error",
+                            "planner_source_detail": "external_error",
+                            "planner_route_mode": "external_error",
+                            "planner_route_reason": str(exc),
                             "last_trigger": trigger,
                             "last_error": str(exc),
+                            "fallback_used": True,
+                            "fallback_reason": str(exc),
                         }
                     )
                     logger.warning("Planner request failed, falling back to heuristic plan: %s", exc)
@@ -1551,6 +1585,8 @@ class UAVControlBackend:
                         "planner_interval_steps": self.args.planner_interval_steps,
                         "trigger": trigger,
                         "step_index": int(self.plan_execution_state.get("step_index", 0)),
+                        "fallback_used": self.plan_execution_state.get("planner_status") != "ok",
+                        "fallback_reason": str(self.plan_execution_state.get("last_error", "")),
                     },
                 )
                 if self.plan_execution_state.get("planner_status") != "ok":
@@ -1558,7 +1594,13 @@ class UAVControlBackend:
                         {
                             "planner_status": "fallback",
                             "planner_source": "local_heuristic",
+                            "planner_source_detail": "local_heuristic",
+                            "planner_route_mode": "heuristic_only",
+                            "planner_route_reason": "local_control_server_fallback",
                             "last_trigger": trigger,
+                            "last_model_name": "",
+                            "last_api_style": "",
+                            "last_usage": {},
                         }
                     )
 
@@ -1774,8 +1816,11 @@ class UAVControlBackend:
                 except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                     logger.warning("Reflex policy request failed, fallback to heuristic reflex runtime: %s", exc)
                     fallback = self.build_heuristic_reflex_runtime(archive_state, trigger=trigger)
-                    fallback["source"] = "external_error"
-                    fallback["status"] = "fallback" if fallback.get("status") == "idle" else fallback.get("status")
+                    fallback["source"] = "local_heuristic"
+                    fallback["upstream_source"] = "external_error"
+                    fallback["upstream_error"] = str(exc)
+                    if fallback.get("status") == "idle":
+                        fallback["status"] = "external_fallback"
                     fallback["last_latency_ms"] = round((datetime.now().timestamp() - reflex_started) * 1000.0, 2)
                     self.reflex_runtime = fallback
                     return self.reflex_runtime
@@ -2211,6 +2256,39 @@ class UAVControlBackend:
             threading.Thread(target=self.httpd.shutdown, daemon=True).start()
         return {"status": "ok", "message": "Shutdown requested"}
 
+    def build_planner_config_url(self) -> str:
+        planner_url = str(self.args.planner_url or "").strip()
+        if not planner_url:
+            raise RuntimeError("No external planner_url configured.")
+        return f"{planner_url.rstrip('/')}/config"
+
+    def get_external_planner_config(self) -> Dict[str, Any]:
+        req = request.Request(self.build_planner_config_url(), method="GET")
+        with request.urlopen(req, timeout=self.args.planner_timeout_s) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("Planner config response must be a JSON object.")
+        payload["planner_request_timeout_s"] = float(self.args.planner_timeout_s)
+        return payload
+
+    def update_external_planner_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        update_payload = dict(payload or {})
+        if "planner_request_timeout_s" in update_payload:
+            timeout_value = float(update_payload.pop("planner_request_timeout_s"))
+            self.args.planner_timeout_s = max(0.5, timeout_value)
+        req = request.Request(
+            self.build_planner_config_url(),
+            data=json.dumps(update_payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=self.args.planner_timeout_s) as resp:
+            response_payload = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(response_payload, dict):
+            raise RuntimeError("Planner config update response must be a JSON object.")
+        response_payload["planner_request_timeout_s"] = float(self.args.planner_timeout_s)
+        return response_payload
+
     def close(self) -> None:
         try:
             self.env.close()
@@ -2222,18 +2300,24 @@ def make_handler(backend: UAVControlBackend):
     class ControlRequestHandler(BaseHTTPRequestHandler):
         def _send_json(self, payload: Dict[str, Any], status: int = 200) -> None:
             body = json.dumps(payload).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+                logger.warning("Client disconnected before JSON response was sent: %s", exc)
 
         def _send_bytes(self, body: bytes, content_type: str) -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+                logger.warning("Client disconnected before binary response was sent: %s", exc)
 
         def _read_json_body(self) -> Dict[str, Any]:
             length = int(self.headers.get("Content-Length", "0"))
@@ -2285,8 +2369,12 @@ def make_handler(backend: UAVControlBackend):
                             "person_evidence_recent_events": backend.person_evidence_events,
                         }
                     )
+                elif parsed.path == "/planner_config":
+                    self._send_json(backend.get_external_planner_config())
                 else:
                     self._send_json({"status": "error", "message": "Not found"}, 404)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+                logger.warning("GET %s client disconnected: %s", parsed.path, exc)
             except Exception as exc:
                 logger.exception("GET %s failed", parsed.path)
                 self._send_json({"status": "error", "message": str(exc)}, 500)
@@ -2365,6 +2453,8 @@ def make_handler(backend: UAVControlBackend):
                             confidence=data.get("confidence"),
                         )
                     )
+                elif parsed.path == "/planner_config":
+                    self._send_json(backend.update_external_planner_config(data if isinstance(data, dict) else {}))
                 elif parsed.path == "/runtime_debug":
                     debug_state = backend.update_runtime_debug(
                         current_waypoint=data.get("current_waypoint") if isinstance(data.get("current_waypoint"), dict) else None,
@@ -2378,6 +2468,8 @@ def make_handler(backend: UAVControlBackend):
                     self._send_json(backend.shutdown())
                 else:
                     self._send_json({"status": "error", "message": "Not found"}, 404)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as exc:
+                logger.warning("POST %s client disconnected: %s", parsed.path, exc)
             except Exception as exc:
                 logger.exception("POST %s failed", parsed.path)
                 self._send_json({"status": "error", "message": str(exc)}, 500)
