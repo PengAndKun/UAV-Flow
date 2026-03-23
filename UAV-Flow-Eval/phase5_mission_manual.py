@@ -52,6 +52,8 @@ def infer_house_search_environment(
     mission_type = str(mission_payload.get("mission_type", "semantic_navigation") or "semantic_navigation")
     focus_region_label = str(search_payload.get("priority_region", {}).get("region_label", "")).strip().lower()
     memory_summary = str(memory_payload.get("global_summary", "")).strip().lower()
+    best_doorway = doorway_payload.get("best_candidate", {}) if isinstance(doorway_payload.get("best_candidate"), dict) else {}
+    doorway_candidate_count = int(doorway_payload.get("candidate_count", 0) or 0)
 
     outside_score = 0
     inside_score = 0
@@ -61,7 +63,6 @@ def infer_house_search_environment(
         rationale.append("Mission already targets indoor/room-aware person search.")
 
     if any(token in task_text for token in ("house", "room", "bedroom", "hallway", "door", "doorway", "entry")):
-        inside_score += 1
         rationale.append("Task text references house or room structure.")
 
     if any(token in task_text for token in ("enter", "entry", "door", "doorway", "front door")):
@@ -77,20 +78,29 @@ def infer_house_search_environment(
         rationale.append("Language memory still frames the house as globally unobserved.")
 
     traversable_candidates = int(doorway_payload.get("traversable_candidate_count", 0) or 0)
-    if traversable_candidates > 0:
+    if doorway_candidate_count > 0:
         outside_score += 1
+        rationale.append("Doorway detector reports doorway-like facade openings.")
+    if traversable_candidates > 0:
+        outside_score += 2
         rationale.append("Doorway detector reports traversable doorway candidates.")
+    if bool(best_doorway.get("traversable", False)):
+        outside_score += 1
+        rationale.append("Best doorway candidate looks directly enterable from the current view.")
+    if float(best_doorway.get("depth_gain_cm", 0.0) or 0.0) >= 180.0:
+        outside_score += 1
+        rationale.append("Best doorway candidate has strong depth separation from the facade.")
 
     min_depth = float(depth_payload.get("min_depth_cm", 0.0))
     max_depth = float(depth_payload.get("max_depth_cm", 0.0))
     if max_depth > 900.0 and min_depth < 120.0:
         outside_score += 1
         rationale.append("Depth suggests a nearby boundary with a deep opening beyond it.")
-    elif max_depth > 500.0 and min_depth > 120.0:
+    elif max_depth > 500.0 and min_depth > 120.0 and doorway_candidate_count == 0:
         inside_score += 1
         rationale.append("Depth suggests the UAV is already in an open interior navigable space.")
 
-    if int(search_payload.get("visited_region_count", 0)) >= 3:
+    if int(search_payload.get("visited_region_count", 0)) >= 8:
         inside_score += 1
         rationale.append("Search runtime already shows multiple visited search regions.")
 
@@ -111,7 +121,8 @@ def infer_house_search_environment(
         "location_state": location_state,
         "inside_score": int(inside_score),
         "outside_score": int(outside_score),
-        "doorway_candidate_count": traversable_candidates,
+        "doorway_candidate_count": doorway_candidate_count,
+        "traversable_doorway_count": traversable_candidates,
         "rationale": rationale,
     }
 
@@ -174,6 +185,7 @@ def build_phase5_mission_manual(
     )
 
     location_state = str(env_context.get("location_state", "unknown") or "unknown")
+    traversable_doorway_count = int(env_context.get("traversable_doorway_count", 0) or 0)
     stage_list: List[Dict[str, Any]] = []
 
     stage_list.append(
@@ -262,6 +274,11 @@ def build_phase5_mission_manual(
     )
 
     active_stage_id = stage_list[0]["stage_id"]
+    if location_state == "outside_house":
+        if traversable_doorway_count > 0:
+            active_stage_id = "phase5_stage_03_approach_entry"
+        else:
+            active_stage_id = "phase5_stage_02_find_entry_door"
     if location_state == "inside_house":
         active_stage_id = "phase5_stage_05_house_search"
     if str(evidence_payload.get("evidence_status", "idle") or "idle") in ("suspect", "confirmed_present", "confirmed_absent"):
@@ -283,4 +300,3 @@ def build_phase5_mission_manual(
         "active_stage_id": active_stage_id,
         "stages": stage_list,
     }
-

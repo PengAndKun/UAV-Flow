@@ -34,9 +34,12 @@ from batch_run_act_all import (
     validate_env_binary_exists,
 )
 from gym_unrealcv.envs.wrappers import augmentation, configUE, time_dilation
+from doorway_detection import detect_doorway_runtime
 from language_search_memory import LanguageSearchMemory
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
+from phase5_mission_manual import build_phase5_mission_manual
 from runtime_interfaces import (
+    build_doorway_runtime_state,
     build_llm_action_request,
     build_llm_action_runtime_state,
     build_mission_state,
@@ -315,6 +318,7 @@ class UAVControlBackend:
         )
         self.current_mission: Dict[str, Any] = self.build_mission_descriptor(self.current_task_label)
         self.search_runtime: Dict[str, Any] = self.build_search_runtime_snapshot()
+        self.doorway_runtime: Dict[str, Any] = build_doorway_runtime_state()
         self.last_plan_request: Dict[str, Any] = {}
         self.plan_execution_state: Dict[str, Any] = {
             "planner_status": "idle",
@@ -402,6 +406,15 @@ class UAVControlBackend:
             mission_id=str(self.current_mission.get("mission_id", "")),
             mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
             task_label=self.current_task_label,
+        )
+        self.phase5_mission_manual: Dict[str, Any] = build_phase5_mission_manual(
+            task_label=self.current_task_label,
+            mission=self.current_mission,
+            search_runtime=self.search_runtime,
+            person_evidence_runtime=self.person_evidence_runtime,
+            language_memory_runtime=self.language_memory_runtime,
+            doorway_runtime=self.doorway_runtime,
+            depth_stats=self.last_depth_summary,
         )
         self.llm_action_runtime: Dict[str, Any] = build_llm_action_runtime_state(
             policy_name=self.args.planner_name,
@@ -575,6 +588,7 @@ class UAVControlBackend:
     def sync_search_runtime(self, archive_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self.search_runtime = self.build_search_runtime_snapshot(archive_state)
         self.sync_language_memory(archive_state)
+        self.sync_phase5_mission_manual()
         return self.search_runtime
 
     def sync_language_memory(self, archive_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -587,9 +601,30 @@ class UAVControlBackend:
             person_evidence_runtime=self.person_evidence_runtime,
             search_result=self.search_result,
             archive_state=archive_snapshot,
+            doorway_runtime=self.doorway_runtime,
             current_plan=self.current_plan,
         )
         return self.language_memory_runtime
+
+    def sync_doorway_runtime(self) -> Dict[str, Any]:
+        self.doorway_runtime = detect_doorway_runtime(
+            rgb_frame=self.last_raw_frame,
+            depth_frame=self.last_depth_frame,
+            depth_summary=self.last_depth_summary,
+        )
+        return self.doorway_runtime
+
+    def sync_phase5_mission_manual(self) -> Dict[str, Any]:
+        self.phase5_mission_manual = build_phase5_mission_manual(
+            task_label=self.current_task_label,
+            mission=self.current_mission,
+            search_runtime=self.search_runtime,
+            person_evidence_runtime=self.person_evidence_runtime,
+            language_memory_runtime=self.language_memory_runtime,
+            doorway_runtime=self.doorway_runtime,
+            depth_stats=self.last_depth_summary,
+        )
+        return self.phase5_mission_manual
 
     def sync_mission_from_plan(self) -> Dict[str, Any]:
         candidate_regions = self.current_plan.get("candidate_regions") if isinstance(self.current_plan.get("candidate_regions"), list) else []
@@ -1384,6 +1419,8 @@ class UAVControlBackend:
                 step_index=int(self.plan_execution_state.get("step_index", 0)),
                 mission=self.current_mission,
                 search_runtime=self.search_runtime,
+                doorway_runtime=self.doorway_runtime,
+                phase5_mission_manual=self.phase5_mission_manual,
                 person_evidence_runtime=self.person_evidence_runtime,
                 search_result=self.search_result,
                 language_memory_runtime=self.language_memory_runtime,
@@ -1988,6 +2025,7 @@ class UAVControlBackend:
         }
         self.runtime_debug["risk_score"] = risk_score
         self.runtime_debug["shield_triggered"] = shield_triggered
+        self.sync_doorway_runtime()
         self.sync_archive_runtime()
         return depth_image, depth_fov_deg
 
@@ -2063,14 +2101,17 @@ class UAVControlBackend:
             self.search_runtime = self.build_search_runtime_snapshot()
             archive_state = self.sync_archive_runtime()
             self.sync_search_runtime(archive_state)
+            self.sync_phase5_mission_manual()
             return {
                 "status": "ok",
                 "task_label": self.current_task_label,
                 "mission": self.current_mission,
                 "search_runtime": self.search_runtime,
+                "doorway_runtime": self.doorway_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
                 "language_memory_runtime": self.language_memory_runtime,
+                "phase5_mission_manual": self.phase5_mission_manual,
             }
 
     def set_plan_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2135,6 +2176,8 @@ class UAVControlBackend:
                     step_index=int(self.plan_execution_state.get("step_index", 0)),
                     mission=self.current_mission,
                     search_runtime=self.search_runtime,
+                    doorway_runtime=self.doorway_runtime,
+                    phase5_mission_manual=self.phase5_mission_manual,
                     person_evidence_runtime=self.person_evidence_runtime,
                     search_result=self.search_result,
                     language_memory_runtime=self.language_memory_runtime,
@@ -2514,9 +2557,11 @@ class UAVControlBackend:
                 "camera_info": self.last_depth_summary.get("camera_info", {}),
                 "mission": self.current_mission,
                 "search_runtime": self.search_runtime,
+                "doorway_runtime": self.doorway_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
                 "language_memory_runtime": self.language_memory_runtime,
+                "phase5_mission_manual": self.phase5_mission_manual,
                 "plan": self.current_plan,
                 "planner_runtime": self.plan_execution_state,
                 "archive": archive_state,
@@ -2863,9 +2908,11 @@ class UAVControlBackend:
                 "plan": self.current_plan,
                 "mission": self.current_mission,
                 "search_runtime": self.search_runtime,
+                "doorway_runtime": self.doorway_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
                 "language_memory_runtime": self.language_memory_runtime,
+                "phase5_mission_manual": self.phase5_mission_manual,
                 "runtime_debug": self.runtime_debug,
                 "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
                 "reflex_runtime": self.reflex_runtime,
@@ -2908,8 +2955,11 @@ class UAVControlBackend:
                 "plan": self.current_plan,
                 "mission": metadata["mission"],
                 "search_runtime": metadata["search_runtime"],
+                "doorway_runtime": metadata["doorway_runtime"],
                 "person_evidence_runtime": metadata["person_evidence_runtime"],
                 "search_result": metadata["search_result"],
+                "language_memory_runtime": metadata["language_memory_runtime"],
+                "phase5_mission_manual": metadata["phase5_mission_manual"],
                 "archive": metadata["archive"],
                 "reflex_runtime": metadata["reflex_runtime"],
                 "llm_action_runtime": metadata["llm_action_runtime"],

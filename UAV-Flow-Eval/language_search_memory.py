@@ -131,6 +131,7 @@ class LanguageSearchMemory:
         person_evidence_runtime: Dict[str, Any],
         search_result: Dict[str, Any],
         focus_region: Dict[str, Any],
+        doorway_runtime: Optional[Dict[str, Any]] = None,
     ) -> str:
         mission_type = str(mission.get("mission_type", "semantic_navigation") or "semantic_navigation")
         task_label = str(mission.get("task_label", "") or self.state.get("task_label", "")).strip()
@@ -141,6 +142,9 @@ class LanguageSearchMemory:
         present_count = int(person_evidence_runtime.get("confirm_present_count", 0))
         absent_count = int(person_evidence_runtime.get("confirm_absent_count", 0))
         result_status = str(search_result.get("result_status", "unknown") or "unknown")
+        doorway_payload = doorway_runtime if isinstance(doorway_runtime, dict) else {}
+        doorway_summary = str(doorway_payload.get("summary", "") or "")
+        traversable_count = int(doorway_payload.get("traversable_candidate_count", 0) or 0)
         summary_parts = [
             f"Mission type={mission_type}",
             f"task={task_label or 'idle'}",
@@ -152,6 +156,10 @@ class LanguageSearchMemory:
             f"confirmed_absent={absent_count}",
             f"result={result_status}",
         ]
+        if traversable_count > 0:
+            summary_parts.append(f"doorways={traversable_count} traversable")
+        elif doorway_summary:
+            summary_parts.append(f"doorways={doorway_summary}")
         return "; ".join(summary_parts) + "."
 
     def _build_focus_summary(
@@ -162,6 +170,7 @@ class LanguageSearchMemory:
         person_evidence_runtime: Dict[str, Any],
         search_result: Dict[str, Any],
         archive_state: Dict[str, Any],
+        doorway_runtime: Optional[Dict[str, Any]] = None,
         current_plan: Optional[Dict[str, Any]] = None,
     ) -> str:
         focus_label = str(focus_region.get("region_label", "") or "current local view")
@@ -178,6 +187,10 @@ class LanguageSearchMemory:
         if isinstance(current_plan, dict):
             plan_debug = current_plan.get("debug") if isinstance(current_plan.get("debug"), dict) else {}
             waypoint_strategy = str(plan_debug.get("waypoint_strategy", "") or "")
+        doorway_payload = doorway_runtime if isinstance(doorway_runtime, dict) else {}
+        best_candidate = doorway_payload.get("best_candidate", {}) if isinstance(doorway_payload.get("best_candidate"), dict) else {}
+        doorway_label = str(best_candidate.get("label", "") or "")
+        doorway_traversable = bool(best_candidate.get("traversable", False))
         parts = [
             f"{focus_label} status={focus_status}",
             f"subgoal={search_subgoal}",
@@ -188,6 +201,9 @@ class LanguageSearchMemory:
             parts.append(f"archive_hint={archive_hint}")
         if waypoint_strategy:
             parts.append(f"waypoint_strategy={waypoint_strategy}")
+        if doorway_label:
+            parts.append(f"doorway={doorway_label}")
+            parts.append(f"traversable={int(doorway_traversable)}")
         if rationale:
             parts.append(f"why={rationale}")
         return "; ".join(parts) + "."
@@ -200,6 +216,7 @@ class LanguageSearchMemory:
         person_evidence_runtime: Dict[str, Any],
         search_result: Dict[str, Any],
         archive_state: Optional[Dict[str, Any]] = None,
+        doorway_runtime: Optional[Dict[str, Any]] = None,
         current_plan: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         archive_snapshot = archive_state or {}
@@ -218,6 +235,7 @@ class LanguageSearchMemory:
             person_evidence_runtime=person_evidence_runtime,
             search_result=search_result,
             archive_state=archive_snapshot,
+            doorway_runtime=doorway_runtime,
             current_plan=current_plan,
         )
         global_summary = self._build_global_summary(
@@ -226,6 +244,7 @@ class LanguageSearchMemory:
             person_evidence_runtime=person_evidence_runtime,
             search_result=search_result,
             focus_region=focus_region,
+            doorway_runtime=doorway_runtime,
         )
         if focus_label:
             region_key = _normalize_region_label(focus_label)

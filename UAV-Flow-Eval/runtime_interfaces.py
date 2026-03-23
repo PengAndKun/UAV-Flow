@@ -114,6 +114,77 @@ def build_search_region(
     }
 
 
+def build_doorway_candidate(
+    *,
+    candidate_id: str = "",
+    label: str = "",
+    bbox: Optional[Dict[str, Any]] = None,
+    center_x_norm: float = 0.0,
+    center_y_norm: float = 0.0,
+    width_ratio: float = 0.0,
+    height_ratio: float = 0.0,
+    opening_depth_cm: float = 0.0,
+    surrounding_depth_cm: float = 0.0,
+    clearance_depth_cm: float = 0.0,
+    depth_gain_cm: float = 0.0,
+    rgb_door_score: float = 0.0,
+    depth_opening_score: float = 0.0,
+    confidence: float = 0.0,
+    traversable: bool = False,
+    rationale: str = "",
+) -> Dict[str, Any]:
+    """Build a normalized doorway-candidate descriptor."""
+    return {
+        "candidate_id": str(candidate_id or ""),
+        "label": str(label or ""),
+        "bbox": bbox or {},
+        "center_x_norm": float(center_x_norm),
+        "center_y_norm": float(center_y_norm),
+        "width_ratio": float(width_ratio),
+        "height_ratio": float(height_ratio),
+        "opening_depth_cm": float(opening_depth_cm),
+        "surrounding_depth_cm": float(surrounding_depth_cm),
+        "clearance_depth_cm": float(clearance_depth_cm),
+        "depth_gain_cm": float(depth_gain_cm),
+        "rgb_door_score": float(rgb_door_score),
+        "depth_opening_score": float(depth_opening_score),
+        "confidence": float(confidence),
+        "traversable": bool(traversable),
+        "rationale": str(rationale or ""),
+    }
+
+
+def build_doorway_runtime_state(
+    *,
+    frame_id: str = "",
+    status: str = "idle",
+    detector_name: str = "rgb_depth_doorway_heuristic",
+    available: bool = False,
+    candidate_count: int = 0,
+    traversable_candidate_count: int = 0,
+    best_candidate: Optional[Dict[str, Any]] = None,
+    candidates: Optional[List[Dict[str, Any]]] = None,
+    focus_label: str = "",
+    summary: str = "",
+    last_updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a normalized doorway-runtime state."""
+    return {
+        "schema_version": "phase5.doorway_runtime.v1",
+        "frame_id": str(frame_id or ""),
+        "status": str(status or "idle"),
+        "detector_name": str(detector_name or "rgb_depth_doorway_heuristic"),
+        "available": bool(available),
+        "candidate_count": int(candidate_count),
+        "traversable_candidate_count": int(traversable_candidate_count),
+        "best_candidate": best_candidate or {},
+        "candidates": candidates or [],
+        "focus_label": str(focus_label or ""),
+        "summary": str(summary or ""),
+        "last_updated_at": last_updated_at or now_timestamp(),
+    }
+
+
 def coerce_search_region_payload(raw: Any) -> Optional[Dict[str, Any]]:
     """Normalize an arbitrary region-like object into the shared search-region schema."""
     if not isinstance(raw, dict):
@@ -524,6 +595,8 @@ def build_plan_request(
     step_index: int = 0,
     mission: Optional[Dict[str, Any]] = None,
     search_runtime: Optional[Dict[str, Any]] = None,
+    doorway_runtime: Optional[Dict[str, Any]] = None,
+    phase5_mission_manual: Optional[Dict[str, Any]] = None,
     person_evidence_runtime: Optional[Dict[str, Any]] = None,
     search_result: Optional[Dict[str, Any]] = None,
     language_memory_runtime: Optional[Dict[str, Any]] = None,
@@ -545,6 +618,8 @@ def build_plan_request(
         "image_b64": image_b64,
         "mission": mission or {},
         "search_runtime": search_runtime or {},
+        "doorway_runtime": doorway_runtime or {},
+        "phase5_mission_manual": phase5_mission_manual or {},
         "person_evidence_runtime": person_evidence_runtime or {},
         "search_result": search_result or {},
         "language_memory_runtime": language_memory_runtime or {},
@@ -567,6 +642,8 @@ def build_llm_action_request(
     step_index: int = 0,
     mission: Optional[Dict[str, Any]] = None,
     search_runtime: Optional[Dict[str, Any]] = None,
+    doorway_runtime: Optional[Dict[str, Any]] = None,
+    phase5_mission_manual: Optional[Dict[str, Any]] = None,
     person_evidence_runtime: Optional[Dict[str, Any]] = None,
     search_result: Optional[Dict[str, Any]] = None,
     language_memory_runtime: Optional[Dict[str, Any]] = None,
@@ -591,6 +668,8 @@ def build_llm_action_request(
         "image_b64": image_b64,
         "mission": mission or {},
         "search_runtime": search_runtime or {},
+        "doorway_runtime": doorway_runtime or {},
+        "phase5_mission_manual": phase5_mission_manual or {},
         "person_evidence_runtime": person_evidence_runtime or {},
         "search_result": search_result or {},
         "language_memory_runtime": language_memory_runtime or {},

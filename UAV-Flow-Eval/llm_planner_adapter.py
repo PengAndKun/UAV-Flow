@@ -32,6 +32,9 @@ ALLOWED_SEARCH_SUBGOALS = {
     "search_house",
     "search_room",
     "search_frontier",
+    "find_entry_door",
+    "approach_entry_door",
+    "traverse_entry_door",
     "advance_to_waypoint",
     "approach_suspect_region",
     "confirm_suspect_region",
@@ -45,6 +48,8 @@ ALLOWED_WAYPOINT_STRATEGIES = {
     "use_seed_waypoints",
     "shorter_approach",
     "broader_sweep",
+    "align_with_entry",
+    "pass_through_opening",
     "reorient_left",
     "reorient_right",
     "ascend_and_observe",
@@ -288,6 +293,12 @@ def build_llm_planner_prompt(
         if isinstance(request_payload.get("language_memory_runtime"), dict)
         else {}
     )
+    doorway_runtime = request_payload.get("doorway_runtime") if isinstance(request_payload.get("doorway_runtime"), dict) else {}
+    phase5_mission_manual = (
+        request_payload.get("phase5_mission_manual")
+        if isinstance(request_payload.get("phase5_mission_manual"), dict)
+        else {}
+    )
     pose = request_payload.get("pose") if isinstance(request_payload.get("pose"), dict) else {}
     depth = request_payload.get("depth") if isinstance(request_payload.get("depth"), dict) else {}
     context = request_payload.get("context") if isinstance(request_payload.get("context"), dict) else {}
@@ -384,6 +395,50 @@ def build_llm_planner_prompt(
             if isinstance(note, dict)
         ],
     }
+    best_doorway = doorway_runtime.get("best_candidate", {}) if isinstance(doorway_runtime.get("best_candidate"), dict) else {}
+    doorway_summary = {
+        "status": str(doorway_runtime.get("status", "idle")),
+        "candidate_count": int(doorway_runtime.get("candidate_count", 0)),
+        "traversable_candidate_count": int(doorway_runtime.get("traversable_candidate_count", 0)),
+        "summary": str(doorway_runtime.get("summary", "")),
+        "best_candidate": {
+            "label": str(best_doorway.get("label", "")),
+            "traversable": bool(best_doorway.get("traversable", False)),
+            "confidence": float(best_doorway.get("confidence", 0.0)),
+            "depth_gain_cm": float(best_doorway.get("depth_gain_cm", 0.0)),
+            "clearance_depth_cm": float(best_doorway.get("clearance_depth_cm", 0.0)),
+            "width_ratio": float(best_doorway.get("width_ratio", 0.0)),
+            "height_ratio": float(best_doorway.get("height_ratio", 0.0)),
+        },
+    }
+    phase5_environment = (
+        phase5_mission_manual.get("environment_context", {})
+        if isinstance(phase5_mission_manual.get("environment_context"), dict)
+        else {}
+    )
+    phase5_stages = phase5_mission_manual.get("stages", []) if isinstance(phase5_mission_manual.get("stages"), list) else []
+    active_stage_id = str(phase5_mission_manual.get("active_stage_id", "") or "")
+    active_stage = next(
+        (
+            stage for stage in phase5_stages
+            if isinstance(stage, dict) and str(stage.get("stage_id", "")) == active_stage_id
+        ),
+        {},
+    )
+    phase5_summary = {
+        "active_stage_id": active_stage_id,
+        "active_stage_name": str(active_stage.get("stage_name", "")),
+        "active_objective": str(active_stage.get("objective", "")),
+        "planner_focus": str(active_stage.get("planner_focus", "")),
+        "location_state": str(phase5_environment.get("location_state", "unknown")),
+        "inside_score": int(phase5_environment.get("inside_score", 0)),
+        "outside_score": int(phase5_environment.get("outside_score", 0)),
+        "doorway_candidate_count": int(phase5_environment.get("doorway_candidate_count", 0)),
+        "rationale": [
+            str(item)
+            for item in (phase5_environment.get("rationale") or [])[:3]
+        ],
+    }
 
     system_prompt = (
         "You are a high-level UAV house-search planner. "
@@ -393,10 +448,10 @@ def build_llm_planner_prompt(
         "Use the heuristic seed plan as a geometric fallback, but improve mission/search intent. "
         "Choose only from these mission types: semantic_navigation, person_search, room_search, target_verification. "
         "Choose only from these search_subgoal values: "
-        "search_house, search_room, search_frontier, advance_to_waypoint, approach_suspect_region, "
+        "search_house, search_room, search_frontier, find_entry_door, approach_entry_door, traverse_entry_door, advance_to_waypoint, approach_suspect_region, "
         "confirm_suspect_region, revisit_suspect_region, reorient_for_navigation, ascend_and_observe, descend_and_observe. "
         "Choose only from these waypoint_strategy values: use_seed_waypoints, shorter_approach, broader_sweep, "
-        "reorient_left, reorient_right, ascend_and_observe, descend_and_observe. "
+        "align_with_entry, pass_through_opening, reorient_left, reorient_right, ascend_and_observe, descend_and_observe. "
         "All string values must be single-line plain strings without embedded newlines."
     )
     user_prompt = (
@@ -413,9 +468,14 @@ def build_llm_planner_prompt(
         f"person_evidence={_compact_json(evidence_summary)}\n"
         f"search_result={_compact_json(search_result_summary)}\n"
         f"language_memory={_compact_json(language_memory_summary)}\n"
+        f"doorway_runtime={_compact_json(doorway_summary)}\n"
+        f"phase5_manual={_compact_json(phase5_summary)}\n"
         f"heuristic_seed={_compact_json(heuristic_summary)}\n"
         "Rules:\n"
         "- prioritize person-search semantics over generic navigation semantics when the task mentions people, survivors, suspects, rooms, or verification.\n"
+        "- follow the active Phase 5 stage when it is available; treat it as the current mission manual.\n"
+        "- if the UAV appears to be outside and doorway_runtime reports a traversable entry candidate, prefer entry-oriented subgoals before generic interior search.\n"
+        "- use find_entry_door / approach_entry_door / traverse_entry_door when doorway reasoning is central to progress.\n"
         "- prefer candidate_region_labels from the provided region list.\n"
         "- use language_memory to avoid revisiting already described regions unless verification or revisit is justified.\n"
         "- use waypoint_strategy to adjust the seed geometry instead of inventing raw motor actions.\n"

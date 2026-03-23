@@ -2921,3 +2921,74 @@ Current interpretation:
 - the next natural implementation step is:
   - add `doorway_runtime`
   - feed doorway candidates into the mission manual, planner prompt, and action prompt
+
+### Phase 5 Doorway Recognition Runtime Added
+
+Completed:
+- added RGB+depth doorway heuristics:
+  - [doorway_detection.py](/E:/github/UAV-Flow/UAV-Flow-Eval/doorway_detection.py)
+- integrated doorway runtime into:
+  - [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py)
+  - [runtime_interfaces.py](/E:/github/UAV-Flow/UAV-Flow-Eval/runtime_interfaces.py)
+  - [llm_planner_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_planner_adapter.py)
+  - [llm_action_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_action_adapter.py)
+  - [language_search_memory.py](/E:/github/UAV-Flow/UAV-Flow-Eval/language_search_memory.py)
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py):
+  - added `Doorway ...` runtime status line
+  - added `Phase5 ...` runtime status line
+- added standalone validator:
+  - [validate_doorway_detection.py](/E:/github/UAV-Flow/UAV-Flow-Eval/validate_doorway_detection.py)
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+- `python -m py_compile UAV-Flow-Eval/validate_doorway_detection.py`
+- `python UAV-Flow-Eval/validate_doorway_detection.py --bundle_json captures_remote/capture_20260323_085350_bundle.json --save_overlay`
+
+Observed smoke-test result:
+- detected `2` doorway candidates on the saved bundle
+- `2` candidates were marked traversable
+- best candidate:
+  - `label=entry_doorway`
+  - `confidence≈0.75`
+  - `opening_depth≈738cm`
+  - `clearance≈721cm`
+- overlay written to:
+  - [capture_20260323_085350_bundle_doorway_overlay.png](/E:/github/UAV-Flow/captures_remote/capture_20260323_085350_bundle_doorway_overlay.png)
+
+Current interpretation:
+- the system now has the first real `doorway_runtime` instead of only doorway text hints
+- planner, pure LLM action, language memory, and Phase 5 manual can all consume doorway candidates
+- the next live test should place the UAV outside a door and verify:
+  - `Phase5 loc=outside_house`
+  - `Doorway traversable>0`
+  - the planner/action chain prefers entry-oriented behavior
+
+### Phase 5 Revision Planned: Multimodal Scene Interpretation And Continuous Waypoints
+
+Completed:
+- added a revised Phase 5 planning document:
+  - [phase5_multimodal_scene_waypoint_plan.md](/E:/github/UAV-Flow/docs/phase5_multimodal_scene_waypoint_plan.md)
+- updated the original Phase 5 document to mark the old doorway-first path as a transition design:
+  - [phase5_recognition_mission_plan.md](/E:/github/UAV-Flow/docs/phase5_recognition_mission_plan.md)
+
+Key method change:
+- the main Phase 5 direction is no longer "doorway heuristic decides entry"
+- the new main direction is:
+  - RGB + depth multimodal analysis
+  - scene-state interpretation (`outside_house` / `inside_house` / `threshold_zone`)
+  - stage-aware task decomposition
+  - short continuous waypoint generation
+
+Why this revision was made:
+- the user correctly pointed out that the front-door example should be judged by multimodal reasoning over RGB and depth together
+- the intended paper method is closer to:
+  - multimodal scene understanding
+  - continuous waypoint generation
+  - waypoint-following as the future training target
+- this is a better match than relying on doorway heuristics as the main decision-maker
+
+Planned next implementation step:
+- define a new multimodal scene-waypoint schema
+- add a dedicated adapter for:
+  - RGB + depth + task + memory -> scene interpretation + waypoint sequence
+- treat doorway heuristics as an auxiliary signal, not the sole entry detector

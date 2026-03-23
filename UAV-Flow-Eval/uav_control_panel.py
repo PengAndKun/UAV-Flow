@@ -168,6 +168,8 @@ class UAVControlPanel:
         self.plan_var = tk.StringVar(value="Plan: idle")
         self.mission_var = tk.StringVar(value="Mission: idle")
         self.evidence_var = tk.StringVar(value="Evidence: idle")
+        self.doorway_var = tk.StringVar(value="Doorway: idle")
+        self.phase5_var = tk.StringVar(value="Phase5: idle")
         self.language_memory_var = tk.StringVar(value="LangMem: idle")
         self.api_reply_var = tk.StringVar(value="APIReply: idle")
         self.llm_action_var = tk.StringVar(value="LLMAct: idle")
@@ -915,6 +917,8 @@ class UAVControlPanel:
         search_runtime = state.get("search_runtime", {})
         person_evidence = state.get("person_evidence_runtime", {})
         search_result = state.get("search_result", {})
+        doorway_runtime = state.get("doorway_runtime", {})
+        phase5_manual = state.get("phase5_mission_manual", {})
         language_memory = state.get("language_memory_runtime", {})
         planner_runtime = state.get("planner_runtime", {})
         archive = state.get("archive", {})
@@ -1037,6 +1041,49 @@ class UAVControlPanel:
             f"absent={int(person_evidence.get('confirm_absent_count', 0))} "
             f"events={int(person_evidence.get('evidence_event_count', 0))} "
             f"loc={estimated_label}"
+        )
+        doorway_best = doorway_runtime.get("best_candidate", {}) if isinstance(doorway_runtime.get("best_candidate"), dict) else {}
+        doorway_label = str(doorway_best.get("label", "")) or str(doorway_runtime.get("focus_label", "")) or "none"
+        doorway_conf = float(doorway_best.get("confidence", 0.0) or 0.0)
+        doorway_opening = float(doorway_best.get("opening_depth_cm", 0.0) or 0.0)
+        doorway_clearance = float(doorway_best.get("clearance_depth_cm", 0.0) or 0.0)
+        doorway_summary = self.shorten_text(
+            str(doorway_runtime.get("summary", "") or "idle"),
+            limit=96,
+        ) or "idle"
+        self.doorway_var.set(
+            "Doorway "
+            f"status={doorway_runtime.get('status', 'idle')} "
+            f"cand={int(doorway_runtime.get('candidate_count', 0))} "
+            f"traversable={int(doorway_runtime.get('traversable_candidate_count', 0))} "
+            f"best={doorway_label} "
+            f"conf={doorway_conf:.2f} "
+            f"open={doorway_opening:.0f} "
+            f"clear={doorway_clearance:.0f} "
+            f"summary={doorway_summary}"
+        )
+        phase5_context = phase5_manual.get("environment_context", {}) if isinstance(phase5_manual.get("environment_context"), dict) else {}
+        phase5_stages = phase5_manual.get("stages", []) if isinstance(phase5_manual.get("stages"), list) else []
+        phase5_active = str(phase5_manual.get("active_stage_id", "")) or "none"
+        phase5_active_short = phase5_active.split("_", 3)[-1] if phase5_active.startswith("phase5_stage_") else phase5_active
+        phase5_loc = str(phase5_context.get("location_state", "")) or "unknown"
+        phase5_in = int(phase5_context.get("inside_score", 0) or 0)
+        phase5_out = int(phase5_context.get("outside_score", 0) or 0)
+        phase5_door = int(phase5_context.get("doorway_candidate_count", 0) or 0)
+        phase5_door_trav = int(phase5_context.get("traversable_doorway_count", 0) or 0)
+        phase5_rat = self.shorten_text(
+            "; ".join(str(item) for item in phase5_context.get("rationale", [])[:2]),
+            limit=96,
+        ) or "none"
+        self.phase5_var.set(
+            "Phase5 "
+            f"stage={phase5_active_short} "
+            f"loc={phase5_loc} "
+            f"in={phase5_in} "
+            f"out={phase5_out} "
+            f"door={phase5_door}/{phase5_door_trav} "
+            f"stages={len(phase5_stages)} "
+            f"why={phase5_rat}"
         )
         language_focus = (
             language_memory.get("current_focus_region", {})
@@ -1315,6 +1362,8 @@ class UAVControlPanel:
         self.build_status_label(status_frame, self.plan_var)
         self.build_status_label(status_frame, self.mission_var)
         self.build_status_label(status_frame, self.evidence_var)
+        self.build_status_label(status_frame, self.doorway_var)
+        self.build_status_label(status_frame, self.phase5_var)
         self.build_status_label(status_frame, self.language_memory_var)
         self.build_status_label(status_frame, self.api_reply_var)
         self.build_status_label(status_frame, self.llm_action_var)

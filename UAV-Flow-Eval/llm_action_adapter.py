@@ -217,6 +217,12 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         if isinstance(request_payload.get("language_memory_runtime"), dict)
         else {}
     )
+    doorway_runtime = request_payload.get("doorway_runtime") if isinstance(request_payload.get("doorway_runtime"), dict) else {}
+    phase5_mission_manual = (
+        request_payload.get("phase5_mission_manual")
+        if isinstance(request_payload.get("phase5_mission_manual"), dict)
+        else {}
+    )
     current_plan = request_payload.get("current_plan") if isinstance(request_payload.get("current_plan"), dict) else {}
     reflex_runtime = request_payload.get("reflex_runtime") if isinstance(request_payload.get("reflex_runtime"), dict) else {}
     runtime_debug = request_payload.get("runtime_debug") if isinstance(request_payload.get("runtime_debug"), dict) else {}
@@ -271,6 +277,48 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
             if isinstance(note, dict)
         ],
     }
+    best_doorway = doorway_runtime.get("best_candidate", {}) if isinstance(doorway_runtime.get("best_candidate"), dict) else {}
+    doorway_summary = {
+        "status": str(doorway_runtime.get("status", "idle")),
+        "candidate_count": int(doorway_runtime.get("candidate_count", 0)),
+        "traversable_candidate_count": int(doorway_runtime.get("traversable_candidate_count", 0)),
+        "summary": str(doorway_runtime.get("summary", "")),
+        "best_candidate": {
+            "label": str(best_doorway.get("label", "")),
+            "traversable": bool(best_doorway.get("traversable", False)),
+            "confidence": float(best_doorway.get("confidence", 0.0)),
+            "depth_gain_cm": float(best_doorway.get("depth_gain_cm", 0.0)),
+            "clearance_depth_cm": float(best_doorway.get("clearance_depth_cm", 0.0)),
+            "width_ratio": float(best_doorway.get("width_ratio", 0.0)),
+            "height_ratio": float(best_doorway.get("height_ratio", 0.0)),
+            "center_x_norm": float(best_doorway.get("center_x_norm", 0.0)),
+        },
+    }
+    phase5_environment = (
+        phase5_mission_manual.get("environment_context", {})
+        if isinstance(phase5_mission_manual.get("environment_context"), dict)
+        else {}
+    )
+    phase5_stages = phase5_mission_manual.get("stages", []) if isinstance(phase5_mission_manual.get("stages"), list) else []
+    active_stage_id = str(phase5_mission_manual.get("active_stage_id", "") or "")
+    active_stage = next(
+        (
+            stage for stage in phase5_stages
+            if isinstance(stage, dict) and str(stage.get("stage_id", "")) == active_stage_id
+        ),
+        {},
+    )
+    phase5_summary = {
+        "active_stage_id": active_stage_id,
+        "active_stage_name": str(active_stage.get("stage_name", "")),
+        "active_objective": str(active_stage.get("objective", "")),
+        "planner_focus": str(active_stage.get("planner_focus", "")),
+        "location_state": str(phase5_environment.get("location_state", "unknown")),
+        "inside_score": int(phase5_environment.get("inside_score", 0)),
+        "outside_score": int(phase5_environment.get("outside_score", 0)),
+        "doorway_candidate_count": int(phase5_environment.get("doorway_candidate_count", 0)),
+        "rationale": [str(item) for item in (phase5_environment.get("rationale") or [])[:3]],
+    }
     current_plan_summary = {
         "semantic_subgoal": str(current_plan.get("semantic_subgoal", "")),
         "search_subgoal": str(current_plan.get("search_subgoal", "")),
@@ -302,6 +350,7 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         "Prefer safe exploration, target search, and verification behavior. "
         "Avoid oscillation and avoid repeating the opposite of the most recent action unless safety requires it. "
         "If evidence is confirmed_present or confirmed_absent, prefer hold or cautious reorientation. "
+        "If a traversable doorway is detected, bias toward actions that align with and move through the doorway. "
         "If risk is high, prefer yaw changes, vertical adjustment, or hold over aggressive translation. "
         "All string values must be single-line plain strings without embedded newlines."
     )
@@ -313,6 +362,8 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         f"person_evidence={_compact_json(evidence_summary)}\n"
         f"search_result={_compact_json(result_summary)}\n"
         f"language_memory={_compact_json(language_memory_summary)}\n"
+        f"doorway_runtime={_compact_json(doorway_summary)}\n"
+        f"phase5_manual={_compact_json(phase5_summary)}\n"
         f"current_plan={_compact_json(current_plan_summary)}\n"
         f"pose={_compact_json(pose_summary)}\n"
         f"depth={_compact_json(depth_summary)}\n"
@@ -322,6 +373,8 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         "- confidence must be between 0.0 and 1.0.\n"
         "- stop_condition must be one of continue_search, replan_after_step, hold_position, need_manual_review, target_confirmed.\n"
         "- should_request_plan should be true when the next macro-step should ask the high-level planner again.\n"
+        "- follow the active Phase 5 stage when it is available; treat it as the current task manual.\n"
+        "- when a traversable doorway is centered or nearly centered, prefer forward over unnecessary rotation.\n"
         "- keep rationale short and single-line.\n"
     )
     return {

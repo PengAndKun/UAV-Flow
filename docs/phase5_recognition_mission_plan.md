@@ -1,5 +1,22 @@
 # Phase 5 Recognition Mission Plan
 
+## Update Note
+
+This document now serves as the transition plan for Phase 5.
+
+The newer main design direction is documented in:
+- [phase5_multimodal_scene_waypoint_plan.md](/E:/github/UAV-Flow/docs/phase5_multimodal_scene_waypoint_plan.md)
+
+That revised plan changes the main Phase 5 story from:
+- doorway heuristics first
+
+to:
+- RGB + depth multimodal scene interpretation
+- stage-aware mission reasoning
+- continuous waypoint generation
+
+The existing doorway runtime and mission manual remain useful, but they should now be treated as support modules rather than the final main method.
+
 ## Goal
 
 Phase 5 shifts the project from:
