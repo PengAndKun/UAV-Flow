@@ -263,6 +263,13 @@ def _compact_json(data: Any) -> str:
     return json.dumps(data, ensure_ascii=True, separators=(",", ":"))
 
 
+def _truncate_debug_text(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return f"{value[: limit - 3]}..."
+
+
 def build_llm_planner_prompt(
     request_payload: Dict[str, Any],
     heuristic_seed: Dict[str, Any],
@@ -276,6 +283,11 @@ def build_llm_planner_prompt(
         else {}
     )
     search_result = request_payload.get("search_result") if isinstance(request_payload.get("search_result"), dict) else {}
+    language_memory_runtime = (
+        request_payload.get("language_memory_runtime")
+        if isinstance(request_payload.get("language_memory_runtime"), dict)
+        else {}
+    )
     pose = request_payload.get("pose") if isinstance(request_payload.get("pose"), dict) else {}
     depth = request_payload.get("depth") if isinstance(request_payload.get("depth"), dict) else {}
     context = request_payload.get("context") if isinstance(request_payload.get("context"), dict) else {}
@@ -343,6 +355,35 @@ def build_llm_planner_prompt(
         else {},
         "summary": str(search_result.get("summary", "")),
     }
+    language_memory_summary = {
+        "global_summary": str(language_memory_runtime.get("global_summary", "")),
+        "current_focus_region": _summarize_region(
+            language_memory_runtime.get("current_focus_region", {})
+            if isinstance(language_memory_runtime.get("current_focus_region"), dict)
+            else {}
+        ),
+        "current_focus_summary": str(language_memory_runtime.get("current_focus_summary", "")),
+        "note_count": int(language_memory_runtime.get("note_count", 0)),
+        "region_note_count": int(language_memory_runtime.get("region_note_count", 0)),
+        "recent_notes": [
+            {
+                "note_type": str(note.get("note_type", "")),
+                "region_label": str(note.get("region_label", "")),
+                "text": str(note.get("text", "")),
+            }
+            for note in (language_memory_runtime.get("recent_notes") or [])[:4]
+            if isinstance(note, dict)
+        ],
+        "region_notes": [
+            {
+                "region_label": str(note.get("region_label", "")),
+                "status": str(note.get("status", "")),
+                "summary": str(note.get("summary", "")),
+            }
+            for note in (language_memory_runtime.get("region_notes") or [])[:4]
+            if isinstance(note, dict)
+        ],
+    }
 
     system_prompt = (
         "You are a high-level UAV house-search planner. "
@@ -371,10 +412,12 @@ def build_llm_planner_prompt(
         f"reflex={_compact_json(reflex_summary)}\n"
         f"person_evidence={_compact_json(evidence_summary)}\n"
         f"search_result={_compact_json(search_result_summary)}\n"
+        f"language_memory={_compact_json(language_memory_summary)}\n"
         f"heuristic_seed={_compact_json(heuristic_summary)}\n"
         "Rules:\n"
         "- prioritize person-search semantics over generic navigation semantics when the task mentions people, survivors, suspects, rooms, or verification.\n"
         "- prefer candidate_region_labels from the provided region list.\n"
+        "- use language_memory to avoid revisiting already described regions unless verification or revisit is justified.\n"
         "- use waypoint_strategy to adjust the seed geometry instead of inventing raw motor actions.\n"
         "- keep planner_confidence between 0.0 and 1.0.\n"
         "- keep explanation short and single-line.\n"
@@ -577,6 +620,10 @@ def build_llm_plan(
         "attempt_count": int(response.get("attempt_count", 1)),
         "waypoint_strategy": waypoint_strategy,
         "raw_text": response.get("text", ""),
+        "response_text_preview": _truncate_debug_text(response.get("text", ""), 1200),
+        "parsed_payload": payload,
+        "system_prompt_excerpt": _truncate_debug_text(prompt["system_prompt"], 1200),
+        "user_prompt_excerpt": _truncate_debug_text(prompt["user_prompt"], 2400),
     }
     return build_plan_state(
         plan_id=f"llm_plan_{request_payload.get('frame_id', 'unknown')}",

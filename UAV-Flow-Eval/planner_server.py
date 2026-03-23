@@ -19,9 +19,11 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from llm_action_adapter import LLMActionAdapterError, build_llm_action
 from llm_planner_adapter import LLMPlannerAdapterError, build_llm_plan
 from llm_planner_client import LLMPlannerClient, LLMPlannerClientError, LLMPlannerConfig
 from runtime_interfaces import (
+    build_llm_action_runtime_state,
     build_plan_request,
     build_plan_state,
     build_search_region,
@@ -127,6 +129,87 @@ def build_fallback_plan_from_seed(
     fallback_plan["planner_name"] = planner_name
     fallback_plan["debug"] = merged_debug
     return fallback_plan
+
+
+def infer_heuristic_action_from_request(request_payload: Dict[str, Any]) -> Tuple[str, str]:
+    runtime_debug = request_payload.get("runtime_debug") if isinstance(request_payload.get("runtime_debug"), dict) else {}
+    current_plan = request_payload.get("current_plan") if isinstance(request_payload.get("current_plan"), dict) else {}
+    reflex_runtime = request_payload.get("reflex_runtime") if isinstance(request_payload.get("reflex_runtime"), dict) else {}
+    risk_score = float(runtime_debug.get("risk_score", 0.0) or 0.0)
+    reflex_suggested = str(reflex_runtime.get("suggested_action", "") or "").strip().lower()
+    semantic_subgoal = str(current_plan.get("semantic_subgoal", "") or "").strip().lower()
+    search_subgoal = str(current_plan.get("search_subgoal", "") or "").strip().lower()
+    combined = f"{semantic_subgoal} {search_subgoal}"
+
+    if risk_score >= 0.85:
+        return "yaw_left", "high risk fallback: prefer reorientation"
+    if reflex_suggested in {"forward", "backward", "left", "right", "up", "down", "yaw_left", "yaw_right"}:
+        return reflex_suggested, "reuse local reflex suggestion as heuristic action fallback"
+    if any(token in combined for token in ("turn_left", "yaw_left", "scan_left")):
+        return "yaw_left", "heuristic action follows left-turn plan cue"
+    if any(token in combined for token in ("turn_right", "yaw_right", "scan_right")):
+        return "yaw_right", "heuristic action follows right-turn plan cue"
+    if any(token in combined for token in ("ascend", "move_up", "upward")):
+        return "up", "heuristic action follows upward search cue"
+    if any(token in combined for token in ("descend", "move_down", "downward")):
+        return "down", "heuristic action follows downward search cue"
+    if any(token in combined for token in ("backward", "reverse")):
+        return "backward", "heuristic action follows backward search cue"
+    if any(token in combined for token in ("strafe_left", "move_left", "left_room")):
+        return "left", "heuristic action follows leftward search cue"
+    if any(token in combined for token in ("strafe_right", "move_right", "right_room")):
+        return "right", "heuristic action follows rightward search cue"
+    if any(token in combined for token in ("hold", "stop", "pause", "confirm")):
+        return "hold", "heuristic action holds for confirmation"
+    return "forward", "default heuristic action moves forward toward exploration frontier"
+
+
+def build_heuristic_action_response(
+    request_payload: Dict[str, Any],
+    *,
+    policy_name: str,
+    route_mode: str,
+    route_reason: str,
+    source: str,
+    fallback_used: bool,
+    fallback_reason: str = "",
+    llm_model_name: str = "",
+    llm_api_style: str = "",
+) -> Dict[str, Any]:
+    action_name, rationale = infer_heuristic_action_from_request(request_payload)
+    return build_llm_action_runtime_state(
+        action_id=f"heuristic_action_{request_payload.get('frame_id', 'unknown')}",
+        mode="heuristic_action",
+        policy_name=policy_name,
+        source=source,
+        status="ok" if not fallback_used else "fallback",
+        suggested_action=action_name,
+        should_execute=action_name not in {"hold", "hold_position", "idle"},
+        confidence=0.35 if not fallback_used else 0.25,
+        rationale=rationale,
+        stop_condition="continue_search",
+        should_request_plan=False,
+        last_trigger=str(request_payload.get("trigger", "manual_request") or "manual_request"),
+        last_latency_ms=0.0,
+        risk_score=float(((request_payload.get("runtime_debug") or {}).get("risk_score", 0.0)) or 0.0),
+        model_name=str(llm_model_name or ""),
+        api_style=str(llm_api_style or ""),
+        route_mode=str(route_mode or ""),
+        usage={},
+        attempt_count=0,
+        fallback_used=bool(fallback_used),
+        fallback_reason=str(fallback_reason or route_reason or ""),
+        upstream_error="",
+        raw_text="",
+        parsed_payload={
+            "action": action_name,
+            "confidence": 0.35 if not fallback_used else 0.25,
+            "rationale": rationale,
+            "stop_condition": "continue_search",
+            "should_request_plan": False,
+            "route_reason": str(route_reason or ""),
+        },
+    )
 
 
 def build_llm_client_from_args(args: argparse.Namespace) -> Optional[LLMPlannerClient]:
@@ -592,6 +675,65 @@ def make_handler(args: argparse.Namespace, llm_client: Optional[LLMPlannerClient
                     llm_client = build_llm_client_from_args(args)
                     self._send_json(build_planner_config_payload(args, llm_client))
                     return
+                if parsed.path == args.action_endpoint:
+                    request_payload = self._read_json_body()
+                    mission = request_payload.get("mission") if isinstance(request_payload.get("mission"), dict) else {}
+                    mission_type = str(mission.get("mission_type", "semantic_navigation") or "semantic_navigation")
+                    route_mode = resolve_planner_route_mode(args.planner_mode, str(args.planner_route_mode or "auto"))
+                    use_llm_mode, route_reason = should_use_llm_mode(route_mode=route_mode, mission_type=mission_type)
+                    if use_llm_mode:
+                        if llm_client is None:
+                            if args.fallback_to_heuristic:
+                                logger.warning("LLM action requested but client is unavailable, using heuristic action fallback.")
+                                llm_action = build_heuristic_action_response(
+                                    request_payload,
+                                    policy_name=args.planner_name,
+                                    route_mode=route_mode,
+                                    route_reason=route_reason,
+                                    source="heuristic_action_fallback",
+                                    fallback_used=True,
+                                    fallback_reason="llm_client_unavailable",
+                                    llm_model_name=str(args.llm_model or ""),
+                                    llm_api_style=str(args.llm_api_style or ""),
+                                )
+                            else:
+                                raise RuntimeError("LLM action mode requested but no LLM client is configured.")
+                        else:
+                            try:
+                                llm_action = build_llm_action(
+                                    request_payload=request_payload,
+                                    client=llm_client,
+                                    policy_name=args.planner_name,
+                                )
+                            except (LLMActionAdapterError, LLMPlannerClientError, error.URLError, TimeoutError) as exc:
+                                if args.fallback_to_heuristic:
+                                    logger.warning("LLM action request failed, using heuristic action fallback: %s", exc)
+                                    llm_action = build_heuristic_action_response(
+                                        request_payload,
+                                        policy_name=args.planner_name,
+                                        route_mode=route_mode,
+                                        route_reason=route_reason,
+                                        source="heuristic_action_fallback",
+                                        fallback_used=True,
+                                        fallback_reason=str(exc),
+                                        llm_model_name=str(args.llm_model or ""),
+                                        llm_api_style=str(args.llm_api_style or ""),
+                                    )
+                                else:
+                                    raise
+                    else:
+                        llm_action = build_heuristic_action_response(
+                            request_payload,
+                            policy_name=args.planner_name,
+                            route_mode=route_mode,
+                            route_reason=route_reason,
+                            source="local_heuristic",
+                            fallback_used=False,
+                            llm_model_name="",
+                            llm_api_style="",
+                        )
+                    self._send_json({"status": "ok", "llm_action_runtime": llm_action})
+                    return
                 if parsed.path != args.endpoint:
                     self._send_json({"status": "error", "message": "Not found"}, 404)
                     return
@@ -692,6 +834,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind")
     parser.add_argument("--port", type=int, default=5021, help="Planner HTTP port")
     parser.add_argument("--endpoint", default="/plan", help="Planner endpoint path")
+    parser.add_argument("--action_endpoint", default="/action", help="Pure LLM action endpoint path")
     parser.add_argument("--planner_name", default="external_heuristic_planner", help="Planner name returned in plan payloads")
     parser.add_argument("--planner_mode", default="heuristic", choices=["heuristic", "llm", "hybrid"], help="Planner execution mode")
     parser.add_argument(

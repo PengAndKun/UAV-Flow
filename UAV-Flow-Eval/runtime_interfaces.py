@@ -269,6 +269,193 @@ def build_search_result_state(
     }
 
 
+def build_language_search_memory_state(
+    *,
+    mission_id: str = "",
+    mission_type: str = "semantic_navigation",
+    task_label: str = "",
+    global_summary: str = "",
+    current_focus_region: Optional[Dict[str, Any]] = None,
+    current_focus_summary: str = "",
+    region_notes: Optional[List[Dict[str, Any]]] = None,
+    recent_notes: Optional[List[Dict[str, Any]]] = None,
+    note_count: int = 0,
+    region_note_count: int = 0,
+    last_updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a normalized language-first search-memory runtime snapshot."""
+    return {
+        "schema_version": "phase4.language_search_memory.v1",
+        "mission_id": str(mission_id or ""),
+        "mission_type": str(mission_type or "semantic_navigation"),
+        "task_label": str(task_label or ""),
+        "global_summary": str(global_summary or ""),
+        "current_focus_region": current_focus_region or {},
+        "current_focus_summary": str(current_focus_summary or ""),
+        "region_notes": region_notes or [],
+        "recent_notes": recent_notes or [],
+        "note_count": int(note_count),
+        "region_note_count": int(region_note_count),
+        "last_updated_at": last_updated_at or now_timestamp(),
+    }
+
+
+def build_planner_executor_runtime_state(
+    *,
+    mode: str = "manual",
+    active: bool = False,
+    state: str = "idle",
+    run_id: str = "",
+    mission_id: str = "",
+    trigger: str = "",
+    current_plan_id: str = "",
+    current_search_subgoal: str = "idle",
+    target_waypoint: Optional[Dict[str, Any]] = None,
+    step_budget: int = 0,
+    refresh_plan: bool = False,
+    plan_refresh_interval_steps: int = 0,
+    steps_executed: int = 0,
+    blocked_count: int = 0,
+    replan_count: int = 0,
+    last_action: str = "idle",
+    last_progress_cm: float = 0.0,
+    last_stop_reason: str = "",
+    last_stop_detail: str = "",
+    started_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a normalized runtime state for planner-driven exploration execution."""
+    return {
+        "schema_version": "phase4.planner_executor.v1",
+        "mode": str(mode or "manual"),
+        "active": bool(active),
+        "state": str(state or "idle"),
+        "run_id": str(run_id or ""),
+        "mission_id": str(mission_id or ""),
+        "trigger": str(trigger or ""),
+        "current_plan_id": str(current_plan_id or ""),
+        "current_search_subgoal": str(current_search_subgoal or "idle"),
+        "target_waypoint": target_waypoint or {},
+        "step_budget": int(step_budget),
+        "refresh_plan": bool(refresh_plan),
+        "plan_refresh_interval_steps": int(plan_refresh_interval_steps),
+        "steps_executed": int(steps_executed),
+        "blocked_count": int(blocked_count),
+        "replan_count": int(replan_count),
+        "last_action": str(last_action or "idle"),
+        "last_progress_cm": float(last_progress_cm),
+        "last_stop_reason": str(last_stop_reason or ""),
+        "last_stop_detail": str(last_stop_detail or ""),
+        "started_at": started_at or now_timestamp(),
+        "updated_at": updated_at or now_timestamp(),
+    }
+
+
+def build_llm_action_runtime_state(
+    *,
+    action_id: str = "",
+    mode: str = "llm_action_only",
+    policy_name: str = "",
+    source: str = "none",
+    status: str = "idle",
+    suggested_action: str = "hold",
+    should_execute: bool = False,
+    confidence: float = 0.0,
+    rationale: str = "",
+    stop_condition: str = "hold_position",
+    should_request_plan: bool = False,
+    last_trigger: str = "",
+    last_latency_ms: float = 0.0,
+    risk_score: float = 0.0,
+    model_name: str = "",
+    api_style: str = "",
+    route_mode: str = "",
+    usage: Optional[Dict[str, Any]] = None,
+    attempt_count: int = 0,
+    fallback_used: bool = False,
+    fallback_reason: str = "",
+    upstream_error: str = "",
+    raw_text: str = "",
+    parsed_payload: Optional[Dict[str, Any]] = None,
+    system_prompt_excerpt: str = "",
+    user_prompt_excerpt: str = "",
+    updated_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a normalized runtime state for pure LLM action prediction."""
+    return {
+        "schema_version": "phase4.llm_action.v1",
+        "action_id": str(action_id or ""),
+        "mode": str(mode or "llm_action_only"),
+        "policy_name": str(policy_name or ""),
+        "source": str(source or "none"),
+        "status": str(status or "idle"),
+        "suggested_action": str(suggested_action or "hold"),
+        "should_execute": bool(should_execute),
+        "confidence": float(confidence),
+        "policy_confidence": float(confidence),
+        "rationale": str(rationale or ""),
+        "stop_condition": str(stop_condition or "hold_position"),
+        "should_request_plan": bool(should_request_plan),
+        "last_trigger": str(last_trigger or ""),
+        "last_latency_ms": float(last_latency_ms),
+        "risk_score": float(risk_score),
+        "model_name": str(model_name or ""),
+        "api_style": str(api_style or ""),
+        "route_mode": str(route_mode or ""),
+        "usage": usage or {},
+        "attempt_count": int(attempt_count),
+        "fallback_used": bool(fallback_used),
+        "fallback_reason": str(fallback_reason or ""),
+        "upstream_error": str(upstream_error or ""),
+        "raw_text": str(raw_text or ""),
+        "parsed_payload": parsed_payload or {},
+        "system_prompt_excerpt": str(system_prompt_excerpt or ""),
+        "user_prompt_excerpt": str(user_prompt_excerpt or ""),
+        "updated_at": updated_at or now_timestamp(),
+    }
+
+
+def coerce_llm_action_runtime_payload(
+    raw: Any,
+    *,
+    default_policy_name: str = "",
+    default_source: str = "external",
+) -> Dict[str, Any]:
+    """Normalize arbitrary LLM action output into the shared runtime schema."""
+    payload = raw if isinstance(raw, dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    parsed_payload = payload.get("parsed_payload") if isinstance(payload.get("parsed_payload"), dict) else {}
+    return build_llm_action_runtime_state(
+        action_id=str(payload.get("action_id", "")),
+        mode=str(payload.get("mode", "llm_action_only")),
+        policy_name=str(payload.get("policy_name", default_policy_name)),
+        source=str(payload.get("source", default_source)),
+        status=str(payload.get("status", "idle")),
+        suggested_action=str(payload.get("suggested_action", payload.get("action", "hold"))),
+        should_execute=bool(payload.get("should_execute", False)),
+        confidence=float(payload.get("confidence", payload.get("policy_confidence", 0.0)) or 0.0),
+        rationale=str(payload.get("rationale", "")),
+        stop_condition=str(payload.get("stop_condition", "hold_position")),
+        should_request_plan=bool(payload.get("should_request_plan", False)),
+        last_trigger=str(payload.get("last_trigger", "")),
+        last_latency_ms=float(payload.get("last_latency_ms", payload.get("latency_ms", 0.0)) or 0.0),
+        risk_score=float(payload.get("risk_score", 0.0) or 0.0),
+        model_name=str(payload.get("model_name", "")),
+        api_style=str(payload.get("api_style", "")),
+        route_mode=str(payload.get("route_mode", "")),
+        usage=usage,
+        attempt_count=int(payload.get("attempt_count", 0) or 0),
+        fallback_used=bool(payload.get("fallback_used", False)),
+        fallback_reason=str(payload.get("fallback_reason", "")),
+        upstream_error=str(payload.get("upstream_error", "")),
+        raw_text=str(payload.get("raw_text", "")),
+        parsed_payload=parsed_payload,
+        system_prompt_excerpt=str(payload.get("system_prompt_excerpt", "")),
+        user_prompt_excerpt=str(payload.get("user_prompt_excerpt", "")),
+        updated_at=str(payload.get("updated_at", now_timestamp())),
+    )
+
+
 def coerce_waypoint_payload(raw: Any, *, default_radius: float = 50.0) -> Optional[Dict[str, Any]]:
     """Normalize an arbitrary waypoint-like object into the shared waypoint schema."""
     if not isinstance(raw, dict):
@@ -339,6 +526,7 @@ def build_plan_request(
     search_runtime: Optional[Dict[str, Any]] = None,
     person_evidence_runtime: Optional[Dict[str, Any]] = None,
     search_result: Optional[Dict[str, Any]] = None,
+    language_memory_runtime: Optional[Dict[str, Any]] = None,
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build the shared Phase 2 planner request payload."""
@@ -359,6 +547,56 @@ def build_plan_request(
         "search_runtime": search_runtime or {},
         "person_evidence_runtime": person_evidence_runtime or {},
         "search_result": search_result or {},
+        "language_memory_runtime": language_memory_runtime or {},
+        "context": context or {},
+    }
+
+
+def build_llm_action_request(
+    *,
+    task_label: str,
+    instruction: str,
+    frame_id: str,
+    timestamp: str,
+    pose: Dict[str, Any],
+    depth: Optional[Dict[str, Any]] = None,
+    camera_info: Optional[Dict[str, Any]] = None,
+    image_b64: str = "",
+    planner_name: str = "",
+    trigger: str = "manual",
+    step_index: int = 0,
+    mission: Optional[Dict[str, Any]] = None,
+    search_runtime: Optional[Dict[str, Any]] = None,
+    person_evidence_runtime: Optional[Dict[str, Any]] = None,
+    search_result: Optional[Dict[str, Any]] = None,
+    language_memory_runtime: Optional[Dict[str, Any]] = None,
+    current_plan: Optional[Dict[str, Any]] = None,
+    reflex_runtime: Optional[Dict[str, Any]] = None,
+    runtime_debug: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build the shared Phase 4 pure-LLM action request payload."""
+    return {
+        "schema_version": "phase4.llm_action_request.v1",
+        "planner_name": planner_name,
+        "task_label": task_label,
+        "instruction": instruction,
+        "frame_id": frame_id,
+        "timestamp": timestamp,
+        "trigger": trigger,
+        "step_index": int(step_index),
+        "pose": pose,
+        "depth": depth or {},
+        "camera_info": camera_info or {},
+        "image_b64": image_b64,
+        "mission": mission or {},
+        "search_runtime": search_runtime or {},
+        "person_evidence_runtime": person_evidence_runtime or {},
+        "search_result": search_result or {},
+        "language_memory_runtime": language_memory_runtime or {},
+        "current_plan": current_plan or {},
+        "reflex_runtime": reflex_runtime or {},
+        "runtime_debug": runtime_debug or {},
         "context": context or {},
     }
 

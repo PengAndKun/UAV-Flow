@@ -11,6 +11,7 @@ This file is the "controller side" process:
 import argparse
 import json
 import logging
+import threading
 import tkinter as tk
 import tkinter.font as tkfont
 import tkinter.ttk as ttk
@@ -167,11 +168,23 @@ class UAVControlPanel:
         self.plan_var = tk.StringVar(value="Plan: idle")
         self.mission_var = tk.StringVar(value="Mission: idle")
         self.evidence_var = tk.StringVar(value="Evidence: idle")
+        self.language_memory_var = tk.StringVar(value="LangMem: idle")
+        self.api_reply_var = tk.StringVar(value="APIReply: idle")
+        self.llm_action_var = tk.StringVar(value="LLMAct: idle")
         self.archive_var = tk.StringVar(value="Archive: idle")
         self.reflex_var = tk.StringVar(value="Reflex: idle")
         self.executor_var = tk.StringVar(value="Executor: idle")
+        self.planner_executor_var = tk.StringVar(value="Plan Executor: idle")
         self.takeover_var = tk.StringVar(value="Takeover: idle")
         self.last_state: Optional[Dict[str, Any]] = None
+        self.api_reply_window: Optional[tk.Toplevel] = None
+        self.api_reply_text_widget: Optional[tk.Text] = None
+        self.api_prompt_window: Optional[tk.Toplevel] = None
+        self.api_prompt_text_widget: Optional[tk.Text] = None
+        self.llm_action_reply_window: Optional[tk.Toplevel] = None
+        self.llm_action_reply_text_widget: Optional[tk.Text] = None
+        self.llm_action_prompt_window: Optional[tk.Toplevel] = None
+        self.llm_action_prompt_text_widget: Optional[tk.Text] = None
         self.preview_window: Optional[tk.Toplevel] = None
         self.preview_label: Optional[tk.Label] = None
         self.preview_photo: Optional[ImageTk.PhotoImage] = None
@@ -198,6 +211,8 @@ class UAVControlPanel:
         self.planner_fallback_var = tk.BooleanVar(value=True)
         self.planner_request_timeout_var = tk.StringVar(value="5.0")
         self.planner_config_var = tk.StringVar(value="Planner config: waiting...")
+        self.plan_segment_steps_var = tk.StringVar(value="5")
+        self.plan_segment_replan_interval_var = tk.StringVar(value="0")
 
     def refresh_client_timeout(self) -> None:
         try:
@@ -217,6 +232,32 @@ class UAVControlPanel:
             self.status_var.set(f"Request failed: {exc}")
             logger.warning("Request failed: %s", exc)
         return None
+
+    def handle_async_request_error(self, prefix: str, exc: Exception) -> None:
+        if isinstance(exc, error.URLError):
+            self.status_var.set(f"{prefix} failed: {exc}")
+            logger.warning("%s failed: %s", prefix, exc)
+        else:
+            self.status_var.set(f"{prefix} failed: {exc}")
+            logger.warning("%s failed: %s", prefix, exc)
+
+    def run_async_request(self, work, *, busy_message: str = "", on_success=None, on_error=None) -> None:
+        if busy_message:
+            self.status_var.set(busy_message)
+
+        def worker() -> None:
+            try:
+                result = work()
+            except Exception as exc:  # noqa: BLE001
+                if on_error is not None:
+                    self.root.after(0, lambda exc=exc: on_error(exc))
+                else:
+                    self.root.after(0, lambda exc=exc: self.handle_async_request_error("Request", exc))
+                return
+            if on_success is not None:
+                self.root.after(0, lambda result=result: on_success(result))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     @staticmethod
     def _frame_to_photo(frame: np.ndarray, width: int, height: int) -> ImageTk.PhotoImage:
@@ -241,7 +282,14 @@ class UAVControlPanel:
             "yaw_delta_deg": yaw_delta_deg,
             "action_name": action_name,
         }
-        state = self.safe_request(self.client.post_json, "/move_relative", payload)
+        self.run_async_request(
+            lambda: self.client.post_json("/move_relative", payload),
+            busy_message=f"Sending {action_name}...",
+            on_success=self.handle_move_response,
+            on_error=lambda exc: self.handle_async_request_error(f"Move {action_name}", exc),
+        )
+
+    def handle_move_response(self, state: Optional[Dict[str, Any]]) -> None:
         if state:
             self.last_state = state
             self.update_status_from_state(state)
@@ -253,45 +301,71 @@ class UAVControlPanel:
             "label": self.capture_label_var.get().strip(),
             "task_label": self.task_label_var.get().strip(),
         }
-        result = self.safe_request(self.client.post_json, "/capture", payload)
+        self.run_async_request(
+            lambda: self.client.post_json("/capture", payload),
+            busy_message="Capturing bundle...",
+            on_success=self.handle_capture_response,
+            on_error=lambda exc: self.handle_async_request_error("Capture", exc),
+        )
+
+    def handle_capture_response(self, result: Optional[Dict[str, Any]]) -> None:
         if result:
             self.status_var.set(f"Captured: {result['meta_path']}")
             self.update_preview_once()
             self.update_depth_once()
 
     def set_task_label(self) -> None:
-        result = self.safe_request(
-            self.client.post_json,
-            "/task",
-            {"task_label": self.task_label_var.get().strip()},
+        payload = {"task_label": self.task_label_var.get().strip()}
+        self.run_async_request(
+            lambda: self.client.post_json("/task", payload),
+            busy_message="Setting task label...",
+            on_success=self.handle_set_task_response,
+            on_error=lambda exc: self.handle_async_request_error("Set Task", exc),
         )
+
+    def handle_set_task_response(self, result: Optional[Dict[str, Any]]) -> None:
         if result:
             self.status_var.set(f"Task label set: {result.get('task_label', '')}")
+            self.update_state_once()
 
     def request_plan(self) -> None:
         payload = {"task_label": self.task_label_var.get().strip()}
-        result = self.safe_request(self.client.post_json, "/request_plan", payload)
+        self.run_async_request(
+            lambda: self.client.post_json("/request_plan", payload),
+            busy_message="Requesting planner output...",
+            on_success=self.handle_request_plan_response,
+            on_error=lambda exc: self.handle_async_request_error("Request Plan", exc),
+        )
+
+    def handle_request_plan_response(self, result: Optional[Dict[str, Any]]) -> None:
         if result:
             if isinstance(result.get("plan"), dict):
                 self.plan_var.set(self.format_plan_summary(result["plan"]))
             self.update_state_once()
 
     def request_reflex(self) -> None:
-        result = self.safe_request(self.client.post_json, "/request_reflex", {"trigger": "manual_request"})
-        if result:
-            self.update_state_once()
+        self.run_async_request(
+            lambda: self.client.post_json("/request_reflex", {"trigger": "manual_request"}),
+            busy_message="Refreshing reflex state...",
+            on_success=lambda result: self.update_state_once() if result else None,
+            on_error=lambda exc: self.handle_async_request_error("Request Reflex", exc),
+        )
 
     def execute_reflex(self) -> None:
-        result = self.safe_request(
-            self.client.post_json,
-            "/execute_reflex",
-            {
-                "trigger": "manual_execute",
-                "refresh_policy": True,
-                "allow_auto_plan": True,
-                "sync_after_execution": True,
-            },
+        payload = {
+            "trigger": "manual_execute",
+            "refresh_policy": True,
+            "allow_auto_plan": True,
+            "sync_after_execution": True,
+        }
+        self.run_async_request(
+            lambda: self.client.post_json("/execute_reflex", payload),
+            busy_message="Executing reflex step...",
+            on_success=self.handle_execute_reflex_response,
+            on_error=lambda exc: self.handle_async_request_error("Execute Reflex", exc),
         )
+
+    def handle_execute_reflex_response(self, result: Optional[Dict[str, Any]]) -> None:
         if result:
             state = result.get("state") if isinstance(result.get("state"), dict) else None
             if state:
@@ -299,6 +373,115 @@ class UAVControlPanel:
                 self.update_status_from_state(state)
             else:
                 self.update_state_once()
+            self.update_preview_once()
+            self.update_depth_once()
+
+    def execute_plan_segment(self) -> None:
+        try:
+            step_budget = max(1, min(int(self.plan_segment_steps_var.get().strip() or "5"), 25))
+        except ValueError:
+            step_budget = 5
+        try:
+            replan_interval = max(0, int(self.plan_segment_replan_interval_var.get().strip() or "0"))
+        except ValueError:
+            replan_interval = 0
+        payload = {
+            "step_budget": step_budget,
+            "refresh_plan": True,
+            "plan_refresh_interval_steps": replan_interval,
+            "allow_reflex": True,
+            "trigger": "manual_segment",
+        }
+        self.run_async_request(
+            lambda: self.client.post_json("/execute_plan_segment", payload),
+            busy_message=f"Executing planner search segment (steps={step_budget}, replan={replan_interval})...",
+            on_success=self.handle_execute_plan_segment_response,
+            on_error=lambda exc: self.handle_async_request_error("Execute Plan Segment", exc),
+        )
+
+    def handle_execute_plan_segment_response(self, result: Optional[Dict[str, Any]]) -> None:
+        if result:
+            state = result.get("state") if isinstance(result.get("state"), dict) else None
+            if state:
+                self.last_state = state
+                self.update_status_from_state(state)
+            else:
+                self.update_state_once()
+            self.status_var.set(
+                f"Plan segment finished: steps={int(result.get('steps_executed', 0))} stop={result.get('stop_reason', 'unknown')}"
+            )
+            self.update_preview_once()
+            self.update_depth_once()
+
+    def request_llm_action(self) -> None:
+        self.run_async_request(
+            lambda: self.client.post_json("/request_llm_action", {"trigger": "manual_request", "refresh_observations": True}),
+            busy_message="Requesting LLM action...",
+            on_success=self.handle_request_llm_action_response,
+            on_error=lambda exc: self.handle_async_request_error("Request LLM Action", exc),
+        )
+
+    def handle_request_llm_action_response(self, result: Optional[Dict[str, Any]]) -> None:
+        if result:
+            self.update_state_once()
+
+    def execute_llm_action(self) -> None:
+        payload = {
+            "trigger": "manual_execute",
+            "refresh_action": True,
+            "allow_auto_plan": False,
+        }
+        self.run_async_request(
+            lambda: self.client.post_json("/execute_llm_action", payload),
+            busy_message="Executing LLM action step...",
+            on_success=self.handle_execute_llm_action_response,
+            on_error=lambda exc: self.handle_async_request_error("Execute LLM Action", exc),
+        )
+
+    def handle_execute_llm_action_response(self, result: Optional[Dict[str, Any]]) -> None:
+        if result:
+            state = result.get("state") if isinstance(result.get("state"), dict) else None
+            if state:
+                self.last_state = state
+                self.update_status_from_state(state)
+            else:
+                self.update_state_once()
+            self.update_preview_once()
+            self.update_depth_once()
+
+    def execute_llm_action_segment(self) -> None:
+        try:
+            step_budget = max(1, min(int(self.plan_segment_steps_var.get().strip() or "5"), 25))
+        except ValueError:
+            step_budget = 5
+        try:
+            replan_interval = max(0, int(self.plan_segment_replan_interval_var.get().strip() or "0"))
+        except ValueError:
+            replan_interval = 0
+        payload = {
+            "step_budget": step_budget,
+            "refresh_plan": True,
+            "plan_refresh_interval_steps": replan_interval,
+            "trigger": "manual_llm_action_segment",
+        }
+        self.run_async_request(
+            lambda: self.client.post_json("/execute_llm_action_segment", payload),
+            busy_message=f"Executing LLM action segment (steps={step_budget}, replan={replan_interval})...",
+            on_success=self.handle_execute_llm_action_segment_response,
+            on_error=lambda exc: self.handle_async_request_error("Execute LLM Action Segment", exc),
+        )
+
+    def handle_execute_llm_action_segment_response(self, result: Optional[Dict[str, Any]]) -> None:
+        if result:
+            state = result.get("state") if isinstance(result.get("state"), dict) else None
+            if state:
+                self.last_state = state
+                self.update_status_from_state(state)
+            else:
+                self.update_state_once()
+            self.status_var.set(
+                f"LLM action segment finished: steps={int(result.get('steps_executed', 0))} stop={result.get('stop_reason', 'unknown')}"
+            )
             self.update_preview_once()
             self.update_depth_once()
 
@@ -411,7 +594,14 @@ class UAVControlPanel:
                 break
 
     def refresh_planner_config(self, *, silent: bool = False) -> None:
-        result = self.safe_request(self.client.get_json, "/planner_config")
+        self.run_async_request(
+            lambda: self.client.get_json("/planner_config"),
+            busy_message="" if silent else "Refreshing planner config...",
+            on_success=lambda result: self.handle_refresh_planner_config_response(result, silent=silent),
+            on_error=(lambda exc: self.handle_async_request_error("Refresh Planner", exc)) if not silent else None,
+        )
+
+    def handle_refresh_planner_config_response(self, result: Optional[Dict[str, Any]], *, silent: bool = False) -> None:
         if not isinstance(result, dict):
             return
         self.sync_planner_controls_from_config(result)
@@ -420,7 +610,14 @@ class UAVControlPanel:
 
     def apply_planner_config(self) -> None:
         payload = self.build_planner_config_payload()
-        result = self.safe_request(self.client.post_json, "/planner_config", payload)
+        self.run_async_request(
+            lambda: self.client.post_json("/planner_config", payload),
+            busy_message="Applying planner config...",
+            on_success=self.handle_apply_planner_config_response,
+            on_error=lambda exc: self.handle_async_request_error("Apply Planner", exc),
+        )
+
+    def handle_apply_planner_config_response(self, result: Optional[Dict[str, Any]]) -> None:
         if not isinstance(result, dict):
             return
         self.sync_planner_controls_from_config(result)
@@ -473,6 +670,190 @@ class UAVControlPanel:
         if len(text) <= limit:
             return text
         return f"{text[:24]}...{text[-18:]}"
+
+    @staticmethod
+    def shorten_text(text: str, limit: int = 84) -> str:
+        value = str(text or "").strip()
+        if len(value) <= limit:
+            return value
+        return f"{value[: limit - 3]}..."
+
+    def get_plan_debug(self) -> Dict[str, Any]:
+        if not isinstance(self.last_state, dict):
+            return {}
+        plan = self.last_state.get("plan")
+        if not isinstance(plan, dict):
+            return {}
+        debug = plan.get("debug")
+        return debug if isinstance(debug, dict) else {}
+
+    def build_api_reply_view_text(self) -> str:
+        if not isinstance(self.last_state, dict):
+            return "No planner state has been loaded yet."
+        plan = self.last_state.get("plan") if isinstance(self.last_state.get("plan"), dict) else {}
+        planner_runtime = (
+            self.last_state.get("planner_runtime")
+            if isinstance(self.last_state.get("planner_runtime"), dict)
+            else {}
+        )
+        debug = self.get_plan_debug()
+        raw_text = str(debug.get("raw_text", "") or "")
+        parsed_payload = debug.get("parsed_payload", {}) if isinstance(debug.get("parsed_payload"), dict) else {}
+        sections = [
+            f"planner_name={plan.get('planner_name', 'n/a')}",
+            f"planner_source={planner_runtime.get('planner_source', 'n/a')}",
+            f"planner_detail={planner_runtime.get('planner_source_detail', 'n/a')}",
+            f"route_mode={planner_runtime.get('planner_route_mode', 'n/a')}",
+            f"model={planner_runtime.get('last_model_name', '-') or '-'}",
+            f"latency_ms={float(planner_runtime.get('last_latency_ms', 0.0)):.1f}",
+            f"fallback_used={int(bool(planner_runtime.get('fallback_used', False)))}",
+            "",
+            "Parsed payload:",
+            json.dumps(parsed_payload, ensure_ascii=True, indent=2) if parsed_payload else "(none)",
+            "",
+            "Raw API reply:",
+            raw_text or "(empty)",
+        ]
+        return "\n".join(sections)
+
+    def build_api_prompt_view_text(self) -> str:
+        if not isinstance(self.last_state, dict):
+            return "No planner state has been loaded yet."
+        debug = self.get_plan_debug()
+        system_prompt = str(debug.get("system_prompt_excerpt", "") or "")
+        user_prompt = str(debug.get("user_prompt_excerpt", "") or "")
+        return "\n".join(
+            [
+                "System prompt excerpt:",
+                system_prompt or "(none)",
+                "",
+                "User prompt excerpt:",
+                user_prompt or "(none)",
+            ]
+        )
+
+    def get_llm_action_runtime(self) -> Dict[str, Any]:
+        if not isinstance(self.last_state, dict):
+            return {}
+        llm_action_runtime = self.last_state.get("llm_action_runtime")
+        return llm_action_runtime if isinstance(llm_action_runtime, dict) else {}
+
+    def build_action_reply_view_text(self) -> str:
+        llm_action_runtime = self.get_llm_action_runtime()
+        if not llm_action_runtime:
+            return "No LLM action state has been loaded yet."
+        raw_text = str(llm_action_runtime.get("raw_text", "") or "")
+        parsed_payload = llm_action_runtime.get("parsed_payload", {}) if isinstance(llm_action_runtime.get("parsed_payload"), dict) else {}
+        usage = llm_action_runtime.get("usage", {}) if isinstance(llm_action_runtime.get("usage"), dict) else {}
+        sections = [
+            f"policy_name={llm_action_runtime.get('policy_name', 'n/a')}",
+            f"source={llm_action_runtime.get('source', 'n/a')}",
+            f"status={llm_action_runtime.get('status', 'idle')}",
+            f"model={llm_action_runtime.get('model_name', '-') or '-'}",
+            f"api_style={llm_action_runtime.get('api_style', '-') or '-'}",
+            f"latency_ms={float(llm_action_runtime.get('last_latency_ms', 0.0)):.1f}",
+            f"fallback_used={int(bool(llm_action_runtime.get('fallback_used', False)))}",
+            f"usage={json.dumps(usage, ensure_ascii=True)}",
+            "",
+            "Parsed payload:",
+            json.dumps(parsed_payload, ensure_ascii=True, indent=2) if parsed_payload else "(none)",
+            "",
+            "Raw API reply:",
+            raw_text or "(empty)",
+        ]
+        return "\n".join(sections)
+
+    def build_action_prompt_view_text(self) -> str:
+        llm_action_runtime = self.get_llm_action_runtime()
+        if not llm_action_runtime:
+            return "No LLM action state has been loaded yet."
+        system_prompt = str(llm_action_runtime.get("system_prompt_excerpt", "") or "")
+        user_prompt = str(llm_action_runtime.get("user_prompt_excerpt", "") or "")
+        return "\n".join(
+            [
+                "System prompt excerpt:",
+                system_prompt or "(none)",
+                "",
+                "User prompt excerpt:",
+                user_prompt or "(none)",
+            ]
+        )
+
+    def open_text_viewer(
+        self,
+        *,
+        window_attr: str,
+        text_widget_attr: str,
+        title: str,
+        content: str,
+        raise_window: bool = True,
+    ) -> None:
+        window = getattr(self, window_attr)
+        text_widget = getattr(self, text_widget_attr)
+        if window is None or not window.winfo_exists() or text_widget is None or not text_widget.winfo_exists():
+            window = tk.Toplevel(self.root)
+            window.title(title)
+            window.geometry("860x620")
+            window.minsize(640, 420)
+            container = tk.Frame(window)
+            container.pack(fill="both", expand=True)
+            scrollbar = tk.Scrollbar(container)
+            scrollbar.pack(side="right", fill="y")
+            text_widget = tk.Text(
+                container,
+                wrap="word",
+                font=self.status_font,
+                padx=10,
+                pady=10,
+                yscrollcommand=scrollbar.set,
+            )
+            text_widget.pack(side="left", fill="both", expand=True)
+            scrollbar.config(command=text_widget.yview)
+            setattr(self, window_attr, window)
+            setattr(self, text_widget_attr, text_widget)
+        elif raise_window:
+            window.deiconify()
+            window.lift()
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", "end")
+        text_widget.insert("1.0", content)
+        text_widget.configure(state="disabled")
+
+    def show_api_reply_window(self, *, raise_window: bool = True) -> None:
+        self.open_text_viewer(
+            window_attr="api_reply_window",
+            text_widget_attr="api_reply_text_widget",
+            title="Planner API Reply",
+            content=self.build_api_reply_view_text(),
+            raise_window=raise_window,
+        )
+
+    def show_api_prompt_window(self, *, raise_window: bool = True) -> None:
+        self.open_text_viewer(
+            window_attr="api_prompt_window",
+            text_widget_attr="api_prompt_text_widget",
+            title="Planner API Prompt",
+            content=self.build_api_prompt_view_text(),
+            raise_window=raise_window,
+        )
+
+    def show_action_reply_window(self, *, raise_window: bool = True) -> None:
+        self.open_text_viewer(
+            window_attr="llm_action_reply_window",
+            text_widget_attr="llm_action_reply_text_widget",
+            title="LLM Action Reply",
+            content=self.build_action_reply_view_text(),
+            raise_window=raise_window,
+        )
+
+    def show_action_prompt_window(self, *, raise_window: bool = True) -> None:
+        self.open_text_viewer(
+            window_attr="llm_action_prompt_window",
+            text_widget_attr="llm_action_prompt_text_widget",
+            title="LLM Action Prompt",
+            content=self.build_action_prompt_view_text(),
+            raise_window=raise_window,
+        )
 
     def adjust_status_font(self, delta: int) -> None:
         current_size = int(self.status_font.cget("size"))
@@ -534,10 +915,13 @@ class UAVControlPanel:
         search_runtime = state.get("search_runtime", {})
         person_evidence = state.get("person_evidence_runtime", {})
         search_result = state.get("search_result", {})
+        language_memory = state.get("language_memory_runtime", {})
         planner_runtime = state.get("planner_runtime", {})
         archive = state.get("archive", {})
         reflex_runtime = state.get("reflex_runtime", {})
+        llm_action_runtime = state.get("llm_action_runtime", {})
         reflex_execution = state.get("reflex_execution", {})
+        planner_executor = state.get("planner_executor_runtime", {})
         takeover_runtime = state.get("takeover_runtime", {})
         takeover_events = state.get("takeover_recent_events", [])
         archive_current = archive.get("current_cell") if isinstance(archive.get("current_cell"), dict) else {}
@@ -654,6 +1038,86 @@ class UAVControlPanel:
             f"events={int(person_evidence.get('evidence_event_count', 0))} "
             f"loc={estimated_label}"
         )
+        language_focus = (
+            language_memory.get("current_focus_region", {})
+            if isinstance(language_memory.get("current_focus_region"), dict)
+            else {}
+        )
+        language_focus_label = str(language_focus.get("region_label", "")) or "none"
+        language_summary = self.shorten_text(
+            str(
+                language_memory.get("current_focus_summary", "")
+                or language_memory.get("global_summary", "")
+                or "idle"
+            ),
+            limit=96,
+        ) or "idle"
+        self.language_memory_var.set(
+            "LangMem "
+            f"notes={int(language_memory.get('note_count', 0))} "
+            f"regions={int(language_memory.get('region_note_count', 0))} "
+            f"focus={language_focus_label} "
+            f"summary={language_summary}"
+        )
+        plan_debug = plan.get("debug") if isinstance(plan.get("debug"), dict) else {}
+        raw_reply = str(plan_debug.get("raw_text", "") or "")
+        parsed_payload = plan_debug.get("parsed_payload", {}) if isinstance(plan_debug.get("parsed_payload"), dict) else {}
+        reply_preview_source = (
+            str(parsed_payload.get("explanation", "")).strip()
+            or str(parsed_payload.get("semantic_subgoal", "")).strip()
+            or raw_reply
+        )
+        reply_preview = self.shorten_text(reply_preview_source.replace("\n", " "), limit=120)
+        self.api_reply_var.set(
+            "APIReply "
+            f"detail={planner_runtime.get('planner_source_detail', 'none')} "
+            f"model={str(planner_runtime.get('last_model_name', '') or '-') } "
+            f"chars={len(raw_reply)} "
+            f"parsed={int(bool(parsed_payload))} "
+            f"attempts={int(plan_debug.get('attempt_count', 0) or 0)} "
+            f"preview={reply_preview or 'none'}"
+        )
+        llm_action_usage = llm_action_runtime.get("usage", {}) if isinstance(llm_action_runtime.get("usage"), dict) else {}
+        llm_action_tokens = int(
+            llm_action_usage.get(
+                "total_tokens",
+                llm_action_usage.get(
+                    "totalTokenCount",
+                    llm_action_usage.get(
+                        "total_token_count",
+                        llm_action_usage.get(
+                            "input_tokens",
+                            llm_action_usage.get(
+                                "promptTokenCount",
+                                llm_action_usage.get("prompt_token_count", 0),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            or 0
+        )
+        llm_action_parsed = llm_action_runtime.get("parsed_payload", {}) if isinstance(llm_action_runtime.get("parsed_payload"), dict) else {}
+        llm_action_preview = self.shorten_text(
+            (
+                str(llm_action_parsed.get("rationale", "")).strip()
+                or str(llm_action_runtime.get("raw_text", "")).replace("\n", " ").strip()
+            ),
+            limit=96,
+        )
+        self.llm_action_var.set(
+            "LLMAct "
+            f"status={llm_action_runtime.get('status', 'idle')} "
+            f"source={llm_action_runtime.get('source', 'none')} "
+            f"suggested={llm_action_runtime.get('suggested_action', 'hold')} "
+            f"exec={int(bool(llm_action_runtime.get('should_execute', False)))} "
+            f"stop={llm_action_runtime.get('stop_condition', 'none')} "
+            f"replan={int(bool(llm_action_runtime.get('should_request_plan', False)))} "
+            f"conf={float(llm_action_runtime.get('confidence', 0.0)):.2f} "
+            f"tokens={llm_action_tokens} "
+            f"model={str(llm_action_runtime.get('model_name', '') or '-') } "
+            f"preview={llm_action_preview or 'none'}"
+        )
         self.archive_var.set(
             "Archive "
             f"cell={self.shorten_cell_id(str(runtime_debug.get('archive_cell_id', archive.get('current_cell_id', '')))) or 'none'} "
@@ -687,6 +1151,21 @@ class UAVControlPanel:
             f"exec={reflex_execution.get('last_executed_action', '') or 'none'} "
             f"count={int(reflex_execution.get('execution_count', 0))}"
         )
+        self.planner_executor_var.set(
+            "PlanExec "
+            f"mode={planner_executor.get('mode', 'manual')} "
+            f"active={int(bool(planner_executor.get('active', False)))} "
+            f"state={planner_executor.get('state', 'idle')} "
+            f"subgoal={planner_executor.get('current_search_subgoal', 'idle')} "
+            f"budget={int(planner_executor.get('step_budget', 0))} "
+            f"every={int(planner_executor.get('plan_refresh_interval_steps', 0))} "
+            f"steps={int(planner_executor.get('steps_executed', 0))} "
+            f"replans={int(planner_executor.get('replan_count', 0))} "
+            f"blocked={int(planner_executor.get('blocked_count', 0))} "
+            f"action={planner_executor.get('last_action', 'idle')} "
+            f"progress={float(planner_executor.get('last_progress_cm', 0.0)):.1f} "
+            f"stop={planner_executor.get('last_stop_reason', 'none') or 'none'}"
+        )
         self.takeover_var.set(
             "Takeover "
             f"active={int(bool(takeover_runtime.get('active', False)))} "
@@ -698,6 +1177,14 @@ class UAVControlPanel:
             f"last={takeover_runtime.get('last_event_type', 'none')} "
             f"recent={len(takeover_events) if isinstance(takeover_events, list) else 0}"
         )
+        if self.api_reply_window is not None and self.api_reply_window.winfo_exists():
+            self.show_api_reply_window(raise_window=False)
+        if self.api_prompt_window is not None and self.api_prompt_window.winfo_exists():
+            self.show_api_prompt_window(raise_window=False)
+        if self.llm_action_reply_window is not None and self.llm_action_reply_window.winfo_exists():
+            self.show_action_reply_window(raise_window=False)
+        if self.llm_action_prompt_window is not None and self.llm_action_prompt_window.winfo_exists():
+            self.show_action_prompt_window(raise_window=False)
 
     def update_state_once(self) -> None:
         state = self.safe_request(self.client.get_json, "/state")
@@ -828,9 +1315,13 @@ class UAVControlPanel:
         self.build_status_label(status_frame, self.plan_var)
         self.build_status_label(status_frame, self.mission_var)
         self.build_status_label(status_frame, self.evidence_var)
+        self.build_status_label(status_frame, self.language_memory_var)
+        self.build_status_label(status_frame, self.api_reply_var)
+        self.build_status_label(status_frame, self.llm_action_var)
         self.build_status_label(status_frame, self.archive_var)
         self.build_status_label(status_frame, self.reflex_var)
         self.build_status_label(status_frame, self.executor_var)
+        self.build_status_label(status_frame, self.planner_executor_var)
         self.build_status_label(status_frame, self.takeover_var)
 
         mission_frame = tk.LabelFrame(content, text="Mission And Notes", padx=10, pady=8)
@@ -925,7 +1416,15 @@ class UAVControlPanel:
                 ("Request Plan (P)", self.request_plan),
                 ("Request Reflex (T)", self.request_reflex),
                 ("Execute Reflex (Y)", self.execute_reflex),
+                ("Request LLM Action", self.request_llm_action),
+                ("Execute LLM Action", self.execute_llm_action),
+                ("Execute Plan Segment", self.execute_plan_segment),
+                ("Execute LLM Action Segment", self.execute_llm_action_segment),
                 ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
+                ("View API Reply", self.show_api_reply_window),
+                ("View API Prompt", self.show_api_prompt_window),
+                ("View LLM Reply", self.show_action_reply_window),
+                ("View LLM Prompt", self.show_action_prompt_window),
             ]
         ):
             tk.Button(planner_frame, text=label, command=callback, width=18).grid(
@@ -935,6 +1434,31 @@ class UAVControlPanel:
                 pady=6,
                 sticky="ew",
             )
+        planner_segment_frame = tk.Frame(planner_frame)
+        planner_segment_frame.grid(row=11, column=0, sticky="ew", padx=6, pady=(6, 0))
+        tk.Label(planner_segment_frame, text="Seg Steps").grid(row=0, column=0, sticky="w")
+        tk.Entry(planner_segment_frame, textvariable=self.plan_segment_steps_var, width=6).grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(6, 10),
+        )
+        tk.Label(planner_segment_frame, text="Plan Every").grid(row=0, column=2, sticky="w")
+        tk.Entry(planner_segment_frame, textvariable=self.plan_segment_replan_interval_var, width=6).grid(
+            row=0,
+            column=3,
+            sticky="ew",
+            padx=(6, 0),
+        )
+        planner_segment_frame.grid_columnconfigure(1, weight=1)
+        planner_segment_frame.grid_columnconfigure(3, weight=1)
+        tk.Label(
+            planner_frame,
+            text="`Execute Plan Segment` refreshes the high-level plan. `Execute LLM Action Segment` asks the API for each step. Set `Plan Every=1` to also refresh the high-level plan each step.",
+            anchor="w",
+            justify="left",
+            wraplength=220,
+        ).grid(row=12, column=0, sticky="ew", padx=6, pady=(8, 0))
         planner_frame.grid_columnconfigure(0, weight=1)
 
         planner_config_frame = tk.LabelFrame(control_groups, text="Planner Routing", padx=8, pady=8)

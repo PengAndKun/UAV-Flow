@@ -2678,3 +2678,246 @@ Current interpretation:
 - the current `WinError 10053` issue is a client-timeout/disconnect problem, not evidence that the planner stack crashed
 - the current system already has LLM-driven planning, but not LLM-driven exploration execution
 - the next meaningful milestone is a bounded planner-owned execution segment rather than jumping directly to unconstrained background autonomy
+
+### Phase 4.6 Stage A Implementation Kickoff
+
+Completed:
+- added `planner_executor_runtime` schema and server-side runtime state
+- added planner executor routes in `uav_control_server.py`:
+  - `GET /planner_executor`
+  - `POST /execute_plan_segment`
+- implemented a first bounded execution loop:
+  - optional refresh-plan at segment start
+  - step-budgeted waypoint/reflex-guided motion
+  - stop on takeover, evidence change, blocked motion, or waypoint reached
+- extended `/state` and capture bundles to include `planner_executor_runtime`
+- updated `uav_control_panel.py` with:
+  - `Plan Executor` runtime status line
+  - `Execute Plan Segment` button
+  - background-thread request handling for:
+    - move commands
+    - capture
+    - set task
+    - request plan
+    - request reflex
+    - execute reflex
+    - apply/refresh planner config
+    - execute plan segment
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/runtime_interfaces.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_server.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+
+Expected user-facing outcome:
+- the panel should feel much less frozen during slow planner/model requests
+- users can trigger a bounded planner-owned search segment without manually issuing every move
+- later experiments can compare:
+  - manual planner-only
+  - planner-driven segment execution
+  - future continuous auto-search
+
+### Paper Experiment Runbook Added
+
+Added a dedicated experiment runbook:
+- [paper_experiment_runbook.md](/E:/github/UAV-Flow/docs/paper_experiment_runbook.md)
+
+This document now serves as the main operating manual for:
+- heuristic baseline
+- Gemini Lite
+- Gemini Flash
+- planner-only experiments
+- `execute_plan_segment` planner-driven exploration experiments
+- output collection and troubleshooting
+
+### Phase 4.6 Language Search Memory Added
+
+Completed:
+- added a dedicated language-memory module:
+  - [language_search_memory.py](/E:/github/UAV-Flow/UAV-Flow-Eval/language_search_memory.py)
+- added shared runtime schema support:
+  - [runtime_interfaces.py](/E:/github/UAV-Flow/UAV-Flow-Eval/runtime_interfaces.py)
+  - `build_language_search_memory_state`
+  - `language_memory_runtime` in planner requests
+- integrated language memory into [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py):
+  - reset on new task label
+  - sync on mission/search/archive updates
+  - append planner/evidence notes
+  - expose in `/state`
+  - persist in capture bundles
+- integrated language memory into [llm_planner_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_planner_adapter.py):
+  - planner prompt now includes:
+    - global search-memory summary
+    - current focus region summary
+    - recent language notes
+    - region-level notes
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py):
+  - added `LangMem` runtime status line
+  - shows note count, region-note count, current focus region, and summary
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/runtime_interfaces.py`
+- `python -m py_compile UAV-Flow-Eval/language_search_memory.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_server.py`
+- `python -m py_compile UAV-Flow-Eval/llm_planner_adapter.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+- smoke test:
+  - language memory can build summaries
+  - planner prompt contains `language_memory=...`
+
+Current interpretation:
+- the system now has:
+  - structured spatial/search memory via archive
+  - language-first planner memory via `language_memory_runtime`
+- this is the first concrete step toward “记忆成语言” for person-search missions
+- the next natural experiment is to compare planner behavior with and without the new language memory summaries
+
+### Phase 4.6 Planner API Reply Viewer Added
+
+Completed:
+- extended [llm_planner_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_planner_adapter.py) planner debug payload with:
+  - `parsed_payload`
+  - `response_text_preview`
+  - `system_prompt_excerpt`
+  - `user_prompt_excerpt`
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py):
+  - added `APIReply` runtime status line
+  - added `View API Reply` button
+  - added `View API Prompt` button
+  - added popup viewers for the latest raw API reply and prompt excerpts
+- panel can now directly inspect:
+  - raw LLM reply text
+  - parsed structured payload
+  - prompt excerpts sent to the model
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/llm_planner_adapter.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+
+Current interpretation:
+- the planner had already stored `raw_text`, but it was not visible during live runs
+- the new viewer closes that observability gap:
+  - you can now judge whether the LLM reply actually matches the intended person-search behavior
+  - this is especially useful when API calls feel too sparse or too abstract
+- current API usage is still sparse high-level planning rather than per-action control
+- the next natural step, if needed, is a dedicated pure-LLM action mode or a tighter planner-owned execution loop
+
+### Phase 4.6 Planner Replan-Per-Step Segment Added
+
+Completed:
+- extended [runtime_interfaces.py](/E:/github/UAV-Flow/UAV-Flow-Eval/runtime_interfaces.py):
+  - `planner_executor_runtime` now records:
+    - `refresh_plan`
+    - `plan_refresh_interval_steps`
+- extended [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py):
+  - `POST /execute_plan_segment` now accepts `plan_refresh_interval_steps`
+  - planner-driven segment execution can refresh the external planner every `N` executed steps
+  - `replan_count` is returned in the segment result and runtime state
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py):
+  - added `Seg Steps`
+  - added `Plan Every`
+  - added a hint that `Plan Every=1` means refresh the LLM planner before each executed step
+  - `PlanExec` status line now shows:
+    - `every=...`
+    - `replans=...`
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/runtime_interfaces.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_server.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+
+Current interpretation:
+- this is the first concrete bridge between sparse high-level planning and more continuous API-driven exploration
+- setting `Plan Every=1` does not yet make the LLM output raw motor actions, but it does force the planner API to participate before each executed segment step
+- this is the recommended experiment mode when the goal is to study whether frequent LLM replanning improves house-search behavior
+
+### Phase 4.6 Pure LLM Action Chain Added
+
+Completed:
+- added a dedicated pure-LLM action adapter:
+  - [llm_action_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_action_adapter.py)
+- extended [runtime_interfaces.py](/E:/github/UAV-Flow/UAV-Flow-Eval/runtime_interfaces.py):
+  - `build_llm_action_runtime_state`
+  - `coerce_llm_action_runtime_payload`
+  - `build_llm_action_request`
+- extended [planner_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/planner_server.py):
+  - added `/action`
+  - supports:
+    - pure LLM action generation
+    - heuristic fallback action generation
+- extended [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py):
+  - added `llm_action_runtime`
+  - added `last_llm_action_request`
+  - added `/request_llm_action`
+  - added `/execute_llm_action`
+  - added `/execute_llm_action_segment`
+  - segment execution can repeatedly:
+    - query LLM action
+    - execute one macro action
+    - optionally refresh the high-level planner
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py):
+  - added `LLMAct` runtime status line
+  - added:
+    - `Request LLM Action`
+    - `Execute LLM Action`
+    - `Execute LLM Action Segment`
+    - `View LLM Reply`
+    - `View LLM Prompt`
+  - action reply/prompt viewers now expose:
+    - raw API text
+    - parsed action payload
+    - prompt excerpts
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/runtime_interfaces.py`
+- `python -m py_compile UAV-Flow-Eval/llm_action_adapter.py`
+- `python -m py_compile UAV-Flow-Eval/planner_server.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_server.py`
+- `python -m py_compile UAV-Flow-Eval/uav_control_panel.py`
+
+Current interpretation:
+- the system now supports two distinct LLM control modes:
+  - sparse high-level search planning
+  - denser step-wise pure LLM action selection
+- this directly addresses the earlier concern that API participation felt too sparse during live exploration
+- the next natural experiment is to compare:
+  - `Gemini Lite/Flash` planner-only
+  - `Gemini Lite/Flash + Execute Plan Segment`
+  - `Gemini Lite/Flash + Execute LLM Action Segment`
+
+### Phase 5 Recognition Mission Manual Started
+
+Completed:
+- added a dedicated Phase 5 mission-manual builder:
+  - [phase5_mission_manual.py](/E:/github/UAV-Flow/UAV-Flow-Eval/phase5_mission_manual.py)
+- added a validation script:
+  - [validate_phase5_mission_manual.py](/E:/github/UAV-Flow/UAV-Flow-Eval/validate_phase5_mission_manual.py)
+- added a Phase 5 design document:
+  - [phase5_recognition_mission_plan.md](/E:/github/UAV-Flow/docs/phase5_recognition_mission_plan.md)
+
+Current scope:
+- the task `search the house for people` is now explicitly decomposed into staged recognition/execution phases:
+  - localize context
+  - find entry door
+  - approach entry
+  - cross entry
+  - structured house search
+  - verify target
+  - report result
+- added an `environment_context` hypothesis layer:
+  - `inside_house`
+  - `outside_house`
+  - `unknown`
+- this is the first concrete step toward pre-mission “task skill/manual generation” before actual search execution
+
+Validation:
+- `python -m py_compile UAV-Flow-Eval/phase5_mission_manual.py`
+- `python -m py_compile UAV-Flow-Eval/validate_phase5_mission_manual.py`
+- `python UAV-Flow-Eval/validate_phase5_mission_manual.py`
+
+Current interpretation:
+- the project now has a formal Phase 5 entry point
+- current recognition still lacks a true doorway detector, but the mission manual now makes the dependency explicit
+- the next natural implementation step is:
+  - add `doorway_runtime`
+  - feed doorway candidates into the mission manual, planner prompt, and action prompt

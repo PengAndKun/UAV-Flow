@@ -34,11 +34,15 @@ from batch_run_act_all import (
     validate_env_binary_exists,
 )
 from gym_unrealcv.envs.wrappers import augmentation, configUE, time_dilation
+from language_search_memory import LanguageSearchMemory
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
 from runtime_interfaces import (
+    build_llm_action_request,
+    build_llm_action_runtime_state,
     build_mission_state,
     build_plan_request,
     build_plan_state,
+    build_planner_executor_runtime_state,
     build_person_evidence_runtime_state,
     build_reflex_request,
     build_reflex_runtime_state,
@@ -48,6 +52,7 @@ from runtime_interfaces import (
     build_search_result_state,
     build_search_runtime_state,
     build_waypoint,
+    coerce_llm_action_runtime_payload,
     coerce_plan_payload,
     coerce_reflex_runtime_payload,
     now_timestamp,
@@ -72,6 +77,7 @@ REFLEX_ACTION_ALIASES = {
     "down": "down",
     "yaw_left": "yaw_left",
     "yaw_right": "yaw_right",
+    "hold": "hold_position",
     "hold_position": "hold_position",
     "shield_hold": "shield_hold",
     "idle": "idle",
@@ -351,6 +357,14 @@ class UAVControlBackend:
             "skipped_count": 0,
             "blocked_count": 0,
         }
+        self.planner_executor_state: Dict[str, Any] = build_planner_executor_runtime_state(
+            mode="manual",
+            active=False,
+            state="idle",
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            current_plan_id=str(self.current_plan.get("plan_id", "")),
+            current_search_subgoal=str(self.current_plan.get("search_subgoal", "idle")),
+        )
         self.takeover_events: List[Dict[str, Any]] = []
         self.takeover_event_counter: int = 0
         self.takeover_state: Dict[str, Any] = {
@@ -380,6 +394,22 @@ class UAVControlBackend:
             depth_bin_cm=float(self.args.archive_depth_bin_cm),
             recent_limit=int(self.args.archive_recent_limit),
         )
+        self.language_search_memory = LanguageSearchMemory(
+            recent_limit=max(6, int(self.args.search_recent_limit)),
+            region_limit=max(4, int(self.args.archive_retrieval_limit)),
+        )
+        self.language_memory_runtime: Dict[str, Any] = self.language_search_memory.reset(
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
+            task_label=self.current_task_label,
+        )
+        self.llm_action_runtime: Dict[str, Any] = build_llm_action_runtime_state(
+            policy_name=self.args.planner_name,
+            source="none",
+            status="idle",
+        )
+        self.last_llm_action_request: Dict[str, Any] = {}
+        self.recent_action_history: List[Dict[str, Any]] = []
 
         os.makedirs(self.args.capture_dir, exist_ok=True)
         os.makedirs(self.args.takeover_log_dir, exist_ok=True)
@@ -544,7 +574,22 @@ class UAVControlBackend:
 
     def sync_search_runtime(self, archive_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self.search_runtime = self.build_search_runtime_snapshot(archive_state)
+        self.sync_language_memory(archive_state)
         return self.search_runtime
+
+    def sync_language_memory(self, archive_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        archive_snapshot = archive_state
+        if archive_snapshot is None:
+            archive_snapshot = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+        self.language_memory_runtime = self.language_search_memory.sync(
+            mission=self.current_mission,
+            search_runtime=self.search_runtime,
+            person_evidence_runtime=self.person_evidence_runtime,
+            search_result=self.search_result,
+            archive_state=archive_snapshot,
+            current_plan=self.current_plan,
+        )
+        return self.language_memory_runtime
 
     def sync_mission_from_plan(self) -> Dict[str, Any]:
         candidate_regions = self.current_plan.get("candidate_regions") if isinstance(self.current_plan.get("candidate_regions"), list) else []
@@ -826,6 +871,14 @@ class UAVControlBackend:
             before_snapshot=before_snapshot,
             after_snapshot=after_snapshot,
         )
+        self.language_search_memory.record_evidence(
+            event_type=normalized_action,
+            note=str(note or ""),
+            region=region,
+            confidence=confidence_value,
+            search_result=self.search_result,
+        )
+        self.sync_language_memory()
         logger.info(
             "Person evidence action=%s region=%s confidence=%.2f mission=%s",
             normalized_action,
@@ -1180,9 +1233,408 @@ class UAVControlBackend:
             execution_state["skipped_count"] = int(execution_state.get("skipped_count", 0)) + 1
         return execution_state
 
+    def build_planner_executor_snapshot(self) -> Dict[str, Any]:
+        current_waypoint = (
+            self.runtime_debug.get("current_waypoint")
+            if isinstance(self.runtime_debug.get("current_waypoint"), dict)
+            else {}
+        )
+        current_state = self.planner_executor_state if isinstance(self.planner_executor_state, dict) else {}
+        return build_planner_executor_runtime_state(
+            mode=str(current_state.get("mode", "manual") or "manual"),
+            active=bool(current_state.get("active", False)),
+            state=str(current_state.get("state", "idle") or "idle"),
+            run_id=str(current_state.get("run_id", "") or ""),
+            mission_id=str(self.current_mission.get("mission_id", current_state.get("mission_id", "")) or ""),
+            trigger=str(current_state.get("trigger", "") or ""),
+            current_plan_id=str(self.current_plan.get("plan_id", current_state.get("current_plan_id", "")) or ""),
+            current_search_subgoal=str(
+                self.search_runtime.get(
+                    "current_search_subgoal",
+                    self.current_plan.get("search_subgoal", current_state.get("current_search_subgoal", "idle")),
+                )
+                or "idle"
+            ),
+            target_waypoint=current_waypoint,
+            step_budget=int(current_state.get("step_budget", 0)),
+            refresh_plan=bool(current_state.get("refresh_plan", False)),
+            plan_refresh_interval_steps=int(current_state.get("plan_refresh_interval_steps", 0)),
+            steps_executed=int(current_state.get("steps_executed", 0)),
+            blocked_count=int(current_state.get("blocked_count", 0)),
+            replan_count=int(current_state.get("replan_count", 0)),
+            last_action=str(current_state.get("last_action", "idle") or "idle"),
+            last_progress_cm=float(current_state.get("last_progress_cm", 0.0)),
+            last_stop_reason=str(current_state.get("last_stop_reason", "") or ""),
+            last_stop_detail=str(current_state.get("last_stop_detail", "") or ""),
+            started_at=str(current_state.get("started_at", "") or now_timestamp()),
+            updated_at=now_timestamp(),
+        )
+
+    def update_planner_executor_state(self, **updates: Any) -> Dict[str, Any]:
+        state = self.build_planner_executor_snapshot()
+        state.update(updates)
+        self.planner_executor_state = build_planner_executor_runtime_state(
+            mode=str(state.get("mode", "manual") or "manual"),
+            active=bool(state.get("active", False)),
+            state=str(state.get("state", "idle") or "idle"),
+            run_id=str(state.get("run_id", "") or ""),
+            mission_id=str(state.get("mission_id", self.current_mission.get("mission_id", "")) or ""),
+            trigger=str(state.get("trigger", "") or ""),
+            current_plan_id=str(state.get("current_plan_id", self.current_plan.get("plan_id", "")) or ""),
+            current_search_subgoal=str(
+                state.get(
+                    "current_search_subgoal",
+                    self.current_plan.get("search_subgoal", self.search_runtime.get("current_search_subgoal", "idle")),
+                )
+                or "idle"
+            ),
+            target_waypoint=state.get("target_waypoint") if isinstance(state.get("target_waypoint"), dict) else {},
+            step_budget=int(state.get("step_budget", 0)),
+            refresh_plan=bool(state.get("refresh_plan", False)),
+            plan_refresh_interval_steps=int(state.get("plan_refresh_interval_steps", 0)),
+            steps_executed=int(state.get("steps_executed", 0)),
+            blocked_count=int(state.get("blocked_count", 0)),
+            replan_count=int(state.get("replan_count", 0)),
+            last_action=str(state.get("last_action", "idle") or "idle"),
+            last_progress_cm=float(state.get("last_progress_cm", 0.0)),
+            last_stop_reason=str(state.get("last_stop_reason", "") or ""),
+            last_stop_detail=str(state.get("last_stop_detail", "") or ""),
+            started_at=str(state.get("started_at", "") or now_timestamp()),
+            updated_at=now_timestamp(),
+        )
+        return self.planner_executor_state
+
+    def get_recent_action_history(self, limit: int = 8) -> List[Dict[str, Any]]:
+        count = max(1, int(limit))
+        return [dict(item) for item in self.recent_action_history[-count:] if isinstance(item, dict)]
+
+    def build_heuristic_llm_action_runtime(self, *, trigger: str, reason: str) -> Dict[str, Any]:
+        archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+        heuristic_reflex = self.build_heuristic_reflex_runtime(archive_state, trigger=f"{trigger}_heuristic_action")
+        suggested_action = normalize_reflex_action_name(heuristic_reflex.get("suggested_action", "hold_position"))
+        if suggested_action in ("idle", "", "shield_hold"):
+            suggested_action = "hold"
+        elif suggested_action == "hold_position":
+            suggested_action = "hold"
+        return build_llm_action_runtime_state(
+            action_id=f"heuristic_llm_action_{self.last_observation_id}",
+            mode="llm_action_only",
+            policy_name=self.args.planner_name,
+            source="local_heuristic",
+            status="fallback",
+            suggested_action=suggested_action,
+            should_execute=suggested_action not in ("hold", "hold_position", "idle"),
+            confidence=float(heuristic_reflex.get("policy_confidence", 0.0) or 0.0),
+            rationale=str(reason or "Heuristic action fallback"),
+            stop_condition="continue_search",
+            should_request_plan=False,
+            last_trigger=trigger,
+            last_latency_ms=0.0,
+            risk_score=float(self.runtime_debug.get("risk_score", 0.0) or 0.0),
+            model_name=str(self.plan_execution_state.get("last_model_name", "") or ""),
+            api_style=str(self.plan_execution_state.get("last_api_style", "") or ""),
+            route_mode=str(self.plan_execution_state.get("planner_route_mode", "") or ""),
+            usage={},
+            attempt_count=0,
+            fallback_used=True,
+            fallback_reason=str(reason or ""),
+            upstream_error=str(reason or ""),
+            raw_text="",
+            parsed_payload={
+                "action": suggested_action,
+                "confidence": float(heuristic_reflex.get("policy_confidence", 0.0) or 0.0),
+                "rationale": str(reason or "Heuristic action fallback"),
+                "stop_condition": "continue_search",
+                "should_request_plan": False,
+            },
+        )
+
+    def request_llm_action(
+        self,
+        *,
+        trigger: str = "manual_request",
+        refresh_observations: bool = True,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            if refresh_observations or self.last_raw_frame is None or self.last_depth_frame is None:
+                frame = self.refresh_observations()
+            else:
+                frame = self.last_raw_frame
+            pose = self.get_task_pose()
+            archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            if not self.should_preserve_reflex_runtime():
+                self.sync_reflex_runtime(archive_state, trigger=f"{trigger}_state_sync")
+            waypoint_hint = str(self.current_plan.get("semantic_subgoal", "") or self.search_runtime.get("current_search_subgoal", "") or "")
+            action_request = build_llm_action_request(
+                task_label=self.current_task_label or "idle",
+                instruction=self.current_task_label or self.current_mission.get("mission_type", "semantic_navigation"),
+                frame_id=self.last_observation_id,
+                timestamp=self.last_observation_time,
+                pose={
+                    "x": pose[0],
+                    "y": pose[1],
+                    "z": pose[2],
+                    "yaw": pose[3],
+                },
+                depth=self.last_depth_summary,
+                camera_info=self.last_depth_summary.get("camera_info", {}),
+                image_b64=encode_image_b64(frame, self.args.frame_jpeg_quality),
+                planner_name=self.args.planner_name,
+                trigger=trigger,
+                step_index=int(self.plan_execution_state.get("step_index", 0)),
+                mission=self.current_mission,
+                search_runtime=self.search_runtime,
+                person_evidence_runtime=self.person_evidence_runtime,
+                search_result=self.search_result,
+                language_memory_runtime=self.language_memory_runtime,
+                current_plan=self.current_plan,
+                reflex_runtime=self.reflex_runtime,
+                runtime_debug=self.runtime_debug,
+                context={
+                    "recent_actions": self.get_recent_action_history(limit=8),
+                    "waypoint_hint": waypoint_hint,
+                    "archive": self.archive_runtime.get_planner_context(
+                        task_label=self.current_task_label or "idle",
+                        semantic_subgoal=str(self.current_plan.get("semantic_subgoal", "idle") or "idle"),
+                        limit=int(self.args.archive_retrieval_limit),
+                    ),
+                },
+            )
+            self.last_llm_action_request = action_request
+            if not self.args.planner_url:
+                self.llm_action_runtime = self.build_heuristic_llm_action_runtime(trigger=trigger, reason="planner_url_unconfigured")
+                return self.llm_action_runtime
+            action_started = datetime.now().timestamp()
+            req = request.Request(
+                f"{self.args.planner_url.rstrip('/')}{self.args.planner_action_endpoint}",
+                data=json.dumps(action_request).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with request.urlopen(req, timeout=self.args.planner_timeout_s) as resp:
+                    raw = json.loads(resp.read().decode("utf-8"))
+                payload = raw.get("llm_action_runtime") if isinstance(raw, dict) and isinstance(raw.get("llm_action_runtime"), dict) else raw
+                self.llm_action_runtime = coerce_llm_action_runtime_payload(
+                    payload,
+                    default_policy_name=self.args.planner_name,
+                    default_source="external_action",
+                )
+                self.llm_action_runtime["last_trigger"] = trigger
+                self.llm_action_runtime["last_latency_ms"] = float(self.llm_action_runtime.get("last_latency_ms", round((datetime.now().timestamp() - action_started) * 1000.0, 2)) or 0.0)
+                return self.llm_action_runtime
+            except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+                logger.warning("LLM action request failed, fallback to heuristic action runtime: %s", exc)
+                self.llm_action_runtime = self.build_heuristic_llm_action_runtime(trigger=trigger, reason=str(exc))
+                self.llm_action_runtime["last_latency_ms"] = round((datetime.now().timestamp() - action_started) * 1000.0, 2)
+                return self.llm_action_runtime
+
+    def execute_llm_action(
+        self,
+        *,
+        trigger: str = "manual_execute",
+        refresh_action: bool = True,
+        allow_auto_plan: bool = False,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            llm_action_runtime = self.request_llm_action(trigger=trigger) if refresh_action else self.llm_action_runtime
+            requested_action = normalize_reflex_action_name(llm_action_runtime.get("suggested_action", "hold"))
+            stop_condition = str(llm_action_runtime.get("stop_condition", "continue_search") or "continue_search")
+            if requested_action in ("idle", "hold_position", "hold", "shield_hold"):
+                return {
+                    "status": "ok",
+                    "executed": False,
+                    "reason": stop_condition if stop_condition else "hold_action",
+                    "requested_action": requested_action,
+                    "llm_action_runtime": llm_action_runtime,
+                    "state": self.get_state(),
+                }
+            motion_payload = self.build_motion_payload_for_action(requested_action)
+            if motion_payload is None:
+                self.llm_action_runtime["status"] = "unsupported_action"
+                self.llm_action_runtime["upstream_error"] = f"Unsupported action={requested_action}"
+                return {
+                    "status": "ok",
+                    "executed": False,
+                    "reason": "unsupported_action",
+                    "requested_action": requested_action,
+                    "llm_action_runtime": self.llm_action_runtime,
+                    "state": self.get_state(),
+                }
+            state = self._apply_motion_step(
+                forward_cm=float(motion_payload.get("forward_cm", 0.0)),
+                right_cm=float(motion_payload.get("right_cm", 0.0)),
+                up_cm=float(motion_payload.get("up_cm", 0.0)),
+                yaw_delta_deg=float(motion_payload.get("yaw_delta_deg", 0.0)),
+                action_name=str(motion_payload.get("action_name", requested_action)),
+                action_origin="llm_action",
+                trigger_auto_plan=allow_auto_plan and bool(llm_action_runtime.get("should_request_plan", False)),
+                trigger_reflex_update=False,
+                allow_reflex_assist=False,
+            )
+            self.llm_action_runtime["status"] = "executed"
+            return {
+                "status": "ok",
+                "executed": True,
+                "reason": "ok",
+                "requested_action": requested_action,
+                "executed_action": str(motion_payload.get("action_name", requested_action)),
+                "llm_action_runtime": self.llm_action_runtime,
+                "state": state,
+            }
+
+    def execute_llm_action_segment(
+        self,
+        *,
+        step_budget: int = 5,
+        refresh_plan: bool = True,
+        plan_refresh_interval_steps: int = 0,
+        trigger: str = "manual_llm_action_segment",
+    ) -> Dict[str, Any]:
+        with self.lock:
+            budget = max(1, min(int(step_budget), 25))
+            replan_interval = max(0, int(plan_refresh_interval_steps))
+            run_id = f"llm_action_segment_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{int(self.plan_execution_state.get('step_index', 0)):04d}"
+            self.update_planner_executor_state(
+                mode="llm_action_segment",
+                active=True,
+                state="running",
+                run_id=run_id,
+                mission_id=str(self.current_mission.get("mission_id", "")),
+                trigger=str(trigger or "manual_llm_action_segment"),
+                current_plan_id=str(self.current_plan.get("plan_id", "")),
+                current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                step_budget=budget,
+                refresh_plan=bool(refresh_plan),
+                plan_refresh_interval_steps=replan_interval,
+                steps_executed=0,
+                blocked_count=0,
+                replan_count=0,
+                last_action="idle",
+                last_progress_cm=0.0,
+                last_stop_reason="",
+                last_stop_detail="",
+                started_at=now_timestamp(),
+            )
+            replan_count = 0
+            if refresh_plan:
+                self.request_plan(trigger=f"{trigger}_plan")
+                replan_count = 1
+                self.update_planner_executor_state(
+                    replan_count=replan_count,
+                    current_plan_id=str(self.current_plan.get("plan_id", "")),
+                    current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                    target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                )
+            steps_executed = 0
+            blocked_count = 0
+            stop_reason = "budget_exhausted"
+            stop_detail = ""
+            last_action = "idle"
+            for step_idx in range(budget):
+                if bool(self.takeover_state.get("active", False)):
+                    stop_reason = "takeover_active"
+                    stop_detail = "Manual takeover is active."
+                    break
+                evidence_status = str(self.person_evidence_runtime.get("evidence_status", "idle") or "idle")
+                if evidence_status in ("suspect", "confirmed_present", "confirmed_absent"):
+                    stop_reason = "evidence_state"
+                    stop_detail = evidence_status
+                    break
+                if replan_interval > 0 and steps_executed > 0 and (steps_executed % replan_interval) == 0:
+                    self.request_plan(trigger=f"{trigger}_replan_{steps_executed}")
+                    replan_count += 1
+                    self.update_planner_executor_state(
+                        replan_count=replan_count,
+                        current_plan_id=str(self.current_plan.get("plan_id", "")),
+                        current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                        target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                    )
+                before_wp_distance = float(self.reflex_runtime.get("waypoint_distance_cm", 0.0) or 0.0)
+                llm_action_runtime = self.request_llm_action(trigger=f"{trigger}_step_{step_idx + 1}", refresh_observations=True)
+                requested_action = normalize_reflex_action_name(llm_action_runtime.get("suggested_action", "hold"))
+                stop_condition = str(llm_action_runtime.get("stop_condition", "continue_search") or "continue_search")
+                if requested_action in ("idle", "hold_position", "hold", "shield_hold"):
+                    blocked_count += 1
+                    stop_reason = stop_condition if stop_condition != "continue_search" else "hold_action"
+                    stop_detail = str(llm_action_runtime.get("rationale", "") or "LLM returned hold")
+                    break
+                motion_payload = self.build_motion_payload_for_action(requested_action)
+                if motion_payload is None:
+                    blocked_count += 1
+                    stop_reason = "unsupported_action"
+                    stop_detail = requested_action
+                    break
+                self._apply_motion_step(
+                    forward_cm=float(motion_payload.get("forward_cm", 0.0)),
+                    right_cm=float(motion_payload.get("right_cm", 0.0)),
+                    up_cm=float(motion_payload.get("up_cm", 0.0)),
+                    yaw_delta_deg=float(motion_payload.get("yaw_delta_deg", 0.0)),
+                    action_name=str(motion_payload.get("action_name", requested_action)),
+                    action_origin="llm_action",
+                    trigger_auto_plan=False,
+                    trigger_reflex_update=False,
+                    allow_reflex_assist=False,
+                )
+                steps_executed += 1
+                last_action = str(motion_payload.get("action_name", requested_action))
+                after_wp_distance = float(self.reflex_runtime.get("waypoint_distance_cm", 0.0) or 0.0)
+                last_progress_cm = before_wp_distance - after_wp_distance if before_wp_distance > 0.0 and after_wp_distance > 0.0 else 0.0
+                self.update_planner_executor_state(
+                    steps_executed=steps_executed,
+                    blocked_count=blocked_count,
+                    replan_count=replan_count,
+                    current_plan_id=str(self.current_plan.get("plan_id", "")),
+                    current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                    target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                    last_action=last_action,
+                    last_progress_cm=last_progress_cm,
+                    last_stop_reason="",
+                    last_stop_detail=str(llm_action_runtime.get("rationale", "") or ""),
+                )
+                if bool(llm_action_runtime.get("should_request_plan", False)):
+                    self.request_plan(trigger=f"{trigger}_llm_replan_{steps_executed}")
+                    replan_count += 1
+                    self.update_planner_executor_state(
+                        replan_count=replan_count,
+                        current_plan_id=str(self.current_plan.get("plan_id", "")),
+                        current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                        target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                    )
+                if stop_condition in {"need_manual_review", "target_confirmed", "hold_position"}:
+                    stop_reason = stop_condition
+                    stop_detail = str(llm_action_runtime.get("rationale", "") or stop_condition)
+                    break
+            if stop_reason == "budget_exhausted" and steps_executed <= 0 and blocked_count > 0:
+                stop_reason = "blocked"
+            final_state_label = "completed" if stop_reason in ("budget_exhausted", "target_confirmed") else "stopped"
+            self.update_planner_executor_state(
+                active=False,
+                state=final_state_label,
+                steps_executed=steps_executed,
+                blocked_count=blocked_count,
+                replan_count=replan_count,
+                last_action=last_action,
+                last_stop_reason=stop_reason,
+                last_stop_detail=stop_detail,
+            )
+            return {
+                "status": "ok",
+                "segment_executed": bool(steps_executed > 0),
+                "steps_executed": int(steps_executed),
+                "step_budget": int(budget),
+                "stop_reason": stop_reason,
+                "stop_detail": stop_detail,
+                "replan_count": int(replan_count),
+                "llm_action_runtime": self.llm_action_runtime,
+                "planner_executor_runtime": self.planner_executor_state,
+                "state": self.get_state(),
+            }
+
     def build_motion_payload_for_action(self, action_name: str) -> Optional[Dict[str, Any]]:
         action = normalize_reflex_action_name(action_name)
-        if action in ("idle", "hold_position", "shield_hold", ""):
+        if action in ("idle", "hold_position", "shield_hold", "", "hold"):
             return None
         if action == "forward":
             return {"forward_cm": float(self.args.move_step_cm), "action_name": "forward"}
@@ -1236,6 +1688,185 @@ class UAVControlBackend:
         if self.build_motion_payload_for_action(action_name) is None:
             return False, "unsupported_action", action_name
         return True, "ok", action_name
+
+    def build_planner_executor_motion_payload(
+        self,
+        *,
+        trigger: str,
+        allow_reflex: bool = True,
+    ) -> Tuple[Optional[Dict[str, Any]], str, str]:
+        archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+        if allow_reflex:
+            reflex_runtime = self.request_reflex_policy(trigger=trigger, archive_snapshot=archive_state)
+            allowed, _reason, action_name = self.evaluate_reflex_execution_gate(reflex_runtime)
+            if allowed:
+                payload = self.build_motion_payload_for_action(action_name)
+                if payload is not None:
+                    return payload, action_name, "reflex_runtime"
+
+        heuristic_runtime = self.build_heuristic_reflex_runtime(archive_state, trigger=f"{trigger}_heuristic")
+        heuristic_runtime["source"] = "local_heuristic"
+        self.reflex_runtime = heuristic_runtime
+        heuristic_action = normalize_reflex_action_name(heuristic_runtime.get("suggested_action", "idle"))
+        payload = self.build_motion_payload_for_action(heuristic_action)
+        if payload is not None:
+            return payload, heuristic_action, "local_heuristic"
+        return None, "idle", "none"
+
+    def execute_plan_segment(
+        self,
+        *,
+        step_budget: int = 5,
+        refresh_plan: bool = True,
+        plan_refresh_interval_steps: int = 0,
+        allow_reflex: bool = True,
+        trigger: str = "manual_segment",
+    ) -> Dict[str, Any]:
+        with self.lock:
+            budget = max(1, min(int(step_budget), 25))
+            replan_interval = max(0, int(plan_refresh_interval_steps))
+            run_id = f"segment_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{int(self.plan_execution_state.get('step_index', 0)):04d}"
+            self.update_planner_executor_state(
+                mode="execute_plan_segment",
+                active=True,
+                state="running",
+                run_id=run_id,
+                mission_id=str(self.current_mission.get("mission_id", "")),
+                trigger=str(trigger or "manual_segment"),
+                current_plan_id=str(self.current_plan.get("plan_id", "")),
+                current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                step_budget=budget,
+                refresh_plan=bool(refresh_plan),
+                plan_refresh_interval_steps=replan_interval,
+                steps_executed=0,
+                blocked_count=0,
+                replan_count=0,
+                last_action="idle",
+                last_progress_cm=0.0,
+                last_stop_reason="",
+                last_stop_detail="",
+                started_at=now_timestamp(),
+            )
+
+            replan_count = 0
+            if refresh_plan:
+                self.request_plan(trigger=f"{trigger}_plan")
+                replan_count = 1
+                self.update_planner_executor_state(
+                    replan_count=replan_count,
+                    current_plan_id=str(self.current_plan.get("plan_id", "")),
+                    current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                    target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                )
+
+            steps_executed = 0
+            blocked_count = 0
+            last_action = "idle"
+            last_progress_cm = 0.0
+            stop_reason = "budget_exhausted"
+            stop_detail = ""
+
+            for step_idx in range(budget):
+                if bool(self.takeover_state.get("active", False)):
+                    stop_reason = "takeover_active"
+                    stop_detail = "Manual takeover is active."
+                    break
+
+                if replan_interval > 0 and steps_executed > 0 and (steps_executed % replan_interval) == 0:
+                    self.request_plan(trigger=f"{trigger}_replan_{steps_executed}")
+                    replan_count += 1
+                    self.update_planner_executor_state(
+                        replan_count=replan_count,
+                        current_plan_id=str(self.current_plan.get("plan_id", "")),
+                        current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                        target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                        last_stop_detail=f"replan@step={steps_executed}",
+                    )
+
+                evidence_status = str(self.person_evidence_runtime.get("evidence_status", "idle") or "idle")
+                if evidence_status in ("suspect", "confirmed_present", "confirmed_absent"):
+                    stop_reason = "evidence_state"
+                    stop_detail = evidence_status
+                    break
+
+                before_wp_distance = float(self.reflex_runtime.get("waypoint_distance_cm", 0.0))
+                motion_payload, selected_action, selected_source = self.build_planner_executor_motion_payload(
+                    trigger=f"{trigger}_step_{step_idx + 1}",
+                    allow_reflex=allow_reflex,
+                )
+                if motion_payload is None:
+                    blocked_count += 1
+                    stop_reason = "blocked"
+                    stop_detail = "No executable planner action."
+                    self.update_planner_executor_state(
+                        blocked_count=blocked_count,
+                        steps_executed=steps_executed,
+                        last_action="idle",
+                        last_stop_reason=stop_reason,
+                        last_stop_detail=stop_detail,
+                    )
+                    if blocked_count >= 2:
+                        break
+                    continue
+
+                self._apply_motion_step(
+                    forward_cm=float(motion_payload.get("forward_cm", 0.0)),
+                    right_cm=float(motion_payload.get("right_cm", 0.0)),
+                    up_cm=float(motion_payload.get("up_cm", 0.0)),
+                    yaw_delta_deg=float(motion_payload.get("yaw_delta_deg", 0.0)),
+                    action_name=str(motion_payload.get("action_name", selected_action)),
+                    action_origin="planner_executor",
+                    trigger_auto_plan=False,
+                    trigger_reflex_update=False,
+                    allow_reflex_assist=False,
+                )
+                steps_executed += 1
+                last_action = str(motion_payload.get("action_name", selected_action))
+                after_wp_distance = float(self.reflex_runtime.get("waypoint_distance_cm", 0.0))
+                last_progress_cm = before_wp_distance - after_wp_distance if before_wp_distance > 0.0 and after_wp_distance > 0.0 else 0.0
+                current_waypoint = self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {}
+                waypoint_radius = float(current_waypoint.get("radius", self.args.default_waypoint_radius_cm)) if current_waypoint else float(self.args.default_waypoint_radius_cm)
+                self.update_planner_executor_state(
+                    steps_executed=steps_executed,
+                    blocked_count=blocked_count,
+                    current_plan_id=str(self.current_plan.get("plan_id", "")),
+                    current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                    target_waypoint=current_waypoint,
+                    last_action=last_action,
+                    last_progress_cm=last_progress_cm,
+                    last_stop_reason="",
+                    last_stop_detail=f"source={selected_source}",
+                )
+                if after_wp_distance > 0.0 and after_wp_distance <= waypoint_radius:
+                    stop_reason = "waypoint_reached"
+                    stop_detail = f"distance_cm={after_wp_distance:.1f}"
+                    break
+
+            final_state_label = "completed" if stop_reason in ("waypoint_reached", "budget_exhausted") else "stopped"
+            self.update_planner_executor_state(
+                active=False,
+                state=final_state_label,
+                steps_executed=steps_executed,
+                blocked_count=blocked_count,
+                replan_count=replan_count,
+                last_action=last_action,
+                last_progress_cm=last_progress_cm,
+                last_stop_reason=stop_reason,
+                last_stop_detail=stop_detail or self.planner_executor_state.get("last_stop_detail", ""),
+            )
+            state = self.get_state()
+            return {
+                "status": "ok",
+                "segment_executed": bool(steps_executed > 0),
+                "steps_executed": int(steps_executed),
+                "step_budget": int(budget),
+                "stop_reason": stop_reason,
+                "stop_detail": stop_detail,
+                "replan_count": int(replan_count),
+                "planner_executor_runtime": self.planner_executor_state,
+                "state": state,
+            }
 
     def get_env_yaw_deg(self) -> float:
         rotation = self.env.unwrapped.unrealcv.get_obj_rotation(self.player_name)
@@ -1417,6 +2048,17 @@ class UAVControlBackend:
         with self.lock:
             self.current_task_label = str(task_label or "").strip()
             self.current_mission = self.build_mission_descriptor(self.current_task_label)
+            self.language_memory_runtime = self.language_search_memory.reset(
+                mission_id=str(self.current_mission.get("mission_id", "")),
+                mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
+                task_label=self.current_task_label,
+            )
+            self.llm_action_runtime = build_llm_action_runtime_state(
+                policy_name=self.args.planner_name,
+                source="none",
+                status="idle",
+            )
+            self.last_llm_action_request = {}
             self.reset_person_search_state(reset_recent_events=True)
             self.search_runtime = self.build_search_runtime_snapshot()
             archive_state = self.sync_archive_runtime()
@@ -1428,6 +2070,7 @@ class UAVControlBackend:
                 "search_runtime": self.search_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
+                "language_memory_runtime": self.language_memory_runtime,
             }
 
     def set_plan_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1456,6 +2099,8 @@ class UAVControlBackend:
             self.sync_mission_from_plan()
             archive_state = self.sync_archive_runtime()
             self.sync_search_runtime(archive_state)
+            self.language_search_memory.record_plan(plan=self.current_plan, search_runtime=self.search_runtime)
+            self.sync_language_memory(archive_state)
             return self.current_plan
 
     def request_plan(self, task_label: Optional[str] = None, trigger: str = "manual_request") -> Dict[str, Any]:
@@ -1492,6 +2137,7 @@ class UAVControlBackend:
                     search_runtime=self.search_runtime,
                     person_evidence_runtime=self.person_evidence_runtime,
                     search_result=self.search_result,
+                    language_memory_runtime=self.language_memory_runtime,
                     context={
                         "movement_yaw_mode": self.args.movement_yaw_mode,
                         "preview_mode": self.args.preview_mode,
@@ -1870,11 +2516,14 @@ class UAVControlBackend:
                 "search_runtime": self.search_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
+                "language_memory_runtime": self.language_memory_runtime,
                 "plan": self.current_plan,
                 "planner_runtime": self.plan_execution_state,
                 "archive": archive_state,
                 "reflex_runtime": self.reflex_runtime,
+                "llm_action_runtime": self.llm_action_runtime,
                 "reflex_execution": self.reflex_execution_state,
+                "planner_executor_runtime": self.planner_executor_state,
                 "takeover_runtime": self.takeover_state,
                 "takeover_recent_events": self.takeover_events,
                 "person_evidence_recent_events": self.person_evidence_events,
@@ -1884,6 +2533,13 @@ class UAVControlBackend:
                     "step_index": self.last_plan_request.get("step_index", 0),
                     "task_label": self.last_plan_request.get("task_label", ""),
                     "frame_id": self.last_plan_request.get("frame_id", ""),
+                },
+                "last_llm_action_request": {
+                    "schema_version": self.last_llm_action_request.get("schema_version", ""),
+                    "trigger": self.last_llm_action_request.get("trigger", ""),
+                    "step_index": self.last_llm_action_request.get("step_index", 0),
+                    "task_label": self.last_llm_action_request.get("task_label", ""),
+                    "frame_id": self.last_llm_action_request.get("frame_id", ""),
                 },
                 "runtime_debug": self.runtime_debug,
                 "last_capture": self.last_capture,
@@ -1925,6 +2581,16 @@ class UAVControlBackend:
                 "up_cm": float(up_cm),
                 "yaw_delta_deg": float(yaw_delta_deg),
             }
+            self.recent_action_history.append(
+                {
+                    "step_index": int(self.plan_execution_state.get("step_index", 0)),
+                    "action_name": str(action_name or "idle"),
+                    "action_origin": str(action_origin or "unknown"),
+                    "timestamp": now_timestamp(),
+                }
+            )
+            if len(self.recent_action_history) > 20:
+                self.recent_action_history = self.recent_action_history[-20:]
             self.sync_archive_runtime()
             auto_plan: Optional[Dict[str, Any]] = None
             if trigger_auto_plan and self.should_auto_request_plan():
@@ -2199,10 +2865,13 @@ class UAVControlBackend:
                 "search_runtime": self.search_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
+                "language_memory_runtime": self.language_memory_runtime,
                 "runtime_debug": self.runtime_debug,
                 "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
                 "reflex_runtime": self.reflex_runtime,
+                "llm_action_runtime": self.llm_action_runtime,
                 "reflex_execution": self.reflex_execution_state,
+                "planner_executor_runtime": self.planner_executor_state,
                 "takeover_runtime": self.takeover_state,
                 "takeover_recent_events": self.takeover_events,
                 "person_evidence_recent_events": self.person_evidence_events,
@@ -2243,7 +2912,9 @@ class UAVControlBackend:
                 "search_result": metadata["search_result"],
                 "archive": metadata["archive"],
                 "reflex_runtime": metadata["reflex_runtime"],
+                "llm_action_runtime": metadata["llm_action_runtime"],
                 "reflex_execution": metadata["reflex_execution"],
+                "planner_executor_runtime": metadata["planner_executor_runtime"],
                 "takeover_runtime": metadata["takeover_runtime"],
                 "takeover_recent_events": metadata["takeover_recent_events"],
                 "person_evidence_recent_events": metadata["person_evidence_recent_events"],
@@ -2350,8 +3021,12 @@ def make_handler(backend: UAVControlBackend):
                     self._send_json({"status": "ok", "archive": backend.archive_runtime.get_state(limit=int(backend.args.archive_recent_limit))})
                 elif parsed.path == "/reflex":
                     self._send_json({"status": "ok", "reflex_runtime": backend.reflex_runtime})
+                elif parsed.path == "/llm_action":
+                    self._send_json({"status": "ok", "llm_action_runtime": backend.llm_action_runtime})
                 elif parsed.path == "/reflex_execution":
                     self._send_json({"status": "ok", "reflex_execution": backend.reflex_execution_state})
+                elif parsed.path == "/planner_executor":
+                    self._send_json({"status": "ok", "planner_executor_runtime": backend.planner_executor_state})
                 elif parsed.path == "/takeover":
                     self._send_json(
                         {
@@ -2410,6 +3085,12 @@ def make_handler(backend: UAVControlBackend):
                 elif parsed.path == "/request_reflex":
                     reflex_runtime = backend.request_reflex_policy(trigger=str(data.get("trigger", "manual_request")))
                     self._send_json({"status": "ok", "reflex_runtime": reflex_runtime})
+                elif parsed.path == "/request_llm_action":
+                    llm_action_runtime = backend.request_llm_action(
+                        trigger=str(data.get("trigger", "manual_request") or "manual_request"),
+                        refresh_observations=bool(data.get("refresh_observations", True)),
+                    )
+                    self._send_json({"status": "ok", "llm_action_runtime": llm_action_runtime})
                 elif parsed.path == "/execute_reflex":
                     self._send_json(
                         backend.execute_reflex_action(
@@ -2417,6 +3098,33 @@ def make_handler(backend: UAVControlBackend):
                             refresh_policy=bool(data.get("refresh_policy", True)),
                             allow_auto_plan=bool(data.get("allow_auto_plan", True)),
                             sync_after_execution=bool(data.get("sync_after_execution", True)),
+                        )
+                    )
+                elif parsed.path == "/execute_llm_action":
+                    self._send_json(
+                        backend.execute_llm_action(
+                            trigger=str(data.get("trigger", "manual_execute") or "manual_execute"),
+                            refresh_action=bool(data.get("refresh_action", True)),
+                            allow_auto_plan=bool(data.get("allow_auto_plan", False)),
+                        )
+                    )
+                elif parsed.path == "/execute_plan_segment":
+                    self._send_json(
+                        backend.execute_plan_segment(
+                            step_budget=int(data.get("step_budget", 5) or 5),
+                            refresh_plan=bool(data.get("refresh_plan", True)),
+                            plan_refresh_interval_steps=int(data.get("plan_refresh_interval_steps", 0) or 0),
+                            allow_reflex=bool(data.get("allow_reflex", True)),
+                            trigger=str(data.get("trigger", "manual_segment") or "manual_segment"),
+                        )
+                    )
+                elif parsed.path == "/execute_llm_action_segment":
+                    self._send_json(
+                        backend.execute_llm_action_segment(
+                            step_budget=int(data.get("step_budget", 5) or 5),
+                            refresh_plan=bool(data.get("refresh_plan", True)),
+                            plan_refresh_interval_steps=int(data.get("plan_refresh_interval_steps", 0) or 0),
+                            trigger=str(data.get("trigger", "manual_llm_action_segment") or "manual_llm_action_segment"),
                         )
                     )
                 elif parsed.path == "/takeover":
@@ -2532,6 +3240,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner_name", default="phase2-planner", help="Planner name stored in /plan state")
     parser.add_argument("--planner_url", default=None, help="Optional external planner base URL")
     parser.add_argument("--planner_endpoint", default="/plan", help="Planner endpoint path used with planner_url")
+    parser.add_argument("--planner_action_endpoint", default="/action", help="Pure LLM action endpoint path used with planner_url")
     parser.add_argument("--planner_timeout_s", type=float, default=5.0, help="Timeout for planner requests")
     parser.add_argument(
         "--planner_auto_mode",
