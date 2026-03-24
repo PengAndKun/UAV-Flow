@@ -39,11 +39,13 @@ from language_search_memory import LanguageSearchMemory
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
 from multimodal_scene_waypoint_adapter import build_heuristic_scene_waypoint_runtime
 from phase5_mission_manual import build_phase5_mission_manual
+from phase6_mission_controller import build_phase6_mission_runtime
 from runtime_interfaces import (
     build_doorway_runtime_state,
     build_llm_action_request,
     build_llm_action_runtime_state,
     build_mission_state,
+    build_phase6_mission_runtime_state,
     build_plan_request,
     build_plan_state,
     build_planner_executor_runtime_state,
@@ -422,6 +424,17 @@ class UAVControlBackend:
             language_memory_runtime=self.language_memory_runtime,
             doorway_runtime=self.doorway_runtime,
             depth_stats=self.last_depth_summary,
+        )
+        self.phase6_mission_runtime: Dict[str, Any] = build_phase6_mission_runtime(
+            task_label=self.current_task_label,
+            mission=self.current_mission,
+            search_runtime=self.search_runtime,
+            doorway_runtime=self.doorway_runtime,
+            phase5_mission_manual=self.phase5_mission_manual,
+            scene_waypoint_runtime={},
+            language_memory_runtime=self.language_memory_runtime,
+            person_evidence_runtime=self.person_evidence_runtime,
+            search_result=self.search_result,
         )
         self.llm_action_runtime: Dict[str, Any] = build_llm_action_runtime_state(
             policy_name=self.args.planner_name,

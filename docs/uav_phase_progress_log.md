@@ -3091,3 +3091,40 @@ Current recommended setting for denser API-driven motion:
 - `Plan Every = 0`
 - `Hold Retry = 2`
 - `Continuous LLM = on`
+
+### Phase 6 Planning Reset: VLM Semantic Archive + Target-House Entry Search
+
+New document folder created:
+- [phase6_vlm_semantic_archive/README.md](/E:/github/UAV-Flow/docs/phase6_vlm_semantic_archive/README.md)
+- [phase6_vlm_semantic_archive/control_refactor_plan.md](/E:/github/UAV-Flow/docs/phase6_vlm_semantic_archive/control_refactor_plan.md)
+- [phase6_vlm_semantic_archive/experiment_plan.md](/E:/github/UAV-Flow/docs/phase6_vlm_semantic_archive/experiment_plan.md)
+
+Why this reset is needed:
+- the project direction is shifting again from:
+  - doorway heuristics + phase summaries + LLM planning
+- toward:
+  - VLM scene descriptions as semantic intermediate states
+  - sentence-embedding semantic archive retrieval
+  - target-house-conditioned entry recognition
+  - stage-aware waypoint generation
+  - archive-to-reactive-policy distillation
+
+Key Phase 6 decisions now written into the new docs:
+- use VLM-generated language descriptions as archive entries
+- use simulation-first data generation with outdoor random starts
+- verify the target house using reference-image retrieval
+- model entry search as an explicit outdoor stage before indoor person search
+- distill successful archive trajectories into a lightweight reactive policy
+
+Recommended new controller files:
+- `vlm_scene_descriptor.py`
+- `semantic_archive_runtime.py`
+- `reference_house_matcher.py`
+- `phase6_mission_controller.py`
+- `phase6_waypoint_planner.py`
+- `archive_distillation_export.py`
+
+Main integration target remains:
+- [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py)
+
+But Phase 6 should not continue bloating that file with all new logic. It should stay the orchestration hub while the new modules carry the new mission semantics.
