@@ -375,3 +375,56 @@ The project should proceed with the following rule:
   - `RGB + depth -> scene interpretation -> staged reasoning -> continuous waypoints`
 
 This is the plan that should guide the next implementation step.
+
+---
+
+## Implementation Update
+
+The first implementation slice is now connected:
+
+- added:
+  - [multimodal_scene_waypoint_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/multimodal_scene_waypoint_adapter.py)
+- added planner endpoint:
+  - `/scene_waypoints`
+- added control-server relay:
+  - `/request_scene_waypoints`
+- added panel support:
+  - `SceneWP` runtime status
+  - `Request Scene Waypoints`
+  - `View Scene Reply`
+  - `View Scene Prompt`
+
+### Important Runtime Fix
+
+During live tests, a consistency bug was found:
+
+- `doorway_runtime` could already contain doorway candidates for the latest frame
+- but `phase5_mission_manual` could still be using an older pre-refresh doorway state
+
+This produced contradictory live states such as:
+
+- `Doorway cand=2`
+- but `Phase5 doorway_candidate_count=0`
+
+The runtime was updated so that:
+
+- `request_plan()` automatically requests `scene_waypoints` first for:
+  - `person_search`
+  - `room_search`
+  - `target_verification`
+- `scene_waypoint_runtime` is written back before the same-frame planner request
+- `phase5_mission_manual` now consumes:
+  - `scene_waypoint_runtime`
+  - latest `doorway_runtime`
+- `refresh_observations()` now refreshes Phase 5 after the latest RGB/depth sync
+
+### Current Rule
+
+For house-search tasks, the intended decision chain is now:
+
+1. refresh RGB + depth
+2. run `scene_waypoints`
+3. update `phase5_mission_manual`
+4. run high-level planner
+
+So the planner no longer depends only on doorway heuristics or stale indoor/outdoor guesses.

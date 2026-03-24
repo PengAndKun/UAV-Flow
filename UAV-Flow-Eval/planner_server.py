@@ -22,6 +22,11 @@ import numpy as np
 from llm_action_adapter import LLMActionAdapterError, build_llm_action
 from llm_planner_adapter import LLMPlannerAdapterError, build_llm_plan
 from llm_planner_client import LLMPlannerClient, LLMPlannerClientError, LLMPlannerConfig
+from multimodal_scene_waypoint_adapter import (
+    MultimodalSceneWaypointAdapterError,
+    build_heuristic_scene_waypoint_runtime,
+    build_multimodal_scene_waypoints,
+)
 from runtime_interfaces import (
     build_llm_action_runtime_state,
     build_plan_request,
@@ -210,6 +215,32 @@ def build_heuristic_action_response(
             "route_reason": str(route_reason or ""),
         },
     )
+
+
+def build_scene_waypoint_fallback_response(
+    request_payload: Dict[str, Any],
+    *,
+    policy_name: str,
+    source: str,
+    fallback_used: bool,
+    fallback_reason: str = "",
+    llm_model_name: str = "",
+    llm_api_style: str = "",
+    route_mode: str = "",
+    route_reason: str = "",
+) -> Dict[str, Any]:
+    runtime = build_heuristic_scene_waypoint_runtime(
+        request_payload=request_payload,
+        policy_name=policy_name,
+        llm_model_name=llm_model_name,
+        llm_api_style=llm_api_style,
+        route_mode=route_mode,
+        fallback_reason=fallback_reason or route_reason,
+    )
+    runtime["source"] = str(source or runtime.get("source", "local_scene_heuristic"))
+    runtime["fallback_used"] = bool(fallback_used)
+    runtime["fallback_reason"] = str(fallback_reason or route_reason or "")
+    return runtime
 
 
 def build_llm_client_from_args(args: argparse.Namespace) -> Optional[LLMPlannerClient]:
@@ -675,6 +706,73 @@ def make_handler(args: argparse.Namespace, llm_client: Optional[LLMPlannerClient
                     llm_client = build_llm_client_from_args(args)
                     self._send_json(build_planner_config_payload(args, llm_client))
                     return
+                if parsed.path == args.scene_waypoint_endpoint:
+                    request_payload = self._read_json_body()
+                    mission = request_payload.get("mission") if isinstance(request_payload.get("mission"), dict) else {}
+                    mission_type = str(mission.get("mission_type", "semantic_navigation") or "semantic_navigation")
+                    route_mode = resolve_planner_route_mode(args.planner_mode, str(args.planner_route_mode or "auto"))
+                    use_llm_mode, route_reason = should_use_llm_mode(route_mode=route_mode, mission_type=mission_type)
+                    if use_llm_mode:
+                        if llm_client is None:
+                            if args.fallback_to_heuristic:
+                                logger.warning(
+                                    "Scene waypoint request asked for LLM but client is unavailable, using heuristic fallback."
+                                )
+                                scene_waypoint_runtime = build_scene_waypoint_fallback_response(
+                                    request_payload,
+                                    policy_name=args.planner_name,
+                                    source="scene_waypoint_fallback",
+                                    fallback_used=True,
+                                    fallback_reason="llm_client_unavailable",
+                                    llm_model_name=str(args.llm_model or ""),
+                                    llm_api_style=str(args.llm_api_style or ""),
+                                    route_mode=route_mode,
+                                    route_reason=route_reason,
+                                )
+                            else:
+                                raise RuntimeError("Scene waypoint mode requested but no LLM client is configured.")
+                        else:
+                            try:
+                                scene_waypoint_runtime = build_multimodal_scene_waypoints(
+                                    request_payload=request_payload,
+                                    client=llm_client,
+                                    policy_name=args.planner_name,
+                                )
+                            except (
+                                MultimodalSceneWaypointAdapterError,
+                                LLMPlannerClientError,
+                                error.URLError,
+                                TimeoutError,
+                            ) as exc:
+                                if args.fallback_to_heuristic:
+                                    logger.warning(
+                                        "Scene waypoint request failed, using heuristic fallback: %s",
+                                        exc,
+                                    )
+                                    scene_waypoint_runtime = build_scene_waypoint_fallback_response(
+                                        request_payload,
+                                        policy_name=args.planner_name,
+                                        source="scene_waypoint_fallback",
+                                        fallback_used=True,
+                                        fallback_reason=str(exc),
+                                        llm_model_name=str(args.llm_model or ""),
+                                        llm_api_style=str(args.llm_api_style or ""),
+                                        route_mode=route_mode,
+                                        route_reason=route_reason,
+                                    )
+                                else:
+                                    raise
+                    else:
+                        scene_waypoint_runtime = build_scene_waypoint_fallback_response(
+                            request_payload,
+                            policy_name=args.planner_name,
+                            source="local_scene_heuristic",
+                            fallback_used=False,
+                            route_mode=route_mode,
+                            route_reason=route_reason,
+                        )
+                    self._send_json({"status": "ok", "scene_waypoint_runtime": scene_waypoint_runtime})
+                    return
                 if parsed.path == args.action_endpoint:
                     request_payload = self._read_json_body()
                     mission = request_payload.get("mission") if isinstance(request_payload.get("mission"), dict) else {}
@@ -835,6 +933,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=5021, help="Planner HTTP port")
     parser.add_argument("--endpoint", default="/plan", help="Planner endpoint path")
     parser.add_argument("--action_endpoint", default="/action", help="Pure LLM action endpoint path")
+    parser.add_argument("--scene_waypoint_endpoint", default="/scene_waypoints", help="Multimodal scene waypoint endpoint path")
     parser.add_argument("--planner_name", default="external_heuristic_planner", help="Planner name returned in plan payloads")
     parser.add_argument("--planner_mode", default="heuristic", choices=["heuristic", "llm", "hybrid"], help="Planner execution mode")
     parser.add_argument(

@@ -339,6 +339,9 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         else {},
         "recent_actions": context.get("recent_actions", []) if isinstance(context.get("recent_actions"), list) else [],
         "waypoint_hint": str(context.get("waypoint_hint", "")),
+        "planner_executor_runtime": context.get("planner_executor_runtime", {})
+        if isinstance(context.get("planner_executor_runtime"), dict)
+        else {},
     }
 
     system_prompt = (
@@ -349,6 +352,7 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         "Choose exactly one action from: forward, backward, left, right, up, down, yaw_left, yaw_right, hold. "
         "Prefer safe exploration, target search, and verification behavior. "
         "Avoid oscillation and avoid repeating the opposite of the most recent action unless safety requires it. "
+        "When running inside a continuous LLM action segment, prefer continuing a safe motion trend for multiple steps instead of stopping after a single step. "
         "If evidence is confirmed_present or confirmed_absent, prefer hold or cautious reorientation. "
         "If a traversable doorway is detected, bias toward actions that align with and move through the doorway. "
         "If risk is high, prefer yaw changes, vertical adjustment, or hold over aggressive translation. "
@@ -375,6 +379,8 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         "- should_request_plan should be true when the next macro-step should ask the high-level planner again.\n"
         "- follow the active Phase 5 stage when it is available; treat it as the current task manual.\n"
         "- when a traversable doorway is centered or nearly centered, prefer forward over unnecessary rotation.\n"
+        "- when execution_context.planner_executor_runtime.continuous_mode is true and risk is low, avoid early hold decisions; prefer continuing safe progress.\n"
+        "- if recent_actions already show a stable direction and it remains safe, continuing that direction is preferred over oscillation.\n"
         "- keep rationale short and single-line.\n"
     )
     return {

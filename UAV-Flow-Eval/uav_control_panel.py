@@ -41,11 +41,11 @@ PLANNER_PRESETS: Dict[str, Dict[str, Any]] = {
         "planner_route_mode": "llm_only",
         "llm_api_style": "google_genai_sdk",
         "llm_model": "gemini-3.1-flash-lite-preview",
-        "llm_input_mode": "text",
+        "llm_input_mode": "text_image",
         "llm_base_url": "google-genai-sdk",
         "llm_api_key_env": "GEMINI_API_KEY",
         "fallback_to_heuristic": False,
-        "planner_request_timeout_s": 15.0,
+        "planner_request_timeout_s": 25.0,
     },
     "Gemini Flash": {
         "planner_name": "external_llm_planner",
@@ -53,11 +53,11 @@ PLANNER_PRESETS: Dict[str, Dict[str, Any]] = {
         "planner_route_mode": "llm_only",
         "llm_api_style": "google_genai_sdk",
         "llm_model": "gemini-3-flash-preview",
-        "llm_input_mode": "text",
+        "llm_input_mode": "text_image",
         "llm_base_url": "google-genai-sdk",
         "llm_api_key_env": "GEMINI_API_KEY",
         "fallback_to_heuristic": False,
-        "planner_request_timeout_s": 15.0,
+        "planner_request_timeout_s": 25.0,
     },
     "Search Hybrid": {
         "planner_name": "external_llm_planner",
@@ -65,11 +65,11 @@ PLANNER_PRESETS: Dict[str, Dict[str, Any]] = {
         "planner_route_mode": "search_hybrid",
         "llm_api_style": "google_genai_sdk",
         "llm_model": "gemini-3.1-flash-lite-preview",
-        "llm_input_mode": "text",
+        "llm_input_mode": "text_image",
         "llm_base_url": "google-genai-sdk",
         "llm_api_key_env": "GEMINI_API_KEY",
         "fallback_to_heuristic": True,
-        "planner_request_timeout_s": 15.0,
+        "planner_request_timeout_s": 25.0,
     },
     "Anthropic Qwen Next": {
         "planner_name": "external_llm_planner",
@@ -172,6 +172,7 @@ class UAVControlPanel:
         self.phase5_var = tk.StringVar(value="Phase5: idle")
         self.language_memory_var = tk.StringVar(value="LangMem: idle")
         self.api_reply_var = tk.StringVar(value="APIReply: idle")
+        self.scene_waypoint_var = tk.StringVar(value="SceneWP: idle")
         self.llm_action_var = tk.StringVar(value="LLMAct: idle")
         self.archive_var = tk.StringVar(value="Archive: idle")
         self.reflex_var = tk.StringVar(value="Reflex: idle")
@@ -183,6 +184,10 @@ class UAVControlPanel:
         self.api_reply_text_widget: Optional[tk.Text] = None
         self.api_prompt_window: Optional[tk.Toplevel] = None
         self.api_prompt_text_widget: Optional[tk.Text] = None
+        self.scene_waypoint_reply_window: Optional[tk.Toplevel] = None
+        self.scene_waypoint_reply_text_widget: Optional[tk.Text] = None
+        self.scene_waypoint_prompt_window: Optional[tk.Toplevel] = None
+        self.scene_waypoint_prompt_text_widget: Optional[tk.Text] = None
         self.llm_action_reply_window: Optional[tk.Toplevel] = None
         self.llm_action_reply_text_widget: Optional[tk.Text] = None
         self.llm_action_prompt_window: Optional[tk.Toplevel] = None
@@ -213,8 +218,13 @@ class UAVControlPanel:
         self.planner_fallback_var = tk.BooleanVar(value=True)
         self.planner_request_timeout_var = tk.StringVar(value="5.0")
         self.planner_config_var = tk.StringVar(value="Planner config: waiting...")
-        self.plan_segment_steps_var = tk.StringVar(value="5")
+        self.plan_segment_steps_var = tk.StringVar(value="8")
         self.plan_segment_replan_interval_var = tk.StringVar(value="0")
+        self.llm_action_hold_retry_var = tk.StringVar(value="2")
+        self.llm_action_continuous_var = tk.BooleanVar(value=True)
+        self.state_refresh_inflight = False
+        self.preview_refresh_inflight = False
+        self.depth_refresh_inflight = False
 
     def refresh_client_timeout(self) -> None:
         try:
@@ -295,8 +305,8 @@ class UAVControlPanel:
         if state:
             self.last_state = state
             self.update_status_from_state(state)
-            self.update_preview_once()
-            self.update_depth_once()
+            self.request_preview_refresh_async()
+            self.request_depth_refresh_async()
 
     def capture(self) -> None:
         payload = {
@@ -313,8 +323,9 @@ class UAVControlPanel:
     def handle_capture_response(self, result: Optional[Dict[str, Any]]) -> None:
         if result:
             self.status_var.set(f"Captured: {result['meta_path']}")
-            self.update_preview_once()
-            self.update_depth_once()
+            self.request_preview_refresh_async()
+            self.request_depth_refresh_async()
+            self.request_state_refresh_async()
 
     def set_task_label(self) -> None:
         payload = {"task_label": self.task_label_var.get().strip()}
@@ -328,7 +339,7 @@ class UAVControlPanel:
     def handle_set_task_response(self, result: Optional[Dict[str, Any]]) -> None:
         if result:
             self.status_var.set(f"Task label set: {result.get('task_label', '')}")
-            self.update_state_once()
+            self.request_state_refresh_async()
 
     def request_plan(self) -> None:
         payload = {"task_label": self.task_label_var.get().strip()}
@@ -343,13 +354,13 @@ class UAVControlPanel:
         if result:
             if isinstance(result.get("plan"), dict):
                 self.plan_var.set(self.format_plan_summary(result["plan"]))
-            self.update_state_once()
+            self.request_state_refresh_async()
 
     def request_reflex(self) -> None:
         self.run_async_request(
             lambda: self.client.post_json("/request_reflex", {"trigger": "manual_request"}),
             busy_message="Refreshing reflex state...",
-            on_success=lambda result: self.update_state_once() if result else None,
+            on_success=lambda result: self.request_state_refresh_async() if result else None,
             on_error=lambda exc: self.handle_async_request_error("Request Reflex", exc),
         )
 
@@ -374,9 +385,9 @@ class UAVControlPanel:
                 self.last_state = state
                 self.update_status_from_state(state)
             else:
-                self.update_state_once()
-            self.update_preview_once()
-            self.update_depth_once()
+                self.request_state_refresh_async()
+            self.request_preview_refresh_async()
+            self.request_depth_refresh_async()
 
     def execute_plan_segment(self) -> None:
         try:
@@ -408,12 +419,12 @@ class UAVControlPanel:
                 self.last_state = state
                 self.update_status_from_state(state)
             else:
-                self.update_state_once()
+                self.request_state_refresh_async()
             self.status_var.set(
                 f"Plan segment finished: steps={int(result.get('steps_executed', 0))} stop={result.get('stop_reason', 'unknown')}"
             )
-            self.update_preview_once()
-            self.update_depth_once()
+            self.request_preview_refresh_async()
+            self.request_depth_refresh_async()
 
     def request_llm_action(self) -> None:
         self.run_async_request(
@@ -425,7 +436,19 @@ class UAVControlPanel:
 
     def handle_request_llm_action_response(self, result: Optional[Dict[str, Any]]) -> None:
         if result:
-            self.update_state_once()
+            self.request_state_refresh_async()
+
+    def request_scene_waypoints(self) -> None:
+        self.run_async_request(
+            lambda: self.client.post_json("/request_scene_waypoints", {"trigger": "manual_request", "refresh_observations": True}),
+            busy_message="Requesting multimodal scene waypoints...",
+            on_success=self.handle_request_scene_waypoint_response,
+            on_error=lambda exc: self.handle_async_request_error("Request Scene Waypoints", exc),
+        )
+
+    def handle_request_scene_waypoint_response(self, result: Optional[Dict[str, Any]]) -> None:
+        if result:
+            self.request_state_refresh_async()
 
     def execute_llm_action(self) -> None:
         payload = {
@@ -447,9 +470,9 @@ class UAVControlPanel:
                 self.last_state = state
                 self.update_status_from_state(state)
             else:
-                self.update_state_once()
-            self.update_preview_once()
-            self.update_depth_once()
+                self.request_state_refresh_async()
+            self.request_preview_refresh_async()
+            self.request_depth_refresh_async()
 
     def execute_llm_action_segment(self) -> None:
         try:
@@ -460,15 +483,24 @@ class UAVControlPanel:
             replan_interval = max(0, int(self.plan_segment_replan_interval_var.get().strip() or "0"))
         except ValueError:
             replan_interval = 0
+        try:
+            hold_retry_budget = max(0, min(int(self.llm_action_hold_retry_var.get().strip() or "2"), 8))
+        except ValueError:
+            hold_retry_budget = 2
         payload = {
             "step_budget": step_budget,
             "refresh_plan": True,
             "plan_refresh_interval_steps": replan_interval,
+            "continuous_mode": bool(self.llm_action_continuous_var.get()),
+            "hold_retry_budget": hold_retry_budget,
             "trigger": "manual_llm_action_segment",
         }
         self.run_async_request(
             lambda: self.client.post_json("/execute_llm_action_segment", payload),
-            busy_message=f"Executing LLM action segment (steps={step_budget}, replan={replan_interval})...",
+            busy_message=(
+                f"Executing LLM action segment (steps={step_budget}, replan={replan_interval}, "
+                f"hold_retry={hold_retry_budget}, cont={int(bool(self.llm_action_continuous_var.get()))})..."
+            ),
             on_success=self.handle_execute_llm_action_segment_response,
             on_error=lambda exc: self.handle_async_request_error("Execute LLM Action Segment", exc),
         )
@@ -480,12 +512,12 @@ class UAVControlPanel:
                 self.last_state = state
                 self.update_status_from_state(state)
             else:
-                self.update_state_once()
+                self.request_state_refresh_async()
             self.status_var.set(
                 f"LLM action segment finished: steps={int(result.get('steps_executed', 0))} stop={result.get('stop_reason', 'unknown')}"
             )
-            self.update_preview_once()
-            self.update_depth_once()
+            self.request_preview_refresh_async()
+            self.request_depth_refresh_async()
 
     def start_takeover(self) -> None:
         note = self.takeover_note_var.get().strip()
@@ -495,7 +527,7 @@ class UAVControlPanel:
             {"action": "start", "reason": note or "manual_takeover", "note": note},
         )
         if result:
-            self.update_state_once()
+            self.request_state_refresh_async()
 
     def end_takeover(self) -> None:
         note = self.takeover_note_var.get().strip()
@@ -505,7 +537,7 @@ class UAVControlPanel:
             {"action": "end", "reason": "resolved", "note": note},
         )
         if result:
-            self.update_state_once()
+            self.request_state_refresh_async()
 
     def submit_person_evidence(self, action: str) -> None:
         payload = {
@@ -520,7 +552,7 @@ class UAVControlPanel:
                 self.last_state = state
                 self.update_status_from_state(state)
             else:
-                self.update_state_once()
+                self.request_state_refresh_async()
 
     def mark_suspect(self) -> None:
         self.submit_person_evidence("suspect")
@@ -734,6 +766,59 @@ class UAVControlPanel:
             ]
         )
 
+    def get_scene_waypoint_runtime(self) -> Dict[str, Any]:
+        if not isinstance(self.last_state, dict):
+            return {}
+        scene_waypoint_runtime = self.last_state.get("scene_waypoint_runtime")
+        return scene_waypoint_runtime if isinstance(scene_waypoint_runtime, dict) else {}
+
+    def build_scene_waypoint_reply_view_text(self) -> str:
+        scene_waypoint_runtime = self.get_scene_waypoint_runtime()
+        if not scene_waypoint_runtime:
+            return "No scene waypoint state has been loaded yet."
+        raw_text = str(scene_waypoint_runtime.get("raw_text", "") or "")
+        parsed_payload = (
+            scene_waypoint_runtime.get("parsed_payload", {})
+            if isinstance(scene_waypoint_runtime.get("parsed_payload"), dict)
+            else {}
+        )
+        usage = scene_waypoint_runtime.get("usage", {}) if isinstance(scene_waypoint_runtime.get("usage"), dict) else {}
+        sections = [
+            f"policy_name={scene_waypoint_runtime.get('policy_name', 'n/a')}",
+            f"source={scene_waypoint_runtime.get('source', 'n/a')}",
+            f"status={scene_waypoint_runtime.get('status', 'idle')}",
+            f"scene_state={scene_waypoint_runtime.get('scene_state', 'unknown')}",
+            f"active_stage={scene_waypoint_runtime.get('active_stage', 'scene_interpretation')}",
+            f"model={scene_waypoint_runtime.get('model_name', '-') or '-'}",
+            f"api_style={scene_waypoint_runtime.get('api_style', '-') or '-'}",
+            f"latency_ms={float(scene_waypoint_runtime.get('last_latency_ms', 0.0)):.1f}",
+            f"fallback_used={int(bool(scene_waypoint_runtime.get('fallback_used', False)))}",
+            f"usage={json.dumps(usage, ensure_ascii=True)}",
+            "",
+            "Parsed payload:",
+            json.dumps(parsed_payload, ensure_ascii=True, indent=2) if parsed_payload else "(none)",
+            "",
+            "Raw API reply:",
+            raw_text or "(empty)",
+        ]
+        return "\n".join(sections)
+
+    def build_scene_waypoint_prompt_view_text(self) -> str:
+        scene_waypoint_runtime = self.get_scene_waypoint_runtime()
+        if not scene_waypoint_runtime:
+            return "No scene waypoint state has been loaded yet."
+        system_prompt = str(scene_waypoint_runtime.get("system_prompt_excerpt", "") or "")
+        user_prompt = str(scene_waypoint_runtime.get("user_prompt_excerpt", "") or "")
+        return "\n".join(
+            [
+                "System prompt excerpt:",
+                system_prompt or "(none)",
+                "",
+                "User prompt excerpt:",
+                user_prompt or "(none)",
+            ]
+        )
+
     def get_llm_action_runtime(self) -> Dict[str, Any]:
         if not isinstance(self.last_state, dict):
             return {}
@@ -857,6 +942,24 @@ class UAVControlPanel:
             raise_window=raise_window,
         )
 
+    def show_scene_waypoint_reply_window(self, *, raise_window: bool = True) -> None:
+        self.open_text_viewer(
+            window_attr="scene_waypoint_reply_window",
+            text_widget_attr="scene_waypoint_reply_text_widget",
+            title="Scene Waypoint Reply",
+            content=self.build_scene_waypoint_reply_view_text(),
+            raise_window=raise_window,
+        )
+
+    def show_scene_waypoint_prompt_window(self, *, raise_window: bool = True) -> None:
+        self.open_text_viewer(
+            window_attr="scene_waypoint_prompt_window",
+            text_widget_attr="scene_waypoint_prompt_text_widget",
+            title="Scene Waypoint Prompt",
+            content=self.build_scene_waypoint_prompt_view_text(),
+            raise_window=raise_window,
+        )
+
     def adjust_status_font(self, delta: int) -> None:
         current_size = int(self.status_font.cget("size"))
         next_size = max(8, min(16, current_size + delta))
@@ -921,6 +1024,7 @@ class UAVControlPanel:
         phase5_manual = state.get("phase5_mission_manual", {})
         language_memory = state.get("language_memory_runtime", {})
         planner_runtime = state.get("planner_runtime", {})
+        scene_waypoint_runtime = state.get("scene_waypoint_runtime", {})
         archive = state.get("archive", {})
         reflex_runtime = state.get("reflex_runtime", {})
         llm_action_runtime = state.get("llm_action_runtime", {})
@@ -1124,6 +1228,43 @@ class UAVControlPanel:
             f"attempts={int(plan_debug.get('attempt_count', 0) or 0)} "
             f"preview={reply_preview or 'none'}"
         )
+        scene_usage = scene_waypoint_runtime.get("usage", {}) if isinstance(scene_waypoint_runtime.get("usage"), dict) else {}
+        scene_tokens = int(
+            scene_usage.get(
+                "total_tokens",
+                scene_usage.get(
+                    "totalTokenCount",
+                    scene_usage.get(
+                        "total_token_count",
+                        scene_usage.get(
+                            "input_tokens",
+                            scene_usage.get(
+                                "promptTokenCount",
+                                scene_usage.get("prompt_token_count", 0),
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            or 0
+        )
+        scene_waypoints = scene_waypoint_runtime.get("waypoints", []) if isinstance(scene_waypoint_runtime.get("waypoints"), list) else []
+        scene_preview = self.shorten_text(
+            str(scene_waypoint_runtime.get("reasoning", "") or scene_waypoint_runtime.get("raw_text", "")).replace("\n", " "),
+            limit=96,
+        )
+        self.scene_waypoint_var.set(
+            "SceneWP "
+            f"status={scene_waypoint_runtime.get('status', 'idle')} "
+            f"scene={scene_waypoint_runtime.get('scene_state', 'unknown')} "
+            f"stage={scene_waypoint_runtime.get('active_stage', 'scene_interpretation')} "
+            f"door={int(bool(scene_waypoint_runtime.get('entry_door_visible', False)))}/{int(bool(scene_waypoint_runtime.get('entry_door_traversable', False)))} "
+            f"wp={len(scene_waypoints)} "
+            f"conf={float(scene_waypoint_runtime.get('planner_confidence', 0.0)):.2f} "
+            f"tokens={scene_tokens} "
+            f"model={str(scene_waypoint_runtime.get('model_name', '') or '-') } "
+            f"preview={scene_preview or 'none'}"
+        )
         llm_action_usage = llm_action_runtime.get("usage", {}) if isinstance(llm_action_runtime.get("usage"), dict) else {}
         llm_action_tokens = int(
             llm_action_usage.get(
@@ -1206,6 +1347,8 @@ class UAVControlPanel:
             f"subgoal={planner_executor.get('current_search_subgoal', 'idle')} "
             f"budget={int(planner_executor.get('step_budget', 0))} "
             f"every={int(planner_executor.get('plan_refresh_interval_steps', 0))} "
+            f"cont={int(bool(planner_executor.get('continuous_mode', False)))} "
+            f"holds={int(planner_executor.get('hold_retry_count', 0))}/{int(planner_executor.get('hold_retry_budget', 0))} "
             f"steps={int(planner_executor.get('steps_executed', 0))} "
             f"replans={int(planner_executor.get('replan_count', 0))} "
             f"blocked={int(planner_executor.get('blocked_count', 0))} "
@@ -1228,6 +1371,10 @@ class UAVControlPanel:
             self.show_api_reply_window(raise_window=False)
         if self.api_prompt_window is not None and self.api_prompt_window.winfo_exists():
             self.show_api_prompt_window(raise_window=False)
+        if self.scene_waypoint_reply_window is not None and self.scene_waypoint_reply_window.winfo_exists():
+            self.show_scene_waypoint_reply_window(raise_window=False)
+        if self.scene_waypoint_prompt_window is not None and self.scene_waypoint_prompt_window.winfo_exists():
+            self.show_scene_waypoint_prompt_window(raise_window=False)
         if self.llm_action_reply_window is not None and self.llm_action_reply_window.winfo_exists():
             self.show_action_reply_window(raise_window=False)
         if self.llm_action_prompt_window is not None and self.llm_action_prompt_window.winfo_exists():
@@ -1238,6 +1385,27 @@ class UAVControlPanel:
         if state:
             self.last_state = state
             self.update_status_from_state(state)
+
+    def request_state_refresh_async(self) -> None:
+        if self.state_refresh_inflight:
+            return
+        self.state_refresh_inflight = True
+
+        def on_success(state: Optional[Dict[str, Any]]) -> None:
+            self.state_refresh_inflight = False
+            if state:
+                self.last_state = state
+                self.update_status_from_state(state)
+
+        def on_error(exc: Exception) -> None:
+            self.state_refresh_inflight = False
+            self.handle_async_request_error("State Refresh", exc)
+
+        self.run_async_request(
+            lambda: self.client.get_json("/state"),
+            on_success=on_success,
+            on_error=on_error,
+        )
 
     def update_preview_once(self) -> None:
         if self.args.hide_preview_window:
@@ -1250,6 +1418,30 @@ class UAVControlPanel:
             self.preview_label.configure(image=self.preview_photo)
             self.preview_label.image = self.preview_photo
 
+    def request_preview_refresh_async(self) -> None:
+        if self.args.hide_preview_window or self.preview_refresh_inflight:
+            return
+        self.preview_refresh_inflight = True
+
+        def on_success(frame: Optional[np.ndarray]) -> None:
+            self.preview_refresh_inflight = False
+            if frame is None:
+                return
+            self.preview_photo = self._frame_to_photo(frame, self.args.preview_width, self.args.preview_height)
+            if self.preview_label is not None:
+                self.preview_label.configure(image=self.preview_photo)
+                self.preview_label.image = self.preview_photo
+
+        def on_error(exc: Exception) -> None:
+            self.preview_refresh_inflight = False
+            self.handle_async_request_error("Preview Refresh", exc)
+
+        self.run_async_request(
+            lambda: self.client.get_frame(),
+            on_success=on_success,
+            on_error=on_error,
+        )
+
     def update_depth_once(self) -> None:
         if self.args.hide_depth_window:
             return
@@ -1261,20 +1453,44 @@ class UAVControlPanel:
             self.depth_label.configure(image=self.depth_photo)
             self.depth_label.image = self.depth_photo
 
+    def request_depth_refresh_async(self) -> None:
+        if self.args.hide_depth_window or self.depth_refresh_inflight:
+            return
+        self.depth_refresh_inflight = True
+
+        def on_success(frame: Optional[np.ndarray]) -> None:
+            self.depth_refresh_inflight = False
+            if frame is None:
+                return
+            self.depth_photo = self._frame_to_photo(frame, self.args.depth_width, self.args.depth_height)
+            if self.depth_label is not None:
+                self.depth_label.configure(image=self.depth_photo)
+                self.depth_label.image = self.depth_photo
+
+        def on_error(exc: Exception) -> None:
+            self.depth_refresh_inflight = False
+            self.handle_async_request_error("Depth Refresh", exc)
+
+        self.run_async_request(
+            lambda: self.client.get_depth_frame(),
+            on_success=on_success,
+            on_error=on_error,
+        )
+
     def schedule_state_refresh(self) -> None:
-        self.update_state_once()
+        self.request_state_refresh_async()
         self.root.after(self.args.state_interval_ms, self.schedule_state_refresh)
 
     def schedule_preview_refresh(self) -> None:
         if self.args.hide_preview_window:
             return
-        self.update_preview_once()
+        self.request_preview_refresh_async()
         self.root.after(self.args.preview_interval_ms, self.schedule_preview_refresh)
 
     def schedule_depth_refresh(self) -> None:
         if self.args.hide_depth_window:
             return
-        self.update_depth_once()
+        self.request_depth_refresh_async()
         self.root.after(self.args.depth_interval_ms, self.schedule_depth_refresh)
 
     def bind_keys(self) -> None:
@@ -1366,6 +1582,7 @@ class UAVControlPanel:
         self.build_status_label(status_frame, self.phase5_var)
         self.build_status_label(status_frame, self.language_memory_var)
         self.build_status_label(status_frame, self.api_reply_var)
+        self.build_status_label(status_frame, self.scene_waypoint_var)
         self.build_status_label(status_frame, self.llm_action_var)
         self.build_status_label(status_frame, self.archive_var)
         self.build_status_label(status_frame, self.reflex_var)
@@ -1460,22 +1677,24 @@ class UAVControlPanel:
 
         planner_frame = tk.LabelFrame(control_groups, text="Planner And Reflex", padx=8, pady=8)
         planner_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 6))
-        for idx, (label, callback) in enumerate(
-            [
-                ("Request Plan (P)", self.request_plan),
-                ("Request Reflex (T)", self.request_reflex),
-                ("Execute Reflex (Y)", self.execute_reflex),
-                ("Request LLM Action", self.request_llm_action),
-                ("Execute LLM Action", self.execute_llm_action),
-                ("Execute Plan Segment", self.execute_plan_segment),
-                ("Execute LLM Action Segment", self.execute_llm_action_segment),
-                ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
-                ("View API Reply", self.show_api_reply_window),
-                ("View API Prompt", self.show_api_prompt_window),
-                ("View LLM Reply", self.show_action_reply_window),
-                ("View LLM Prompt", self.show_action_prompt_window),
-            ]
-        ):
+        planner_buttons = [
+            ("Request Plan (P)", self.request_plan),
+            ("Request Reflex (T)", self.request_reflex),
+            ("Execute Reflex (Y)", self.execute_reflex),
+            ("Request Scene Waypoints", self.request_scene_waypoints),
+            ("Request LLM Action", self.request_llm_action),
+            ("Execute LLM Action", self.execute_llm_action),
+            ("Execute Plan Segment", self.execute_plan_segment),
+            ("Execute LLM Action Segment", self.execute_llm_action_segment),
+            ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
+            ("View API Reply", self.show_api_reply_window),
+            ("View API Prompt", self.show_api_prompt_window),
+            ("View Scene Reply", self.show_scene_waypoint_reply_window),
+            ("View Scene Prompt", self.show_scene_waypoint_prompt_window),
+            ("View LLM Reply", self.show_action_reply_window),
+            ("View LLM Prompt", self.show_action_prompt_window),
+        ]
+        for idx, (label, callback) in enumerate(planner_buttons):
             tk.Button(planner_frame, text=label, command=callback, width=18).grid(
                 row=idx,
                 column=0,
@@ -1484,7 +1703,7 @@ class UAVControlPanel:
                 sticky="ew",
             )
         planner_segment_frame = tk.Frame(planner_frame)
-        planner_segment_frame.grid(row=11, column=0, sticky="ew", padx=6, pady=(6, 0))
+        planner_segment_frame.grid(row=len(planner_buttons), column=0, sticky="ew", padx=6, pady=(6, 0))
         tk.Label(planner_segment_frame, text="Seg Steps").grid(row=0, column=0, sticky="w")
         tk.Entry(planner_segment_frame, textvariable=self.plan_segment_steps_var, width=6).grid(
             row=0,
@@ -1499,15 +1718,29 @@ class UAVControlPanel:
             sticky="ew",
             padx=(6, 0),
         )
+        tk.Label(planner_segment_frame, text="Hold Retry").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        tk.Entry(planner_segment_frame, textvariable=self.llm_action_hold_retry_var, width=6).grid(
+            row=1,
+            column=1,
+            sticky="ew",
+            padx=(6, 10),
+            pady=(6, 0),
+        )
+        tk.Checkbutton(
+            planner_segment_frame,
+            text="Continuous LLM",
+            variable=self.llm_action_continuous_var,
+            anchor="w",
+        ).grid(row=1, column=2, columnspan=2, sticky="w", pady=(6, 0))
         planner_segment_frame.grid_columnconfigure(1, weight=1)
         planner_segment_frame.grid_columnconfigure(3, weight=1)
         tk.Label(
             planner_frame,
-            text="`Execute Plan Segment` refreshes the high-level plan. `Execute LLM Action Segment` asks the API for each step. Set `Plan Every=1` to also refresh the high-level plan each step.",
+            text="`Execute Plan Segment` refreshes the high-level plan. `Execute LLM Action Segment` asks the API for each step. Set `Plan Every=1` to also refresh the high-level plan each step. `Hold Retry` lets the LLM continue trying after a temporary hold.",
             anchor="w",
             justify="left",
             wraplength=220,
-        ).grid(row=12, column=0, sticky="ew", padx=6, pady=(8, 0))
+        ).grid(row=len(planner_buttons) + 1, column=0, sticky="ew", padx=6, pady=(8, 0))
         planner_frame.grid_columnconfigure(0, weight=1)
 
         planner_config_frame = tk.LabelFrame(control_groups, text="Planner Routing", padx=8, pady=8)
@@ -1753,7 +1986,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Remote control panel for uav_control_server.py")
     parser.add_argument("--host", default="127.0.0.1", help="Control server host")
     parser.add_argument("--port", type=int, default=5020, help="Control server port")
-    parser.add_argument("--timeout_s", type=float, default=5.0, help="HTTP request timeout")
+    parser.add_argument("--timeout_s", type=float, default=8.0, help="HTTP request timeout")
     parser.add_argument("--move_step_cm", type=float, default=20.0, help="Forward/left-right translation step")
     parser.add_argument("--vertical_step_cm", type=float, default=20.0, help="Up/down translation step")
     parser.add_argument("--yaw_step_deg", type=float, default=5.0, help="Yaw step")
@@ -1761,11 +1994,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview_height", type=int, default=540, help="Preview display height")
     parser.add_argument("--depth_width", type=int, default=480, help="Depth preview width")
     parser.add_argument("--depth_height", type=int, default=360, help="Depth preview height")
-    parser.add_argument("--preview_interval_ms", type=int, default=180, help="Preview refresh interval")
-    parser.add_argument("--depth_interval_ms", type=int, default=250, help="Depth preview refresh interval")
+    parser.add_argument("--preview_interval_ms", type=int, default=1200, help="Preview refresh interval")
+    parser.add_argument("--depth_interval_ms", type=int, default=1500, help="Depth preview refresh interval")
     parser.add_argument("--hide_preview_window", action="store_true", help="Do not open or refresh the RGB preview window")
     parser.add_argument("--hide_depth_window", action="store_true", help="Do not open or refresh the depth preview window")
-    parser.add_argument("--state_interval_ms", type=int, default=500, help="State refresh interval")
+    parser.add_argument("--state_interval_ms", type=int, default=1200, help="State refresh interval")
     parser.add_argument("--default_task_label", default="", help="Initial task label shown in the panel")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Logging level")
     return parser.parse_args()

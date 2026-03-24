@@ -2992,3 +2992,102 @@ Planned next implementation step:
 - add a dedicated adapter for:
   - RGB + depth + task + memory -> scene interpretation + waypoint sequence
 - treat doorway heuristics as an auxiliary signal, not the sole entry detector
+
+### Phase 5 Runtime Consistency Fix: Scene-Waypoint Preflight Before Planning
+
+Completed:
+- updated [phase5_mission_manual.py](/E:/github/UAV-Flow/UAV-Flow-Eval/phase5_mission_manual.py) so Phase 5 can consume:
+  - `scene_waypoint_runtime.scene_state`
+  - `scene_waypoint_runtime.active_stage`
+  - `scene_waypoint_runtime.entry_door_visible`
+  - `scene_waypoint_runtime.entry_door_traversable`
+- updated [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py) so:
+  - `request_plan()` automatically runs `request_scene_waypoints()` first for search-style missions
+  - `refresh_observations()` refreshes Phase 5 after the latest RGB/depth sync
+  - `request_scene_waypoints()` immediately writes back into `phase5_mission_manual`
+
+Why this was necessary:
+- a live doorway test showed an inconsistent state:
+  - `Doorway cand=2`
+  - but `Phase5 doorway_candidate_count=0`
+- root cause:
+  - `doorway_runtime` had already refreshed on the current frame
+  - but `phase5_mission_manual` was still using an older pre-refresh hypothesis
+
+Current intended behavior:
+- for `person_search`, `room_search`, and `target_verification`:
+  - same-frame RGB + depth are refreshed
+  - `scene_waypoint_runtime` is requested
+  - `phase5_mission_manual` is rebuilt from the updated scene interpretation
+  - only then is the planner prompt generated
+
+Expected live effect:
+- doorway-rich exterior views should no longer default to stale `inside_house` reasoning when the multimodal scene-waypoint model indicates an outdoor entry context.
+
+### Panel Responsiveness And Timeout Fixes For Phase 5 Live Experiments
+
+Completed:
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py) so periodic refresh no longer blocks the Tk UI thread:
+  - state refresh is now async and non-overlapping
+  - RGB preview refresh is now async and non-overlapping
+  - depth preview refresh is now async and non-overlapping
+- reduced default live-refresh pressure:
+  - `state_interval_ms`: `500 -> 1200`
+  - `preview_interval_ms`: `180 -> 1200`
+  - `depth_interval_ms`: `250 -> 1500`
+  - panel base `timeout_s`: `5.0 -> 8.0`
+- removed several synchronous follow-up refreshes after button actions and replaced them with background refresh requests
+- updated Gemini presets so planner request timeout defaults are more conservative for live multimodal experiments:
+  - `Gemini Lite`: `15s -> 25s`
+  - `Gemini Flash`: `15s -> 25s`
+  - `Search Hybrid`: `15s -> 25s`
+- fixed the `scene_waypoint` heuristic fallback call in [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py):
+  - use `model_name/api_style`
+  - no longer pass stale `llm_model_name/llm_api_style` keyword names
+
+Why this was necessary:
+- Phase 5 experiments were becoming sluggish because the panel was:
+  - polling state/previews too aggressively
+  - using synchronous network calls on the UI thread
+- slow LLM multimodal planning also caused:
+  - planner timeout fallbacks
+  - `10053` disconnect warnings after the client stopped waiting
+- one fallback path also raised:
+  - `build_heuristic_scene_waypoint_runtime() got an unexpected keyword argument 'llm_model_name'`
+
+Current recommendation:
+- use the updated panel defaults
+- keep preview windows open only when needed
+- for door/entry Phase 5 experiments, start from:
+  - `Gemini Lite`
+  - `Req Timeout = 25`
+  - manual execution
+
+### Phase 4.6 Continuous LLM Action Tuning
+
+Completed:
+- updated [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py) so `execute_llm_action_segment` now supports:
+  - `continuous_mode`
+  - `hold_retry_budget`
+- the segment no longer stops immediately on the first `hold` when continuous mode is enabled:
+  - it can retry the LLM action step for a few rounds
+  - it can also replan during hold retries if the LLM explicitly requests replanning
+- updated [llm_action_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_action_adapter.py) so the action prompt now includes:
+  - `planner_executor_runtime`
+  - stronger bias toward continuing a safe motion trend during continuous LLM action segments
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py):
+  - default `Seg Steps`: `5 -> 8`
+  - new `Hold Retry` field
+  - new `Continuous LLM` checkbox
+  - `PlanExec` status now shows `cont=` and `holds=current/budget`
+
+Why this was necessary:
+- pure LLM action segments were technically working, but still felt too stop-and-go
+- one temporary `hold` from the API could end the whole segment too early
+- the user asked for denser continuous action chains with more visible LLM control
+
+Current recommended setting for denser API-driven motion:
+- `Seg Steps = 8`
+- `Plan Every = 0`
+- `Hold Retry = 2`
+- `Continuous LLM = on`

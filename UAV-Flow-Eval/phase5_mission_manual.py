@@ -30,6 +30,7 @@ def infer_house_search_environment(
     search_runtime: Optional[Dict[str, Any]] = None,
     language_memory_runtime: Optional[Dict[str, Any]] = None,
     doorway_runtime: Optional[Dict[str, Any]] = None,
+    scene_waypoint_runtime: Optional[Dict[str, Any]] = None,
     depth_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
@@ -46,6 +47,7 @@ def infer_house_search_environment(
     search_payload = search_runtime if isinstance(search_runtime, dict) else {}
     memory_payload = language_memory_runtime if isinstance(language_memory_runtime, dict) else {}
     doorway_payload = doorway_runtime if isinstance(doorway_runtime, dict) else {}
+    scene_payload = scene_waypoint_runtime if isinstance(scene_waypoint_runtime, dict) else {}
     depth_payload = _coerce_depth_stats(depth_stats)
 
     task_text = str(task_label or mission_payload.get("task_label", "")).strip().lower()
@@ -54,10 +56,33 @@ def infer_house_search_environment(
     memory_summary = str(memory_payload.get("global_summary", "")).strip().lower()
     best_doorway = doorway_payload.get("best_candidate", {}) if isinstance(doorway_payload.get("best_candidate"), dict) else {}
     doorway_candidate_count = int(doorway_payload.get("candidate_count", 0) or 0)
+    scene_status = str(scene_payload.get("status", "idle") or "idle")
+    scene_state_hint = str(scene_payload.get("scene_state", "unknown") or "unknown")
+    scene_stage_hint = str(scene_payload.get("active_stage", "scene_interpretation") or "scene_interpretation")
+    scene_entry_visible = bool(scene_payload.get("entry_door_visible", False))
+    scene_entry_traversable = bool(scene_payload.get("entry_door_traversable", False))
 
     outside_score = 0
     inside_score = 0
     rationale: List[str] = []
+
+    if scene_status not in ("idle", "unavailable", "fallback"):
+        if scene_state_hint == "outside_house":
+            outside_score += 4
+            rationale.append("Scene-waypoint model classifies the UAV as outside the house.")
+        elif scene_state_hint == "inside_house":
+            inside_score += 4
+            rationale.append("Scene-waypoint model classifies the UAV as already inside the house.")
+        elif scene_state_hint == "threshold_zone":
+            outside_score += 2
+            inside_score += 2
+            rationale.append("Scene-waypoint model classifies the UAV near an entry threshold.")
+        if scene_entry_visible:
+            outside_score += 1
+            rationale.append("Scene-waypoint model reports a visible entry door.")
+        if scene_entry_traversable:
+            outside_score += 2
+            rationale.append("Scene-waypoint model reports the entry as traversable.")
 
     if mission_type in ("person_search", "room_search", "target_verification"):
         rationale.append("Mission already targets indoor/room-aware person search.")
@@ -123,6 +148,10 @@ def infer_house_search_environment(
         "outside_score": int(outside_score),
         "doorway_candidate_count": doorway_candidate_count,
         "traversable_doorway_count": traversable_candidates,
+        "scene_state_hint": scene_state_hint,
+        "scene_stage_hint": scene_stage_hint,
+        "scene_entry_visible": scene_entry_visible,
+        "scene_entry_traversable": scene_entry_traversable,
         "rationale": rationale,
     }
 
@@ -160,6 +189,7 @@ def build_phase5_mission_manual(
     person_evidence_runtime: Optional[Dict[str, Any]] = None,
     language_memory_runtime: Optional[Dict[str, Any]] = None,
     doorway_runtime: Optional[Dict[str, Any]] = None,
+    scene_waypoint_runtime: Optional[Dict[str, Any]] = None,
     depth_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
@@ -181,11 +211,13 @@ def build_phase5_mission_manual(
         search_runtime=search_payload,
         language_memory_runtime=language_memory_runtime,
         doorway_runtime=doorway_runtime,
+        scene_waypoint_runtime=scene_waypoint_runtime,
         depth_stats=depth_stats,
     )
 
     location_state = str(env_context.get("location_state", "unknown") or "unknown")
     traversable_doorway_count = int(env_context.get("traversable_doorway_count", 0) or 0)
+    scene_stage_hint = str(env_context.get("scene_stage_hint", "scene_interpretation") or "scene_interpretation")
     stage_list: List[Dict[str, Any]] = []
 
     stage_list.append(
@@ -274,12 +306,24 @@ def build_phase5_mission_manual(
     )
 
     active_stage_id = stage_list[0]["stage_id"]
-    if location_state == "outside_house":
+    scene_stage_map = {
+        "scene_interpretation": "phase5_stage_01_localize_context",
+        "find_entry_door": "phase5_stage_02_find_entry_door",
+        "approach_entry": "phase5_stage_03_approach_entry",
+        "cross_entry": "phase5_stage_04_cross_entry",
+        "indoor_stabilize": "phase5_stage_05_house_search",
+        "house_search": "phase5_stage_05_house_search",
+        "verify_target": "phase5_stage_06_verify_target",
+        "report_result": "phase5_stage_07_report_result",
+    }
+    if scene_stage_hint in scene_stage_map:
+        active_stage_id = scene_stage_map[scene_stage_hint]
+    elif location_state == "outside_house":
         if traversable_doorway_count > 0:
             active_stage_id = "phase5_stage_03_approach_entry"
         else:
             active_stage_id = "phase5_stage_02_find_entry_door"
-    if location_state == "inside_house":
+    elif location_state == "inside_house":
         active_stage_id = "phase5_stage_05_house_search"
     if str(evidence_payload.get("evidence_status", "idle") or "idle") in ("suspect", "confirmed_present", "confirmed_absent"):
         active_stage_id = "phase5_stage_06_verify_target"

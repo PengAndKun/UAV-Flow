@@ -503,8 +503,10 @@ Expected panel signals:
 This is the main mode for “API decides several consecutive actions”.
 
 Suggested configuration:
-- `Seg Steps = 5`
+- `Seg Steps = 8`
 - `Plan Every = 0`
+- `Hold Retry = 2`
+- `Continuous LLM = on`
 
 Procedure:
 1. Set:
@@ -518,13 +520,14 @@ Meaning:
 - each step asks the LLM action endpoint once
 - each step executes one bounded macro action
 - no extra high-level planner refresh unless `Plan Every > 0`
+- if the API returns one temporary `hold`, the segment can retry instead of stopping immediately
 
 If you want both:
 - high-level replanning
 - per-step pure LLM action
 
 then use:
-- `Seg Steps = 5`
+- `Seg Steps = 8`
 - `Plan Every = 1`
 
 This mode means:

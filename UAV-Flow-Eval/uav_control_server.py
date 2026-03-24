@@ -37,6 +37,7 @@ from gym_unrealcv.envs.wrappers import augmentation, configUE, time_dilation
 from doorway_detection import detect_doorway_runtime
 from language_search_memory import LanguageSearchMemory
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
+from multimodal_scene_waypoint_adapter import build_heuristic_scene_waypoint_runtime
 from phase5_mission_manual import build_phase5_mission_manual
 from runtime_interfaces import (
     build_doorway_runtime_state,
@@ -51,6 +52,8 @@ from runtime_interfaces import (
     build_reflex_runtime_state,
     build_reflex_sample,
     build_runtime_debug_state,
+    build_scene_waypoint_request,
+    build_scene_waypoint_runtime_state,
     build_search_region,
     build_search_result_state,
     build_search_runtime_state,
@@ -58,6 +61,7 @@ from runtime_interfaces import (
     coerce_llm_action_runtime_payload,
     coerce_plan_payload,
     coerce_reflex_runtime_payload,
+    coerce_scene_waypoint_runtime_payload,
     now_timestamp,
 )
 
@@ -368,6 +372,9 @@ class UAVControlBackend:
             mission_id=str(self.current_mission.get("mission_id", "")),
             current_plan_id=str(self.current_plan.get("plan_id", "")),
             current_search_subgoal=str(self.current_plan.get("search_subgoal", "idle")),
+            continuous_mode=False,
+            hold_retry_budget=0,
+            hold_retry_count=0,
         )
         self.takeover_events: List[Dict[str, Any]] = []
         self.takeover_event_counter: int = 0
@@ -421,7 +428,13 @@ class UAVControlBackend:
             source="none",
             status="idle",
         )
+        self.scene_waypoint_runtime: Dict[str, Any] = build_scene_waypoint_runtime_state(
+            policy_name=self.args.planner_name,
+            source="none",
+            status="idle",
+        )
         self.last_llm_action_request: Dict[str, Any] = {}
+        self.last_scene_waypoint_request: Dict[str, Any] = {}
         self.recent_action_history: List[Dict[str, Any]] = []
 
         os.makedirs(self.args.capture_dir, exist_ok=True)
@@ -622,6 +635,7 @@ class UAVControlBackend:
             person_evidence_runtime=self.person_evidence_runtime,
             language_memory_runtime=self.language_memory_runtime,
             doorway_runtime=self.doorway_runtime,
+            scene_waypoint_runtime=self.scene_waypoint_runtime,
             depth_stats=self.last_depth_summary,
         )
         return self.phase5_mission_manual
@@ -1294,6 +1308,9 @@ class UAVControlBackend:
             step_budget=int(current_state.get("step_budget", 0)),
             refresh_plan=bool(current_state.get("refresh_plan", False)),
             plan_refresh_interval_steps=int(current_state.get("plan_refresh_interval_steps", 0)),
+            continuous_mode=bool(current_state.get("continuous_mode", False)),
+            hold_retry_budget=int(current_state.get("hold_retry_budget", 0)),
+            hold_retry_count=int(current_state.get("hold_retry_count", 0)),
             steps_executed=int(current_state.get("steps_executed", 0)),
             blocked_count=int(current_state.get("blocked_count", 0)),
             replan_count=int(current_state.get("replan_count", 0)),
@@ -1327,6 +1344,9 @@ class UAVControlBackend:
             step_budget=int(state.get("step_budget", 0)),
             refresh_plan=bool(state.get("refresh_plan", False)),
             plan_refresh_interval_steps=int(state.get("plan_refresh_interval_steps", 0)),
+            continuous_mode=bool(state.get("continuous_mode", False)),
+            hold_retry_budget=int(state.get("hold_retry_budget", 0)),
+            hold_retry_count=int(state.get("hold_retry_count", 0)),
             steps_executed=int(state.get("steps_executed", 0)),
             blocked_count=int(state.get("blocked_count", 0)),
             replan_count=int(state.get("replan_count", 0)),
@@ -1430,6 +1450,7 @@ class UAVControlBackend:
                 context={
                     "recent_actions": self.get_recent_action_history(limit=8),
                     "waypoint_hint": waypoint_hint,
+                    "planner_executor_runtime": self.planner_executor_state,
                     "archive": self.archive_runtime.get_planner_context(
                         task_label=self.current_task_label or "idle",
                         semantic_subgoal=str(self.current_plan.get("semantic_subgoal", "idle") or "idle"),
@@ -1465,6 +1486,111 @@ class UAVControlBackend:
                 self.llm_action_runtime = self.build_heuristic_llm_action_runtime(trigger=trigger, reason=str(exc))
                 self.llm_action_runtime["last_latency_ms"] = round((datetime.now().timestamp() - action_started) * 1000.0, 2)
                 return self.llm_action_runtime
+
+    def request_scene_waypoints(
+        self,
+        *,
+        trigger: str = "manual_request",
+        refresh_observations: bool = True,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            if refresh_observations or self.last_raw_frame is None or self.last_depth_frame is None:
+                frame = self.refresh_observations()
+            else:
+                frame = self.last_raw_frame
+            pose = self.get_task_pose()
+            archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            scene_request = build_scene_waypoint_request(
+                task_label=self.current_task_label or "idle",
+                instruction=self.current_task_label or self.current_mission.get("mission_type", "semantic_navigation"),
+                frame_id=self.last_observation_id,
+                timestamp=self.last_observation_time,
+                pose={
+                    "x": pose[0],
+                    "y": pose[1],
+                    "z": pose[2],
+                    "yaw": pose[3],
+                },
+                depth=self.last_depth_summary,
+                camera_info=self.last_depth_summary.get("camera_info", {}),
+                image_b64=encode_image_b64(frame, self.args.frame_jpeg_quality),
+                planner_name=self.args.planner_name,
+                trigger=trigger,
+                step_index=int(self.plan_execution_state.get("step_index", 0)),
+                mission=self.current_mission,
+                search_runtime=self.search_runtime,
+                doorway_runtime=self.doorway_runtime,
+                phase5_mission_manual=self.phase5_mission_manual,
+                person_evidence_runtime=self.person_evidence_runtime,
+                search_result=self.search_result,
+                language_memory_runtime=self.language_memory_runtime,
+                current_plan=self.current_plan,
+                runtime_debug=self.runtime_debug,
+                context={
+                    "recent_actions": self.get_recent_action_history(limit=8),
+                    "archive": self.archive_runtime.get_planner_context(
+                        task_label=self.current_task_label or "idle",
+                        semantic_subgoal=str(self.current_plan.get("semantic_subgoal", "idle") or "idle"),
+                        limit=int(self.args.archive_retrieval_limit),
+                    ),
+                    "phase5_active_stage": str(self.phase5_mission_manual.get("active_stage_id", "")),
+                    "phase5_summary": str(self.phase5_mission_manual.get("summary", "")),
+                },
+            )
+            self.last_scene_waypoint_request = scene_request
+            if not self.args.planner_url:
+                self.scene_waypoint_runtime = build_heuristic_scene_waypoint_runtime(
+                    request_payload=scene_request,
+                    policy_name=self.args.planner_name,
+                )
+                self.scene_waypoint_runtime["last_trigger"] = trigger
+                self.sync_phase5_mission_manual()
+                return self.scene_waypoint_runtime
+            started = datetime.now().timestamp()
+            req = request.Request(
+                f"{self.args.planner_url.rstrip('/')}{self.args.planner_scene_waypoint_endpoint}",
+                data=json.dumps(scene_request).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with request.urlopen(req, timeout=self.args.planner_timeout_s) as resp:
+                    raw = json.loads(resp.read().decode("utf-8"))
+                payload = raw.get("scene_waypoint_runtime") if isinstance(raw, dict) and isinstance(raw.get("scene_waypoint_runtime"), dict) else raw
+                self.scene_waypoint_runtime = coerce_scene_waypoint_runtime_payload(
+                    payload,
+                    default_policy_name=self.args.planner_name,
+                    default_source="external_scene_waypoint",
+                )
+                self.scene_waypoint_runtime["last_trigger"] = trigger
+                self.scene_waypoint_runtime["last_latency_ms"] = float(
+                    self.scene_waypoint_runtime.get(
+                        "last_latency_ms",
+                        round((datetime.now().timestamp() - started) * 1000.0, 2),
+                    )
+                    or 0.0
+                )
+                self.sync_phase5_mission_manual()
+                return self.scene_waypoint_runtime
+            except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
+                logger.warning("Scene waypoint request failed, fallback to heuristic runtime: %s", exc)
+                self.scene_waypoint_runtime = build_heuristic_scene_waypoint_runtime(
+                    request_payload=scene_request,
+                    policy_name=self.args.planner_name,
+                    model_name=str(self.plan_execution_state.get("last_model_name", "") or ""),
+                    api_style=str(self.plan_execution_state.get("last_api_style", "") or ""),
+                    route_mode=str(self.plan_execution_state.get("planner_route_mode", "") or ""),
+                    fallback_reason=str(exc),
+                )
+                self.scene_waypoint_runtime["source"] = "local_scene_heuristic"
+                self.scene_waypoint_runtime["status"] = "fallback"
+                self.scene_waypoint_runtime["fallback_used"] = True
+                self.scene_waypoint_runtime["fallback_reason"] = str(exc)
+                self.scene_waypoint_runtime["upstream_error"] = str(exc)
+                self.scene_waypoint_runtime["last_trigger"] = trigger
+                self.scene_waypoint_runtime["last_latency_ms"] = round((datetime.now().timestamp() - started) * 1000.0, 2)
+                self.sync_phase5_mission_manual()
+                return self.scene_waypoint_runtime
 
     def execute_llm_action(
         self,
@@ -1526,11 +1652,14 @@ class UAVControlBackend:
         step_budget: int = 5,
         refresh_plan: bool = True,
         plan_refresh_interval_steps: int = 0,
+        continuous_mode: bool = True,
+        hold_retry_budget: int = 2,
         trigger: str = "manual_llm_action_segment",
     ) -> Dict[str, Any]:
         with self.lock:
             budget = max(1, min(int(step_budget), 25))
             replan_interval = max(0, int(plan_refresh_interval_steps))
+            hold_budget = max(0, min(int(hold_retry_budget), 8))
             run_id = f"llm_action_segment_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{int(self.plan_execution_state.get('step_index', 0)):04d}"
             self.update_planner_executor_state(
                 mode="llm_action_segment",
@@ -1545,6 +1674,9 @@ class UAVControlBackend:
                 step_budget=budget,
                 refresh_plan=bool(refresh_plan),
                 plan_refresh_interval_steps=replan_interval,
+                continuous_mode=bool(continuous_mode),
+                hold_retry_budget=hold_budget,
+                hold_retry_count=0,
                 steps_executed=0,
                 blocked_count=0,
                 replan_count=0,
@@ -1566,6 +1698,7 @@ class UAVControlBackend:
                 )
             steps_executed = 0
             blocked_count = 0
+            hold_retry_count = 0
             stop_reason = "budget_exhausted"
             stop_detail = ""
             last_action = "idle"
@@ -1594,8 +1727,29 @@ class UAVControlBackend:
                 stop_condition = str(llm_action_runtime.get("stop_condition", "continue_search") or "continue_search")
                 if requested_action in ("idle", "hold_position", "hold", "shield_hold"):
                     blocked_count += 1
+                    hold_retry_count += 1
                     stop_reason = stop_condition if stop_condition != "continue_search" else "hold_action"
                     stop_detail = str(llm_action_runtime.get("rationale", "") or "LLM returned hold")
+                    self.update_planner_executor_state(
+                        steps_executed=steps_executed,
+                        blocked_count=blocked_count,
+                        hold_retry_count=hold_retry_count,
+                        replan_count=replan_count,
+                        last_action="hold",
+                        last_stop_reason=stop_reason,
+                        last_stop_detail=stop_detail,
+                    )
+                    if continuous_mode and hold_retry_count <= hold_budget and stop_condition not in {"need_manual_review", "target_confirmed"}:
+                        if bool(llm_action_runtime.get("should_request_plan", False)):
+                            self.request_plan(trigger=f"{trigger}_hold_replan_{hold_retry_count}")
+                            replan_count += 1
+                            self.update_planner_executor_state(
+                                replan_count=replan_count,
+                                current_plan_id=str(self.current_plan.get("plan_id", "")),
+                                current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
+                                target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
+                            )
+                        continue
                     break
                 motion_payload = self.build_motion_payload_for_action(requested_action)
                 if motion_payload is None:
@@ -1615,12 +1769,14 @@ class UAVControlBackend:
                     allow_reflex_assist=False,
                 )
                 steps_executed += 1
+                hold_retry_count = 0
                 last_action = str(motion_payload.get("action_name", requested_action))
                 after_wp_distance = float(self.reflex_runtime.get("waypoint_distance_cm", 0.0) or 0.0)
                 last_progress_cm = before_wp_distance - after_wp_distance if before_wp_distance > 0.0 and after_wp_distance > 0.0 else 0.0
                 self.update_planner_executor_state(
                     steps_executed=steps_executed,
                     blocked_count=blocked_count,
+                    hold_retry_count=hold_retry_count,
                     replan_count=replan_count,
                     current_plan_id=str(self.current_plan.get("plan_id", "")),
                     current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
@@ -1639,7 +1795,11 @@ class UAVControlBackend:
                         current_search_subgoal=str(self.search_runtime.get("current_search_subgoal", "idle")),
                         target_waypoint=self.runtime_debug.get("current_waypoint") if isinstance(self.runtime_debug.get("current_waypoint"), dict) else {},
                     )
-                if stop_condition in {"need_manual_review", "target_confirmed", "hold_position"}:
+                if stop_condition in {"need_manual_review", "target_confirmed"}:
+                    stop_reason = stop_condition
+                    stop_detail = str(llm_action_runtime.get("rationale", "") or stop_condition)
+                    break
+                if stop_condition == "hold_position" and not continuous_mode:
                     stop_reason = stop_condition
                     stop_detail = str(llm_action_runtime.get("rationale", "") or stop_condition)
                     break
@@ -1651,6 +1811,7 @@ class UAVControlBackend:
                 state=final_state_label,
                 steps_executed=steps_executed,
                 blocked_count=blocked_count,
+                hold_retry_count=hold_retry_count,
                 replan_count=replan_count,
                 last_action=last_action,
                 last_stop_reason=stop_reason,
@@ -2032,6 +2193,7 @@ class UAVControlBackend:
     def refresh_observations(self) -> np.ndarray:
         frame = self.refresh_preview_only()
         self.refresh_depth_only()
+        self.sync_phase5_mission_manual()
         return frame
 
     def refresh_preview(self) -> np.ndarray:
@@ -2096,7 +2258,13 @@ class UAVControlBackend:
                 source="none",
                 status="idle",
             )
+            self.scene_waypoint_runtime = build_scene_waypoint_runtime_state(
+                policy_name=self.args.planner_name,
+                source="none",
+                status="idle",
+            )
             self.last_llm_action_request = {}
+            self.last_scene_waypoint_request = {}
             self.reset_person_search_state(reset_recent_events=True)
             self.search_runtime = self.build_search_runtime_snapshot()
             archive_state = self.sync_archive_runtime()
@@ -2149,6 +2317,16 @@ class UAVControlBackend:
             if task_label is not None:
                 self.set_task_label(task_label)
             frame = self.refresh_observations()
+            mission_type = str(self.current_mission.get("mission_type", "semantic_navigation") or "semantic_navigation")
+            if mission_type in ("person_search", "room_search", "target_verification"):
+                try:
+                    self.request_scene_waypoints(
+                        trigger=f"{trigger}_scene",
+                        refresh_observations=False,
+                    )
+                except Exception as exc:
+                    logger.warning("Scene waypoint request failed during planner preflight: %s", exc)
+                    self.sync_phase5_mission_manual()
             pose = self.get_task_pose()
             task_label_value = self.current_task_label or "idle"
             plan_payload: Optional[Dict[str, Any]] = None
@@ -2562,6 +2740,7 @@ class UAVControlBackend:
                 "search_result": self.search_result,
                 "language_memory_runtime": self.language_memory_runtime,
                 "phase5_mission_manual": self.phase5_mission_manual,
+                "scene_waypoint_runtime": self.scene_waypoint_runtime,
                 "plan": self.current_plan,
                 "planner_runtime": self.plan_execution_state,
                 "archive": archive_state,
@@ -2585,6 +2764,13 @@ class UAVControlBackend:
                     "step_index": self.last_llm_action_request.get("step_index", 0),
                     "task_label": self.last_llm_action_request.get("task_label", ""),
                     "frame_id": self.last_llm_action_request.get("frame_id", ""),
+                },
+                "last_scene_waypoint_request": {
+                    "schema_version": self.last_scene_waypoint_request.get("schema_version", ""),
+                    "trigger": self.last_scene_waypoint_request.get("trigger", ""),
+                    "step_index": self.last_scene_waypoint_request.get("step_index", 0),
+                    "task_label": self.last_scene_waypoint_request.get("task_label", ""),
+                    "frame_id": self.last_scene_waypoint_request.get("frame_id", ""),
                 },
                 "runtime_debug": self.runtime_debug,
                 "last_capture": self.last_capture,
@@ -2913,6 +3099,7 @@ class UAVControlBackend:
                 "search_result": self.search_result,
                 "language_memory_runtime": self.language_memory_runtime,
                 "phase5_mission_manual": self.phase5_mission_manual,
+                "scene_waypoint_runtime": self.scene_waypoint_runtime,
                 "runtime_debug": self.runtime_debug,
                 "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
                 "reflex_runtime": self.reflex_runtime,
@@ -2960,6 +3147,7 @@ class UAVControlBackend:
                 "search_result": metadata["search_result"],
                 "language_memory_runtime": metadata["language_memory_runtime"],
                 "phase5_mission_manual": metadata["phase5_mission_manual"],
+                "scene_waypoint_runtime": metadata["scene_waypoint_runtime"],
                 "archive": metadata["archive"],
                 "reflex_runtime": metadata["reflex_runtime"],
                 "llm_action_runtime": metadata["llm_action_runtime"],
@@ -3073,6 +3261,8 @@ def make_handler(backend: UAVControlBackend):
                     self._send_json({"status": "ok", "reflex_runtime": backend.reflex_runtime})
                 elif parsed.path == "/llm_action":
                     self._send_json({"status": "ok", "llm_action_runtime": backend.llm_action_runtime})
+                elif parsed.path == "/scene_waypoints":
+                    self._send_json({"status": "ok", "scene_waypoint_runtime": backend.scene_waypoint_runtime})
                 elif parsed.path == "/reflex_execution":
                     self._send_json({"status": "ok", "reflex_execution": backend.reflex_execution_state})
                 elif parsed.path == "/planner_executor":
@@ -3141,6 +3331,12 @@ def make_handler(backend: UAVControlBackend):
                         refresh_observations=bool(data.get("refresh_observations", True)),
                     )
                     self._send_json({"status": "ok", "llm_action_runtime": llm_action_runtime})
+                elif parsed.path == "/request_scene_waypoints":
+                    scene_waypoint_runtime = backend.request_scene_waypoints(
+                        trigger=str(data.get("trigger", "manual_request") or "manual_request"),
+                        refresh_observations=bool(data.get("refresh_observations", True)),
+                    )
+                    self._send_json({"status": "ok", "scene_waypoint_runtime": scene_waypoint_runtime})
                 elif parsed.path == "/execute_reflex":
                     self._send_json(
                         backend.execute_reflex_action(
@@ -3174,6 +3370,8 @@ def make_handler(backend: UAVControlBackend):
                             step_budget=int(data.get("step_budget", 5) or 5),
                             refresh_plan=bool(data.get("refresh_plan", True)),
                             plan_refresh_interval_steps=int(data.get("plan_refresh_interval_steps", 0) or 0),
+                            continuous_mode=bool(data.get("continuous_mode", True)),
+                            hold_retry_budget=int(data.get("hold_retry_budget", 2) or 0),
                             trigger=str(data.get("trigger", "manual_llm_action_segment") or "manual_llm_action_segment"),
                         )
                     )
@@ -3291,6 +3489,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--planner_url", default=None, help="Optional external planner base URL")
     parser.add_argument("--planner_endpoint", default="/plan", help="Planner endpoint path used with planner_url")
     parser.add_argument("--planner_action_endpoint", default="/action", help="Pure LLM action endpoint path used with planner_url")
+    parser.add_argument("--planner_scene_waypoint_endpoint", default="/scene_waypoints", help="Multimodal scene waypoint endpoint path used with planner_url")
     parser.add_argument("--planner_timeout_s", type=float, default=5.0, help="Timeout for planner requests")
     parser.add_argument(
         "--planner_auto_mode",
