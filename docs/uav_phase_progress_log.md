@@ -3181,3 +3181,223 @@ Next recommended code steps:
 - add `reference_house_matcher.py`
 - add `semantic_archive_runtime.py`
 - then upgrade Phase 6 from a fused heuristic+LLM runtime to the full semantic-archive version
+
+### Phase 6.2 VLM Scene / Reference Match / Semantic Archive Integrated
+
+Completed:
+- integrated the new Phase 6 helper modules into the runtime stack:
+  - [vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/vlm_scene_descriptor.py)
+  - [reference_house_matcher.py](/E:/github/UAV-Flow/UAV-Flow-Eval/reference_house_matcher.py)
+  - [semantic_archive_runtime.py](/E:/github/UAV-Flow/UAV-Flow-Eval/semantic_archive_runtime.py)
+- updated [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py) to:
+  - maintain `vlm_scene_runtime`
+  - maintain `reference_match_runtime`
+  - maintain `semantic_archive_runtime`
+  - pass all three runtimes into planner, scene-waypoint, and LLM-action requests
+  - store all three runtimes in `/state` and capture bundles
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py) with new status lines:
+  - `VLMScene ...`
+  - `RefMatch ...`
+  - `SemArch ...`
+- updated prompt adapters so both:
+  - [llm_planner_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_planner_adapter.py)
+  - [llm_action_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_action_adapter.py)
+  now consume the new semantic intermediates
+
+Validation:
+- `python -m py_compile` passed for:
+  - `runtime_interfaces.py`
+  - `vlm_scene_descriptor.py`
+  - `reference_house_matcher.py`
+  - `semantic_archive_runtime.py`
+  - `phase6_mission_controller.py`
+  - `llm_planner_adapter.py`
+  - `llm_action_adapter.py`
+  - `uav_control_server.py`
+  - `uav_control_panel.py`
+
+Current state:
+- Phase 6 no longer depends only on doorway heuristics and language-memory summaries
+- planner and action prompts now receive:
+  - scene-level semantic text
+  - target-house match state
+  - semantic archive retrieval summaries
+- the next meaningful step is to validate the new runtimes live and then tighten the control loop around:
+  - outdoor localization
+  - target-house verification
+  - entry search / approach / crossing
+
+### Phase 6.3 Waypoint Planner Runtime Added
+
+Completed:
+- added [phase6_waypoint_planner.py](/E:/github/UAV-Flow/UAV-Flow-Eval/phase6_waypoint_planner.py)
+- introduced shared runtime schema in [runtime_interfaces.py](/E:/github/UAV-Flow/UAV-Flow-Eval/runtime_interfaces.py):
+  - `build_phase6_waypoint_runtime_state`
+- integrated `phase6_waypoint_runtime` into:
+  - [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py)
+  - [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py)
+  - [llm_planner_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_planner_adapter.py)
+  - [llm_action_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_action_adapter.py)
+
+What the first version does:
+- converts `phase6_mission_runtime` into a queue of semantic waypoints
+- reuses scene-waypoint outputs when they already exist
+- prepends doorway-centric waypoints during:
+  - `entry_search`
+  - `approach_entry`
+  - `cross_entry`
+- carries semantic-archive hints forward into the first waypoint rationale
+
+Current UI/runtime impact:
+- `/state` now contains `phase6_waypoint_runtime`
+- capture bundles now contain `phase6_waypoint_runtime`
+- panel now has a `Phase6WP ...` status line
+- planner/action prompts now receive `phase6_waypoint_runtime`
+
+Validation:
+- `python -m py_compile` passed for:
+  - `runtime_interfaces.py`
+  - `phase6_waypoint_planner.py`
+  - `llm_planner_adapter.py`
+  - `llm_action_adapter.py`
+  - `uav_control_server.py`
+  - `uav_control_panel.py`
+
+### Phase 6.4 API Request History Viewer Added
+
+Completed:
+- added rolling API request history retention inside [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py)
+- each `planner / scene_waypoint / llm_action` request now records:
+  - trigger
+  - task label
+  - frame id / step index
+  - model / api style / route
+  - latency
+  - fallback flag
+  - error text
+  - compact request payload
+  - response summary
+  - parsed payload
+  - raw reply excerpt
+  - prompt excerpts
+- exposed new endpoint:
+  - `GET /api_history`
+- exposed lightweight summary in `/state`:
+  - `api_history_summary`
+- updated [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py):
+  - new `APIHist ...` status line
+  - new `View API History` button
+  - new history viewer window
+
+Why this was added:
+- recent live tests produced repeated `HTTP 500 / timeout / fallback` events
+- the previous UI only showed the latest reply/prompt and made it difficult to inspect:
+  - what each API call returned
+  - whether parsing failed
+  - whether fallback happened
+  - which trigger produced the bad response
+
+Validation:
+- `python -m py_compile` passed for:
+  - `uav_control_server.py`
+  - `uav_control_panel.py`
+
+### Phase 6.5 Compact Control Panel Added
+
+Completed:
+- added a new lightweight controller:
+  - [uav_control_panel_compact.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel_compact.py)
+- kept the old rich panel untouched so both panels can coexist during transition
+
+What the compact panel keeps:
+- basic manual controls:
+  - `forward / backward / left / right / up / down / yaw left / yaw right / hold`
+- compact symbol-sequence input:
+  - e.g. `wwwqdd`
+- lightweight UAV status display:
+  - pose
+  - task label
+  - planner summary
+  - LLM action summary
+  - API history summary
+- RGB/depth preview window open/close toggles
+- LLM/planner configuration controls:
+  - presets
+  - mode / route / api style / model
+  - inline API key
+  - timeout / fallback
+- direct API history viewer via `GET /api_history`
+
+What it intentionally drops or simplifies:
+- no large scroll-heavy status wall
+- no default high-frequency image pulling
+- preview/depth auto-refresh is off by default
+- reduced surface area to make live debugging and manual flight smoother
+
+Validation:
+- `python -m py_compile` passed for:
+  - `uav_control_panel_compact.py`
+
+### Phase 6.6 Compact Panel Slimmed For Paper Runs
+
+Completed:
+- refactored [uav_control_panel_compact.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel_compact.py) into a more focused paper-experiment controller
+- added a full-height vertical scrollbar for the compact panel body
+- added resize-aware font scaling so shrinking/enlarging the window also rescales:
+  - form labels
+  - buttons
+  - status blocks
+  - text viewers
+- removed non-essential controls from the compact view and kept only the minimal experiment set:
+  - task label / capture
+  - basic movement
+  - symbol sequence execution
+  - RGB/depth window toggles
+  - preset-based LLM configuration
+  - `Request Plan`
+  - `Request Scene`
+  - `Execute LLM Segment`
+  - `View API History`
+  - `Refresh State`
+
+Why this was changed:
+- the previous compact controller was still too dense during live flight experiments
+- the user requested:
+  - a scrollbar
+  - font resizing that follows window scaling
+  - a smaller panel focused on the minimum paper-experiment workflow
+
+Validation:
+- `python -m py_compile` passed for:
+  - `uav_control_panel_compact.py`
+
+### Phase 6.7 Compact Panel Restored And Move Sending Hardened
+
+Completed:
+- adjusted [uav_control_panel_compact.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel_compact.py) back toward the earlier, more feature-complete compact layout requested by the user
+- restored controls that had been trimmed too aggressively:
+  - preview auto toggles
+  - refresh section with `Auto State`
+  - full planner/LLM config rows
+  - `Request LLM Action`
+  - heuristic fallback checkbox
+- redesigned the basic movement area to be more compact:
+  - central translation pad (`forward/left/hold/right/backward`)
+  - side orientation pad (`up/down/yaw left/yaw right`)
+- hardened manual move delivery:
+  - manual button presses are now serialized through a lightweight local queue
+  - repeated clicks like `q q q` no longer spawn overlapping `/move_relative` requests
+  - state refresh skips while a move command is actively in flight
+  - sequence execution now also marks move requests as in flight to reduce request contention
+
+Why this was changed:
+- the user preferred the previous compact panel over the over-trimmed paper-only version
+- live experiments showed repeated:
+  - `Move q failed`
+  - `timed out`
+  - connection-refused noise
+- overlapping UI requests and manual move commands were contributing to unreliable command delivery
+
+Validation:
+- `python -m py_compile` passed for:
+  - `uav_control_panel_compact.py`

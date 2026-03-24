@@ -171,8 +171,13 @@ class UAVControlPanel:
         self.doorway_var = tk.StringVar(value="Doorway: idle")
         self.phase5_var = tk.StringVar(value="Phase5: idle")
         self.phase6_var = tk.StringVar(value="Phase6: idle")
+        self.phase6_waypoint_var = tk.StringVar(value="Phase6WP: idle")
+        self.vlm_scene_var = tk.StringVar(value="VLMScene: idle")
+        self.reference_match_var = tk.StringVar(value="RefMatch: idle")
+        self.semantic_archive_var = tk.StringVar(value="SemArch: idle")
         self.language_memory_var = tk.StringVar(value="LangMem: idle")
         self.api_reply_var = tk.StringVar(value="APIReply: idle")
+        self.api_history_var = tk.StringVar(value="APIHist: idle")
         self.scene_waypoint_var = tk.StringVar(value="SceneWP: idle")
         self.llm_action_var = tk.StringVar(value="LLMAct: idle")
         self.archive_var = tk.StringVar(value="Archive: idle")
@@ -181,8 +186,11 @@ class UAVControlPanel:
         self.planner_executor_var = tk.StringVar(value="Plan Executor: idle")
         self.takeover_var = tk.StringVar(value="Takeover: idle")
         self.last_state: Optional[Dict[str, Any]] = None
+        self.last_api_history: Optional[Dict[str, Any]] = None
         self.api_reply_window: Optional[tk.Toplevel] = None
         self.api_reply_text_widget: Optional[tk.Text] = None
+        self.api_history_window: Optional[tk.Toplevel] = None
+        self.api_history_text_widget: Optional[tk.Text] = None
         self.api_prompt_window: Optional[tk.Toplevel] = None
         self.api_prompt_text_widget: Optional[tk.Text] = None
         self.scene_waypoint_reply_window: Optional[tk.Toplevel] = None
@@ -767,6 +775,44 @@ class UAVControlPanel:
             ]
         )
 
+    def build_api_history_view_text(self) -> str:
+        if not isinstance(self.last_api_history, dict):
+            return "No API history has been loaded yet."
+        entries = self.last_api_history.get("api_request_history", [])
+        if not isinstance(entries, list) or not entries:
+            return "API history is empty."
+        sections = []
+        for index, entry in enumerate(reversed(entries), start=1):
+            if not isinstance(entry, dict):
+                continue
+            sections.extend(
+                [
+                    f"[{index}] {entry.get('timestamp', '')} {entry.get('kind', 'unknown')} status={entry.get('status', 'unknown')}",
+                    f"trigger={entry.get('trigger', '')} task={entry.get('task_label', '')} frame={entry.get('frame_id', '')} step={entry.get('step_index', 0)}",
+                    f"source={entry.get('source', '')} route={entry.get('route_mode', '')} api={entry.get('api_style', '')} model={entry.get('model_name', '')}",
+                    f"latency_ms={float(entry.get('latency_ms', 0.0) or 0.0):.1f} fallback={int(bool(entry.get('fallback_used', False)))}",
+                    f"error={entry.get('error', '') or '(none)'}",
+                    "request_payload:",
+                    json.dumps(entry.get("request_payload", {}), ensure_ascii=True, indent=2),
+                    "response_summary:",
+                    json.dumps(entry.get("response_summary", {}), ensure_ascii=True, indent=2),
+                    "parsed_payload:",
+                    json.dumps(entry.get("parsed_payload", {}), ensure_ascii=True, indent=2),
+                    "usage:",
+                    json.dumps(entry.get("usage", {}), ensure_ascii=True, indent=2),
+                    "raw_text:",
+                    str(entry.get("raw_text", "") or "(empty)"),
+                    "system_prompt_excerpt:",
+                    str(entry.get("system_prompt_excerpt", "") or "(empty)"),
+                    "user_prompt_excerpt:",
+                    str(entry.get("user_prompt_excerpt", "") or "(empty)"),
+                    "",
+                    "=" * 80,
+                    "",
+                ]
+            )
+        return "\n".join(sections).strip()
+
     def get_scene_waypoint_runtime(self) -> Dict[str, Any]:
         if not isinstance(self.last_state, dict):
             return {}
@@ -916,6 +962,26 @@ class UAVControlPanel:
             raise_window=raise_window,
         )
 
+    def refresh_api_history_view(self, *, raise_window: bool = True) -> None:
+        self.run_async_request(
+            lambda: self.client.get_json("/api_history"),
+            busy_message="Loading API history...",
+            on_success=lambda result: self.handle_api_history_response(result, raise_window=raise_window),
+            on_error=lambda exc: self.handle_async_request_error("Load API History", exc),
+        )
+
+    def handle_api_history_response(self, result: Optional[Dict[str, Any]], *, raise_window: bool = True) -> None:
+        if not isinstance(result, dict):
+            return
+        self.last_api_history = result
+        self.open_text_viewer(
+            window_attr="api_history_window",
+            text_widget_attr="api_history_text_widget",
+            title="API Request History",
+            content=self.build_api_history_view_text(),
+            raise_window=raise_window,
+        )
+
     def show_api_prompt_window(self, *, raise_window: bool = True) -> None:
         self.open_text_viewer(
             window_attr="api_prompt_window",
@@ -1024,7 +1090,12 @@ class UAVControlPanel:
         doorway_runtime = state.get("doorway_runtime", {})
         phase5_manual = state.get("phase5_mission_manual", {})
         phase6_runtime = state.get("phase6_mission_runtime", {})
+        phase6_waypoint_runtime = state.get("phase6_waypoint_runtime", {})
+        vlm_scene_runtime = state.get("vlm_scene_runtime", {})
+        reference_match_runtime = state.get("reference_match_runtime", {})
+        semantic_archive_runtime = state.get("semantic_archive_runtime", {})
         language_memory = state.get("language_memory_runtime", {})
+        api_history_summary = state.get("api_history_summary", {}) if isinstance(state.get("api_history_summary"), dict) else {}
         planner_runtime = state.get("planner_runtime", {})
         scene_waypoint_runtime = state.get("scene_waypoint_runtime", {})
         archive = state.get("archive", {})
@@ -1210,6 +1281,76 @@ class UAVControlPanel:
             f"goal={phase6_goal} "
             f"summary={phase6_summary}"
         )
+        phase6_waypoint_selected = (
+            phase6_waypoint_runtime.get("selected_waypoint", {})
+            if isinstance(phase6_waypoint_runtime.get("selected_waypoint"), dict)
+            else {}
+        )
+        phase6_waypoint_queue = (
+            phase6_waypoint_runtime.get("waypoint_queue", [])
+            if isinstance(phase6_waypoint_runtime.get("waypoint_queue"), list)
+            else []
+        )
+        phase6_waypoint_summary = self.shorten_text(
+            str(phase6_waypoint_runtime.get("summary", "") or "idle"),
+            limit=108,
+        ) or "idle"
+        self.phase6_waypoint_var.set(
+            "Phase6WP "
+            f"status={phase6_waypoint_runtime.get('status', 'idle')} "
+            f"goal={phase6_waypoint_runtime.get('active_goal', 'none')} "
+            f"mode={phase6_waypoint_runtime.get('control_mode', 'planner_waypoint')} "
+            f"sel={phase6_waypoint_selected.get('label', 'none') or 'none'} "
+            f"queue={len(phase6_waypoint_queue)} "
+            f"summary={phase6_waypoint_summary}"
+        )
+        vlm_preview = self.shorten_text(
+            str(
+                vlm_scene_runtime.get("scene_description", "")
+                or vlm_scene_runtime.get("semantic_text", "")
+                or "idle"
+            ).replace("\n", " "),
+            limit=104,
+        ) or "idle"
+        self.vlm_scene_var.set(
+            "VLMScene "
+            f"status={vlm_scene_runtime.get('status', 'idle')} "
+            f"scene={vlm_scene_runtime.get('scene_state', 'unknown')} "
+            f"entry={int(bool(vlm_scene_runtime.get('entry_visible', False)))}/{int(bool(vlm_scene_runtime.get('entry_traversable', False)))} "
+            f"dir={vlm_scene_runtime.get('unexplored_direction', 'none')} "
+            f"conf={float(vlm_scene_runtime.get('confidence', 0.0)):.2f} "
+            f"desc={vlm_preview}"
+        )
+        ref_preview = self.shorten_text(
+            str(reference_match_runtime.get("summary", "") or "idle").replace("\n", " "),
+            limit=104,
+        ) or "idle"
+        self.reference_match_var.set(
+            "RefMatch "
+            f"status={reference_match_runtime.get('status', 'idle')} "
+            f"state={reference_match_runtime.get('match_state', 'unknown')} "
+            f"conf={float(reference_match_runtime.get('match_confidence', 0.0)):.2f} "
+            f"thr={float(reference_match_runtime.get('threshold', 0.0)):.2f} "
+            f"summary={ref_preview}"
+        )
+        semantic_entry = semantic_archive_runtime.get("current_entry", {}) if isinstance(semantic_archive_runtime.get("current_entry"), dict) else {}
+        semantic_preview = self.shorten_text(
+            str(
+                semantic_entry.get("scene_description", "")
+                or semantic_archive_runtime.get("summary", "")
+                or "idle"
+            ).replace("\n", " "),
+            limit=104,
+        ) or "idle"
+        semantic_matches = semantic_archive_runtime.get("top_matches", []) if isinstance(semantic_archive_runtime.get("top_matches"), list) else []
+        self.semantic_archive_var.set(
+            "SemArch "
+            f"status={semantic_archive_runtime.get('status', 'idle')} "
+            f"entries={int(semantic_archive_runtime.get('entry_count', 0))} "
+            f"matches={len(semantic_matches)} "
+            f"stage={semantic_entry.get('stage_label', 'none') or 'none'} "
+            f"summary={semantic_preview}"
+        )
         language_focus = (
             language_memory.get("current_focus_region", {})
             if isinstance(language_memory.get("current_focus_region"), dict)
@@ -1248,6 +1389,17 @@ class UAVControlPanel:
             f"parsed={int(bool(parsed_payload))} "
             f"attempts={int(plan_debug.get('attempt_count', 0) or 0)} "
             f"preview={reply_preview or 'none'}"
+        )
+        api_history_preview = self.shorten_text(
+            str(api_history_summary.get("last_error", "") or api_history_summary.get("last_trigger", "") or "none"),
+            limit=108,
+        ) or "none"
+        self.api_history_var.set(
+            "APIHist "
+            f"count={int(api_history_summary.get('count', 0) or 0)} "
+            f"last={api_history_summary.get('last_kind', 'none')}:{api_history_summary.get('last_status', 'idle')} "
+            f"model={str(api_history_summary.get('last_model_name', '') or '-') } "
+            f"preview={api_history_preview}"
         )
         scene_usage = scene_waypoint_runtime.get("usage", {}) if isinstance(scene_waypoint_runtime.get("usage"), dict) else {}
         scene_tokens = int(
@@ -1390,6 +1542,14 @@ class UAVControlPanel:
         )
         if self.api_reply_window is not None and self.api_reply_window.winfo_exists():
             self.show_api_reply_window(raise_window=False)
+        if self.api_history_window is not None and self.api_history_window.winfo_exists() and isinstance(self.last_api_history, dict):
+            self.open_text_viewer(
+                window_attr="api_history_window",
+                text_widget_attr="api_history_text_widget",
+                title="API Request History",
+                content=self.build_api_history_view_text(),
+                raise_window=False,
+            )
         if self.api_prompt_window is not None and self.api_prompt_window.winfo_exists():
             self.show_api_prompt_window(raise_window=False)
         if self.scene_waypoint_reply_window is not None and self.scene_waypoint_reply_window.winfo_exists():
@@ -1602,8 +1762,13 @@ class UAVControlPanel:
         self.build_status_label(status_frame, self.doorway_var)
         self.build_status_label(status_frame, self.phase5_var)
         self.build_status_label(status_frame, self.phase6_var)
+        self.build_status_label(status_frame, self.phase6_waypoint_var)
+        self.build_status_label(status_frame, self.vlm_scene_var)
+        self.build_status_label(status_frame, self.reference_match_var)
+        self.build_status_label(status_frame, self.semantic_archive_var)
         self.build_status_label(status_frame, self.language_memory_var)
         self.build_status_label(status_frame, self.api_reply_var)
+        self.build_status_label(status_frame, self.api_history_var)
         self.build_status_label(status_frame, self.scene_waypoint_var)
         self.build_status_label(status_frame, self.llm_action_var)
         self.build_status_label(status_frame, self.archive_var)
@@ -1710,6 +1875,7 @@ class UAVControlPanel:
             ("Execute LLM Action Segment", self.execute_llm_action_segment),
             ("Refresh (V)", lambda: (self.update_preview_once(), self.update_depth_once())),
             ("View API Reply", self.show_api_reply_window),
+            ("View API History", self.refresh_api_history_view),
             ("View API Prompt", self.show_api_prompt_window),
             ("View Scene Reply", self.show_scene_waypoint_reply_window),
             ("View Scene Prompt", self.show_scene_waypoint_prompt_window),

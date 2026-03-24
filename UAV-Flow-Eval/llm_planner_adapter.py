@@ -294,6 +294,9 @@ def build_llm_planner_prompt(
         else {}
     )
     doorway_runtime = request_payload.get("doorway_runtime") if isinstance(request_payload.get("doorway_runtime"), dict) else {}
+    vlm_scene_runtime = request_payload.get("vlm_scene_runtime") if isinstance(request_payload.get("vlm_scene_runtime"), dict) else {}
+    reference_match_runtime = request_payload.get("reference_match_runtime") if isinstance(request_payload.get("reference_match_runtime"), dict) else {}
+    semantic_archive_runtime = request_payload.get("semantic_archive_runtime") if isinstance(request_payload.get("semantic_archive_runtime"), dict) else {}
     phase5_mission_manual = (
         request_payload.get("phase5_mission_manual")
         if isinstance(request_payload.get("phase5_mission_manual"), dict)
@@ -302,6 +305,11 @@ def build_llm_planner_prompt(
     phase6_mission_runtime = (
         request_payload.get("phase6_mission_runtime")
         if isinstance(request_payload.get("phase6_mission_runtime"), dict)
+        else {}
+    )
+    phase6_waypoint_runtime = (
+        request_payload.get("phase6_waypoint_runtime")
+        if isinstance(request_payload.get("phase6_waypoint_runtime"), dict)
         else {}
     )
     pose = request_payload.get("pose") if isinstance(request_payload.get("pose"), dict) else {}
@@ -456,6 +464,62 @@ def build_llm_planner_prompt(
         "target_house_match_state": str(phase6_mission_runtime.get("target_house_match_state", "unavailable")),
         "summary": str(phase6_mission_runtime.get("summary", "")),
     }
+    phase6_waypoint_summary = {
+        "status": str(phase6_waypoint_runtime.get("status", "idle")),
+        "active_goal": str(phase6_waypoint_runtime.get("active_goal", "")),
+        "control_mode": str(phase6_waypoint_runtime.get("control_mode", "")),
+        "candidate_count": int(phase6_waypoint_runtime.get("candidate_count", 0)),
+        "traversable_entry_count": int(phase6_waypoint_runtime.get("traversable_entry_count", 0)),
+        "summary": str(phase6_waypoint_runtime.get("summary", "")),
+        "selected_waypoint": phase6_waypoint_runtime.get("selected_waypoint", {})
+        if isinstance(phase6_waypoint_runtime.get("selected_waypoint"), dict)
+        else {},
+        "waypoint_queue": [
+            {
+                "label": str(item.get("label", "")),
+                "x_hint": float(item.get("x_hint", 0.0)),
+                "y_hint": float(item.get("y_hint", 0.0)),
+                "reason": str(item.get("reason", "")),
+            }
+            for item in (phase6_waypoint_runtime.get("waypoint_queue") or [])[:4]
+            if isinstance(item, dict)
+        ],
+    }
+    vlm_scene_summary = {
+        "scene_state": str(vlm_scene_runtime.get("scene_state", "unknown")),
+        "entry_visible": bool(vlm_scene_runtime.get("entry_visible", False)),
+        "entry_traversable": bool(vlm_scene_runtime.get("entry_traversable", False)),
+        "room_type_hint": str(vlm_scene_runtime.get("room_type_hint", "")),
+        "unexplored_direction": str(vlm_scene_runtime.get("unexplored_direction", "")),
+        "scene_tags": [str(item) for item in (vlm_scene_runtime.get("scene_tags") or [])[:6]],
+        "scene_description": str(vlm_scene_runtime.get("scene_description", "")),
+        "semantic_text": str(vlm_scene_runtime.get("semantic_text", "")),
+    }
+    reference_match_summary = {
+        "status": str(reference_match_runtime.get("status", "idle")),
+        "match_state": str(reference_match_runtime.get("match_state", "unknown")),
+        "match_confidence": float(reference_match_runtime.get("match_confidence", 0.0)),
+        "summary": str(reference_match_runtime.get("summary", "")),
+    }
+    semantic_archive_summary = {
+        "status": str(semantic_archive_runtime.get("status", "idle")),
+        "entry_count": int(semantic_archive_runtime.get("entry_count", 0)),
+        "summary": str(semantic_archive_runtime.get("summary", "")),
+        "current_entry": semantic_archive_runtime.get("current_entry", {})
+        if isinstance(semantic_archive_runtime.get("current_entry"), dict)
+        else {},
+        "top_matches": [
+            {
+                "stage_label": str(item.get("stage_label", "")),
+                "scene_description": str(item.get("scene_description", "")),
+                "semantic_text": str(item.get("semantic_text", "")),
+                "similarity": float(item.get("similarity", 0.0)),
+                "action_hint": str(item.get("action_hint", "")),
+            }
+            for item in (semantic_archive_runtime.get("top_matches") or [])[:3]
+            if isinstance(item, dict)
+        ],
+    }
 
     system_prompt = (
         "You are a high-level UAV house-search planner. "
@@ -486,8 +550,12 @@ def build_llm_planner_prompt(
         f"search_result={_compact_json(search_result_summary)}\n"
         f"language_memory={_compact_json(language_memory_summary)}\n"
         f"doorway_runtime={_compact_json(doorway_summary)}\n"
+        f"vlm_scene={_compact_json(vlm_scene_summary)}\n"
+        f"reference_match={_compact_json(reference_match_summary)}\n"
+        f"semantic_archive={_compact_json(semantic_archive_summary)}\n"
         f"phase5_manual={_compact_json(phase5_summary)}\n"
         f"phase6_runtime={_compact_json(phase6_summary)}\n"
+        f"phase6_waypoints={_compact_json(phase6_waypoint_summary)}\n"
         f"heuristic_seed={_compact_json(heuristic_summary)}\n"
         "Rules:\n"
         "- prioritize person-search semantics over generic navigation semantics when the task mentions people, survivors, suspects, rooms, or verification.\n"
@@ -495,6 +563,8 @@ def build_llm_planner_prompt(
         "- follow the Phase 6 stage and scene_state when they are available; they take precedence over weaker heuristic hints.\n"
         "- if phase6_runtime.scene_state is outside_house, prefer target-house verification / entry-search / approach-entry style plans before indoor room search.\n"
         "- if the UAV appears to be outside and doorway_runtime reports a traversable entry candidate, prefer entry-oriented subgoals before generic interior search.\n"
+        "- use vlm_scene.scene_description and semantic_archive.top_matches as first-class semantic memory when deciding where to search next.\n"
+        "- if reference_match.match_state is matched or candidate, bias progress toward entry candidates on that facade.\n"
         "- use find_entry_door / approach_entry_door / traverse_entry_door when doorway reasoning is central to progress.\n"
         "- prefer candidate_region_labels from the provided region list.\n"
         "- use language_memory to avoid revisiting already described regions unless verification or revisit is justified.\n"

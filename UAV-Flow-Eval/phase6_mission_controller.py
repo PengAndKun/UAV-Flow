@@ -69,6 +69,8 @@ def build_phase6_mission_runtime(
     mission: Optional[Dict[str, Any]] = None,
     search_runtime: Optional[Dict[str, Any]] = None,
     doorway_runtime: Optional[Dict[str, Any]] = None,
+    vlm_scene_runtime: Optional[Dict[str, Any]] = None,
+    reference_match_runtime: Optional[Dict[str, Any]] = None,
     phase5_mission_manual: Optional[Dict[str, Any]] = None,
     scene_waypoint_runtime: Optional[Dict[str, Any]] = None,
     language_memory_runtime: Optional[Dict[str, Any]] = None,
@@ -78,6 +80,8 @@ def build_phase6_mission_runtime(
     mission_payload = _as_dict(mission)
     search_payload = _as_dict(search_runtime)
     doorway_payload = _as_dict(doorway_runtime)
+    vlm_payload = _as_dict(vlm_scene_runtime)
+    reference_payload = _as_dict(reference_match_runtime)
     phase5_payload = _as_dict(phase5_mission_manual)
     scene_payload = _as_dict(scene_waypoint_runtime)
     language_payload = _as_dict(language_memory_runtime)
@@ -91,7 +95,11 @@ def build_phase6_mission_runtime(
     phase5_env = _as_dict(phase5_payload.get("environment_context"))
     best_doorway = _as_dict(doorway_payload.get("best_candidate"))
 
-    scene_state = str(scene_payload.get("scene_state", "") or "")
+    scene_state = str(
+        vlm_payload.get("scene_state", "")
+        or scene_payload.get("scene_state", "")
+        or ""
+    )
     if not scene_state:
         scene_state = str(phase5_env.get("location_state", "unknown") or "unknown")
     location_state = scene_state or "unknown"
@@ -99,7 +107,11 @@ def build_phase6_mission_runtime(
     doorway_candidate_count = int(doorway_payload.get("candidate_count", 0) or 0)
     traversable_doorway_count = int(doorway_payload.get("traversable_candidate_count", 0) or 0)
     entry_visible = bool(scene_payload.get("entry_door_visible", False) or doorway_candidate_count > 0)
+    if bool(vlm_payload.get("entry_visible", False)):
+        entry_visible = True
     entry_traversable = bool(
+        vlm_payload.get("entry_traversable", False)
+        or
         scene_payload.get("entry_door_traversable", False)
         or traversable_doorway_count > 0
         or bool(best_doorway.get("traversable", False))
@@ -111,10 +123,11 @@ def build_phase6_mission_runtime(
     visited_region_count = int(search_payload.get("visited_region_count", 0) or 0)
 
     target_house_reference_required = house_search_like and location_state in ("outside_house", "threshold_zone", "unknown")
-    target_house_match_state = "unavailable"
-    target_house_match_confidence = 0.0
+    target_house_match_state = str(reference_payload.get("match_state", "unavailable") or "unavailable")
+    target_house_match_confidence = float(reference_payload.get("match_confidence", 0.0) or 0.0)
     if target_house_reference_required:
-        target_house_match_state = "not_configured"
+        if target_house_match_state == "unavailable":
+            target_house_match_state = "not_configured"
 
     stage_reason = ""
     active_stage_id = "outside_localization"
@@ -132,11 +145,13 @@ def build_phase6_mission_runtime(
         recommended_next_goal = "verify_suspect"
         recommended_control_mode = "planner_waypoint"
     elif scene_state == "outside_house":
-        if target_house_match_state in ("pending", "not_configured"):
+        if target_house_match_state in ("pending", "not_configured", "matched", "candidate", "not_matched", "unknown"):
             if entry_visible and entry_traversable:
                 active_stage_id = "approach_entry"
                 stage_reason = "A traversable entry is visible while the UAV is still outside."
                 recommended_next_goal = "approach_entry"
+                if target_house_match_state == "matched":
+                    stage_reason = "A traversable entry is visible and the current facade matches the target house."
             elif entry_visible:
                 active_stage_id = "entry_search"
                 stage_reason = "Door-like structures are visible but traversability is still uncertain."
@@ -184,6 +199,8 @@ def build_phase6_mission_runtime(
 
     focus_summary = str(language_payload.get("current_focus_summary", "") or "").strip()
     doorway_label = str(best_doorway.get("label", "") or doorway_payload.get("focus_label", "") or "")
+    if not doorway_label:
+        doorway_label = "entry_doorway" if entry_visible else ""
     summary_parts = [
         f"scene={scene_state or 'unknown'}",
         f"stage={active_stage_id}",
@@ -192,6 +209,7 @@ def build_phase6_mission_runtime(
         f"visited={visited_region_count}",
         f"goal={recommended_next_goal}",
     ]
+    summary_parts.append(f"target={target_house_match_state}:{target_house_match_confidence:.2f}")
     if focus_summary:
         summary_parts.append(f"focus={focus_summary}")
 

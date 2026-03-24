@@ -40,25 +40,32 @@ from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_ca
 from multimodal_scene_waypoint_adapter import build_heuristic_scene_waypoint_runtime
 from phase5_mission_manual import build_phase5_mission_manual
 from phase6_mission_controller import build_phase6_mission_runtime
+from phase6_waypoint_planner import build_phase6_waypoint_runtime
+from reference_house_matcher import ReferenceHouseMatcher
+from semantic_archive_runtime import SemanticArchiveRuntime
 from runtime_interfaces import (
     build_doorway_runtime_state,
     build_llm_action_request,
     build_llm_action_runtime_state,
     build_mission_state,
     build_phase6_mission_runtime_state,
+    build_phase6_waypoint_runtime_state,
     build_plan_request,
     build_plan_state,
     build_planner_executor_runtime_state,
     build_person_evidence_runtime_state,
+    build_reference_match_runtime_state,
     build_reflex_request,
     build_reflex_runtime_state,
     build_reflex_sample,
     build_runtime_debug_state,
+    build_semantic_archive_runtime_state,
     build_scene_waypoint_request,
     build_scene_waypoint_runtime_state,
     build_search_region,
     build_search_result_state,
     build_search_runtime_state,
+    build_vlm_scene_runtime_state,
     build_waypoint,
     coerce_llm_action_runtime_payload,
     coerce_plan_payload,
@@ -66,6 +73,7 @@ from runtime_interfaces import (
     coerce_scene_waypoint_runtime_payload,
     now_timestamp,
 )
+from vlm_scene_descriptor import build_vlm_scene_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +419,34 @@ class UAVControlBackend:
             recent_limit=max(6, int(self.args.search_recent_limit)),
             region_limit=max(4, int(self.args.archive_retrieval_limit)),
         )
+        self.reference_house_matcher = ReferenceHouseMatcher(
+            reference_image_path=str(self.args.target_house_reference_image or ""),
+            threshold=float(self.args.reference_match_threshold),
+        )
+        self.semantic_archive_helper = SemanticArchiveRuntime(
+            max_entries=int(self.args.semantic_archive_max_entries),
+            retrieval_limit=int(self.args.semantic_archive_retrieval_limit),
+        )
+        self.reference_match_runtime: Dict[str, Any] = build_reference_match_runtime_state(
+            reference_image_path=str(self.args.target_house_reference_image or ""),
+            threshold=float(self.args.reference_match_threshold),
+            status="idle",
+            source="reference_matcher",
+            method="rgb_hist_cosine_v0",
+        )
+        self.vlm_scene_runtime: Dict[str, Any] = build_vlm_scene_runtime_state(
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
+            task_label=self.current_task_label,
+            status="idle",
+            source="local_vlm_heuristic",
+            model_name="vlm_scene_descriptor_v0",
+        )
+        self.semantic_archive_runtime: Dict[str, Any] = build_semantic_archive_runtime_state(
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            status="idle",
+            source="local_text_archive",
+        )
         self.language_memory_runtime: Dict[str, Any] = self.language_search_memory.reset(
             mission_id=str(self.current_mission.get("mission_id", "")),
             mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
@@ -430,12 +466,15 @@ class UAVControlBackend:
             mission=self.current_mission,
             search_runtime=self.search_runtime,
             doorway_runtime=self.doorway_runtime,
+            vlm_scene_runtime=self.vlm_scene_runtime,
+            reference_match_runtime=self.reference_match_runtime,
             phase5_mission_manual=self.phase5_mission_manual,
             scene_waypoint_runtime={},
             language_memory_runtime=self.language_memory_runtime,
             person_evidence_runtime=self.person_evidence_runtime,
             search_result=self.search_result,
         )
+        self.phase6_waypoint_runtime: Dict[str, Any] = build_phase6_waypoint_runtime_state()
         self.llm_action_runtime: Dict[str, Any] = build_llm_action_runtime_state(
             policy_name=self.args.planner_name,
             source="none",
@@ -449,6 +488,8 @@ class UAVControlBackend:
         self.last_llm_action_request: Dict[str, Any] = {}
         self.last_scene_waypoint_request: Dict[str, Any] = {}
         self.recent_action_history: List[Dict[str, Any]] = []
+        self.api_request_history: List[Dict[str, Any]] = []
+        self.api_request_counter: int = 0
 
         os.makedirs(self.args.capture_dir, exist_ok=True)
         os.makedirs(self.args.takeover_log_dir, exist_ok=True)
@@ -614,6 +655,8 @@ class UAVControlBackend:
     def sync_search_runtime(self, archive_state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         self.search_runtime = self.build_search_runtime_snapshot(archive_state)
         self.sync_language_memory(archive_state)
+        self.sync_reference_match_runtime()
+        self.sync_vlm_scene_runtime()
         self.sync_phase5_mission_manual()
         return self.search_runtime
 
@@ -631,6 +674,64 @@ class UAVControlBackend:
             current_plan=self.current_plan,
         )
         return self.language_memory_runtime
+
+    def sync_reference_match_runtime(self) -> Dict[str, Any]:
+        self.reference_house_matcher.update_config(
+            reference_image_path=str(self.args.target_house_reference_image or ""),
+            threshold=float(self.args.reference_match_threshold),
+        )
+        self.reference_match_runtime = self.reference_house_matcher.match(
+            rgb_frame=self.last_raw_frame,
+            mission=self.current_mission,
+            task_label=self.current_task_label,
+        )
+        return self.reference_match_runtime
+
+    def sync_vlm_scene_runtime(self) -> Dict[str, Any]:
+        self.vlm_scene_runtime = build_vlm_scene_runtime(
+            task_label=self.current_task_label,
+            mission=self.current_mission,
+            search_runtime=self.search_runtime,
+            doorway_runtime=self.doorway_runtime,
+            scene_waypoint_runtime=self.scene_waypoint_runtime,
+            phase5_mission_manual=self.phase5_mission_manual,
+            phase6_mission_runtime=self.phase6_mission_runtime,
+            person_evidence_runtime=self.person_evidence_runtime,
+            search_result=self.search_result,
+            reference_match_runtime=self.reference_match_runtime,
+            current_plan=self.current_plan,
+            depth_summary=self.last_depth_summary,
+            rgb_frame=self.last_raw_frame,
+        )
+        return self.vlm_scene_runtime
+
+    def sync_semantic_archive_runtime(self) -> Dict[str, Any]:
+        pose = self.get_task_pose()
+        stage_label = str(
+            self.phase6_mission_runtime.get("active_stage_id", "")
+            or self.phase5_mission_manual.get("active_stage_id", "")
+            or self.search_runtime.get("current_search_subgoal", "idle")
+            or "idle"
+        )
+        outcome_status = str(self.search_result.get("result_status", "active") or "active")
+        self.semantic_archive_runtime = self.semantic_archive_helper.update(
+            mission_id=str(self.current_mission.get("mission_id", "")),
+            task_label=self.current_task_label,
+            stage_label=stage_label,
+            scene_description=str(self.vlm_scene_runtime.get("scene_description", "") or ""),
+            semantic_text=str(self.vlm_scene_runtime.get("semantic_text", "") or ""),
+            pose={
+                "x": pose[0],
+                "y": pose[1],
+                "z": pose[2],
+                "yaw": pose[3],
+            },
+            doorway_runtime=self.doorway_runtime,
+            reference_match_runtime=self.reference_match_runtime,
+            current_plan=self.current_plan,
+            outcome_status=outcome_status,
+        )
+        return self.semantic_archive_runtime
 
     def sync_doorway_runtime(self) -> Dict[str, Any]:
         self.doorway_runtime = detect_doorway_runtime(
@@ -660,13 +761,28 @@ class UAVControlBackend:
             mission=self.current_mission,
             search_runtime=self.search_runtime,
             doorway_runtime=self.doorway_runtime,
+            vlm_scene_runtime=self.vlm_scene_runtime,
+            reference_match_runtime=self.reference_match_runtime,
             phase5_mission_manual=self.phase5_mission_manual,
             scene_waypoint_runtime=self.scene_waypoint_runtime,
             language_memory_runtime=self.language_memory_runtime,
             person_evidence_runtime=self.person_evidence_runtime,
             search_result=self.search_result,
         )
+        self.sync_semantic_archive_runtime()
+        self.sync_phase6_waypoint_runtime()
         return self.phase6_mission_runtime
+
+    def sync_phase6_waypoint_runtime(self) -> Dict[str, Any]:
+        self.phase6_waypoint_runtime = build_phase6_waypoint_runtime(
+            task_label=self.current_task_label,
+            phase6_mission_runtime=self.phase6_mission_runtime,
+            scene_waypoint_runtime=self.scene_waypoint_runtime,
+            doorway_runtime=self.doorway_runtime,
+            reference_match_runtime=self.reference_match_runtime,
+            semantic_archive_runtime=self.semantic_archive_runtime,
+        )
+        return self.phase6_waypoint_runtime
 
     def sync_mission_from_plan(self) -> Dict[str, Any]:
         candidate_regions = self.current_plan.get("candidate_regions") if isinstance(self.current_plan.get("candidate_regions"), list) else []
@@ -1391,6 +1507,147 @@ class UAVControlBackend:
         count = max(1, int(limit))
         return [dict(item) for item in self.recent_action_history[-count:] if isinstance(item, dict)]
 
+    @staticmethod
+    def _truncate_history_text(value: Any, limit: int = 1200) -> str:
+        text = str(value or "")
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3]}..."
+
+    def _compact_history_value(self, value: Any, *, depth: int = 0) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if depth >= 3:
+            return self._truncate_history_text(value, limit=240)
+        if isinstance(value, str):
+            return self._truncate_history_text(value, limit=1600 if depth == 0 else 600)
+        if isinstance(value, dict):
+            compact: Dict[str, Any] = {}
+            for index, (key, item) in enumerate(value.items()):
+                if index >= 24:
+                    compact["__truncated__"] = f"{len(value) - 24} more keys"
+                    break
+                compact[str(key)] = self._compact_history_value(item, depth=depth + 1)
+            return compact
+        if isinstance(value, list):
+            compact_list = [self._compact_history_value(item, depth=depth + 1) for item in value[:8]]
+            if len(value) > 8:
+                compact_list.append({"__truncated__": f"{len(value) - 8} more items"})
+            return compact_list
+        return self._truncate_history_text(repr(value), limit=240)
+
+    def append_api_request_history(
+        self,
+        *,
+        kind: str,
+        status: str,
+        trigger: str,
+        request_payload: Optional[Dict[str, Any]] = None,
+        runtime_payload: Optional[Dict[str, Any]] = None,
+        error_text: str = "",
+        latency_ms: float = 0.0,
+        fallback_used: bool = False,
+    ) -> Dict[str, Any]:
+        runtime_payload = runtime_payload if isinstance(runtime_payload, dict) else {}
+        request_payload = request_payload if isinstance(request_payload, dict) else {}
+        if kind == "planner":
+            debug = runtime_payload.get("debug") if isinstance(runtime_payload.get("debug"), dict) else {}
+            model_name = str(
+                debug.get("model_name", debug.get("llm_model_name", self.plan_execution_state.get("last_model_name", "")))
+                or ""
+            )
+            api_style = str(
+                debug.get("api_style", debug.get("llm_api_style", self.plan_execution_state.get("last_api_style", "")))
+                or ""
+            )
+            route_mode = str(debug.get("route_mode", self.plan_execution_state.get("planner_route_mode", "")) or "")
+            source = str(debug.get("source", self.plan_execution_state.get("planner_source_detail", "")) or "")
+            usage = debug.get("usage", self.plan_execution_state.get("last_usage", {}))
+            raw_text = str(debug.get("raw_text", "") or "")
+            parsed_payload = debug.get("parsed_payload", {}) if isinstance(debug.get("parsed_payload"), dict) else {}
+            system_prompt_excerpt = str(debug.get("system_prompt_excerpt", "") or "")
+            user_prompt_excerpt = str(debug.get("user_prompt_excerpt", "") or "")
+            response_summary = {
+                "semantic_subgoal": runtime_payload.get("semantic_subgoal", ""),
+                "search_subgoal": runtime_payload.get("search_subgoal", ""),
+                "planner_confidence": runtime_payload.get("planner_confidence", 0.0),
+                "planner_name": runtime_payload.get("planner_name", ""),
+            }
+        else:
+            model_name = str(runtime_payload.get("model_name", "") or "")
+            api_style = str(runtime_payload.get("api_style", "") or "")
+            route_mode = str(runtime_payload.get("route_mode", "") or "")
+            source = str(runtime_payload.get("source", "") or "")
+            usage = runtime_payload.get("usage", {}) if isinstance(runtime_payload.get("usage"), dict) else {}
+            raw_text = str(runtime_payload.get("raw_text", "") or "")
+            parsed_payload = runtime_payload.get("parsed_payload", {}) if isinstance(runtime_payload.get("parsed_payload"), dict) else {}
+            system_prompt_excerpt = str(runtime_payload.get("system_prompt_excerpt", "") or "")
+            user_prompt_excerpt = str(runtime_payload.get("user_prompt_excerpt", "") or "")
+            response_summary = {
+                "status": runtime_payload.get("status", ""),
+                "suggested_action": runtime_payload.get("suggested_action", ""),
+                "scene_state": runtime_payload.get("scene_state", ""),
+                "active_stage": runtime_payload.get("active_stage", ""),
+                "stop_condition": runtime_payload.get("stop_condition", ""),
+                "planner_confidence": runtime_payload.get("planner_confidence", runtime_payload.get("confidence", 0.0)),
+            }
+        self.api_request_counter += 1
+        entry = {
+            "event_id": f"api_evt_{self.api_request_counter:05d}",
+            "timestamp": now_timestamp(),
+            "kind": str(kind or "unknown"),
+            "status": str(status or "unknown"),
+            "trigger": str(trigger or ""),
+            "task_label": str(request_payload.get("task_label", self.current_task_label or "")),
+            "frame_id": str(request_payload.get("frame_id", "")),
+            "step_index": int(request_payload.get("step_index", 0) or 0),
+            "source": source,
+            "route_mode": route_mode,
+            "api_style": api_style,
+            "model_name": model_name,
+            "latency_ms": float(latency_ms or 0.0),
+            "fallback_used": bool(fallback_used),
+            "error": self._truncate_history_text(error_text, limit=1200),
+            "request_payload": self._compact_history_value(request_payload),
+            "response_summary": self._compact_history_value(response_summary),
+            "parsed_payload": self._compact_history_value(parsed_payload),
+            "usage": self._compact_history_value(usage),
+            "raw_text": self._truncate_history_text(raw_text, limit=4000),
+            "system_prompt_excerpt": self._truncate_history_text(system_prompt_excerpt, limit=2400),
+            "user_prompt_excerpt": self._truncate_history_text(user_prompt_excerpt, limit=2400),
+        }
+        self.api_request_history.append(entry)
+        history_limit = max(10, int(getattr(self.args, "api_history_limit", 30) or 30))
+        if len(self.api_request_history) > history_limit:
+            self.api_request_history = self.api_request_history[-history_limit:]
+        return entry
+
+    def get_api_request_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        max_items = max(1, int(limit or getattr(self.args, "api_history_limit", 30) or 30))
+        return [copy.deepcopy(item) for item in self.api_request_history[-max_items:]]
+
+    def get_api_history_summary(self) -> Dict[str, Any]:
+        if not self.api_request_history:
+            return {
+                "count": 0,
+                "last_kind": "",
+                "last_status": "idle",
+                "last_trigger": "",
+                "last_model_name": "",
+                "last_error": "",
+                "last_timestamp": "",
+            }
+        last_entry = self.api_request_history[-1]
+        return {
+            "count": len(self.api_request_history),
+            "last_kind": str(last_entry.get("kind", "") or ""),
+            "last_status": str(last_entry.get("status", "") or "idle"),
+            "last_trigger": str(last_entry.get("trigger", "") or ""),
+            "last_model_name": str(last_entry.get("model_name", "") or ""),
+            "last_error": self._truncate_history_text(last_entry.get("error", ""), limit=180),
+            "last_timestamp": str(last_entry.get("timestamp", "") or ""),
+        }
+
     def build_heuristic_llm_action_runtime(self, *, trigger: str, reason: str) -> Dict[str, Any]:
         archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
         heuristic_reflex = self.build_heuristic_reflex_runtime(archive_state, trigger=f"{trigger}_heuristic_action")
@@ -1445,6 +1702,7 @@ class UAVControlBackend:
                 frame = self.last_raw_frame
             pose = self.get_task_pose()
             archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            self.sync_search_runtime(archive_state)
             if not self.should_preserve_reflex_runtime():
                 self.sync_reflex_runtime(archive_state, trigger=f"{trigger}_state_sync")
             waypoint_hint = str(self.current_plan.get("semantic_subgoal", "") or self.search_runtime.get("current_search_subgoal", "") or "")
@@ -1468,8 +1726,12 @@ class UAVControlBackend:
                 mission=self.current_mission,
                 search_runtime=self.search_runtime,
                 doorway_runtime=self.doorway_runtime,
+                vlm_scene_runtime=self.vlm_scene_runtime,
+                reference_match_runtime=self.reference_match_runtime,
+                semantic_archive_runtime=self.semantic_archive_runtime,
                 phase5_mission_manual=self.phase5_mission_manual,
                 phase6_mission_runtime=self.phase6_mission_runtime,
+                phase6_waypoint_runtime=self.phase6_waypoint_runtime,
                 person_evidence_runtime=self.person_evidence_runtime,
                 search_result=self.search_result,
                 language_memory_runtime=self.language_memory_runtime,
@@ -1490,6 +1752,16 @@ class UAVControlBackend:
             self.last_llm_action_request = action_request
             if not self.args.planner_url:
                 self.llm_action_runtime = self.build_heuristic_llm_action_runtime(trigger=trigger, reason="planner_url_unconfigured")
+                self.append_api_request_history(
+                    kind="llm_action",
+                    status="fallback",
+                    trigger=trigger,
+                    request_payload=action_request,
+                    runtime_payload=self.llm_action_runtime,
+                    error_text="planner_url_unconfigured",
+                    latency_ms=0.0,
+                    fallback_used=True,
+                )
                 return self.llm_action_runtime
             action_started = datetime.now().timestamp()
             req = request.Request(
@@ -1509,11 +1781,31 @@ class UAVControlBackend:
                 )
                 self.llm_action_runtime["last_trigger"] = trigger
                 self.llm_action_runtime["last_latency_ms"] = float(self.llm_action_runtime.get("last_latency_ms", round((datetime.now().timestamp() - action_started) * 1000.0, 2)) or 0.0)
+                self.append_api_request_history(
+                    kind="llm_action",
+                    status=str(self.llm_action_runtime.get("status", "ok") or "ok"),
+                    trigger=trigger,
+                    request_payload=action_request,
+                    runtime_payload=self.llm_action_runtime,
+                    error_text="",
+                    latency_ms=float(self.llm_action_runtime.get("last_latency_ms", 0.0) or 0.0),
+                    fallback_used=bool(self.llm_action_runtime.get("fallback_used", False)),
+                )
                 return self.llm_action_runtime
             except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                 logger.warning("LLM action request failed, fallback to heuristic action runtime: %s", exc)
                 self.llm_action_runtime = self.build_heuristic_llm_action_runtime(trigger=trigger, reason=str(exc))
                 self.llm_action_runtime["last_latency_ms"] = round((datetime.now().timestamp() - action_started) * 1000.0, 2)
+                self.append_api_request_history(
+                    kind="llm_action",
+                    status="fallback",
+                    trigger=trigger,
+                    request_payload=action_request,
+                    runtime_payload=self.llm_action_runtime,
+                    error_text=str(exc),
+                    latency_ms=float(self.llm_action_runtime.get("last_latency_ms", 0.0) or 0.0),
+                    fallback_used=True,
+                )
                 return self.llm_action_runtime
 
     def request_scene_waypoints(
@@ -1529,6 +1821,7 @@ class UAVControlBackend:
                 frame = self.last_raw_frame
             pose = self.get_task_pose()
             archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            self.sync_search_runtime(archive_state)
             scene_request = build_scene_waypoint_request(
                 task_label=self.current_task_label or "idle",
                 instruction=self.current_task_label or self.current_mission.get("mission_type", "semantic_navigation"),
@@ -1549,8 +1842,12 @@ class UAVControlBackend:
                 mission=self.current_mission,
                 search_runtime=self.search_runtime,
                 doorway_runtime=self.doorway_runtime,
+                vlm_scene_runtime=self.vlm_scene_runtime,
+                reference_match_runtime=self.reference_match_runtime,
+                semantic_archive_runtime=self.semantic_archive_runtime,
                 phase5_mission_manual=self.phase5_mission_manual,
                 phase6_mission_runtime=self.phase6_mission_runtime,
+                phase6_waypoint_runtime=self.phase6_waypoint_runtime,
                 person_evidence_runtime=self.person_evidence_runtime,
                 search_result=self.search_result,
                 language_memory_runtime=self.language_memory_runtime,
@@ -1575,6 +1872,16 @@ class UAVControlBackend:
                 )
                 self.scene_waypoint_runtime["last_trigger"] = trigger
                 self.sync_phase5_mission_manual()
+                self.append_api_request_history(
+                    kind="scene_waypoint",
+                    status="fallback",
+                    trigger=trigger,
+                    request_payload=scene_request,
+                    runtime_payload=self.scene_waypoint_runtime,
+                    error_text="planner_url_unconfigured",
+                    latency_ms=0.0,
+                    fallback_used=True,
+                )
                 return self.scene_waypoint_runtime
             started = datetime.now().timestamp()
             req = request.Request(
@@ -1601,6 +1908,16 @@ class UAVControlBackend:
                     or 0.0
                 )
                 self.sync_phase5_mission_manual()
+                self.append_api_request_history(
+                    kind="scene_waypoint",
+                    status=str(self.scene_waypoint_runtime.get("status", "ok") or "ok"),
+                    trigger=trigger,
+                    request_payload=scene_request,
+                    runtime_payload=self.scene_waypoint_runtime,
+                    error_text="",
+                    latency_ms=float(self.scene_waypoint_runtime.get("last_latency_ms", 0.0) or 0.0),
+                    fallback_used=bool(self.scene_waypoint_runtime.get("fallback_used", False)),
+                )
                 return self.scene_waypoint_runtime
             except (error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError) as exc:
                 logger.warning("Scene waypoint request failed, fallback to heuristic runtime: %s", exc)
@@ -1620,6 +1937,16 @@ class UAVControlBackend:
                 self.scene_waypoint_runtime["last_trigger"] = trigger
                 self.scene_waypoint_runtime["last_latency_ms"] = round((datetime.now().timestamp() - started) * 1000.0, 2)
                 self.sync_phase5_mission_manual()
+                self.append_api_request_history(
+                    kind="scene_waypoint",
+                    status="fallback",
+                    trigger=trigger,
+                    request_payload=scene_request,
+                    runtime_payload=self.scene_waypoint_runtime,
+                    error_text=str(exc),
+                    latency_ms=float(self.scene_waypoint_runtime.get("last_latency_ms", 0.0) or 0.0),
+                    fallback_used=True,
+                )
                 return self.scene_waypoint_runtime
 
     def execute_llm_action(
@@ -2283,6 +2610,28 @@ class UAVControlBackend:
                 mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
                 task_label=self.current_task_label,
             )
+            self.reference_match_runtime = build_reference_match_runtime_state(
+                mission_id=str(self.current_mission.get("mission_id", "")),
+                task_label=self.current_task_label,
+                status="idle",
+                source="reference_matcher",
+                method="rgb_hist_cosine_v0",
+                reference_image_path=str(self.args.target_house_reference_image or ""),
+                threshold=float(self.args.reference_match_threshold),
+            )
+            self.vlm_scene_runtime = build_vlm_scene_runtime_state(
+                mission_id=str(self.current_mission.get("mission_id", "")),
+                mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
+                task_label=self.current_task_label,
+                status="idle",
+                source="local_vlm_heuristic",
+                model_name="vlm_scene_descriptor_v0",
+            )
+            self.semantic_archive_runtime = build_semantic_archive_runtime_state(
+                mission_id=str(self.current_mission.get("mission_id", "")),
+                status="idle",
+                source="local_text_archive",
+            )
             self.llm_action_runtime = build_llm_action_runtime_state(
                 policy_name=self.args.planner_name,
                 source="none",
@@ -2298,6 +2647,7 @@ class UAVControlBackend:
                 mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
                 task_label=self.current_task_label,
             )
+            self.phase6_waypoint_runtime = build_phase6_waypoint_runtime_state()
             self.last_llm_action_request = {}
             self.last_scene_waypoint_request = {}
             self.reset_person_search_state(reset_recent_events=True)
@@ -2313,9 +2663,13 @@ class UAVControlBackend:
                 "doorway_runtime": self.doorway_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
+                "vlm_scene_runtime": self.vlm_scene_runtime,
+                "reference_match_runtime": self.reference_match_runtime,
+                "semantic_archive_runtime": self.semantic_archive_runtime,
                 "language_memory_runtime": self.language_memory_runtime,
                 "phase5_mission_manual": self.phase5_mission_manual,
                 "phase6_mission_runtime": self.phase6_mission_runtime,
+                "phase6_waypoint_runtime": self.phase6_waypoint_runtime,
             }
 
     def set_plan_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2353,6 +2707,8 @@ class UAVControlBackend:
             if task_label is not None:
                 self.set_task_label(task_label)
             frame = self.refresh_observations()
+            archive_state = self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit))
+            self.sync_search_runtime(archive_state)
             mission_type = str(self.current_mission.get("mission_type", "semantic_navigation") or "semantic_navigation")
             if mission_type in ("person_search", "room_search", "target_verification"):
                 try:
@@ -2391,8 +2747,12 @@ class UAVControlBackend:
                     mission=self.current_mission,
                     search_runtime=self.search_runtime,
                     doorway_runtime=self.doorway_runtime,
+                    vlm_scene_runtime=self.vlm_scene_runtime,
+                    reference_match_runtime=self.reference_match_runtime,
+                    semantic_archive_runtime=self.semantic_archive_runtime,
                     phase5_mission_manual=self.phase5_mission_manual,
                     phase6_mission_runtime=self.phase6_mission_runtime,
+                    phase6_waypoint_runtime=self.phase6_waypoint_runtime,
                     person_evidence_runtime=self.person_evidence_runtime,
                     search_result=self.search_result,
                     language_memory_runtime=self.language_memory_runtime,
@@ -2516,6 +2876,18 @@ class UAVControlBackend:
                     1, int(self.args.planner_interval_steps)
                 )
             self.current_plan = self.set_plan_state(plan_payload)
+            planner_status = str(self.plan_execution_state.get("planner_status", "ok") or "ok")
+            history_status = "ok" if planner_status == "ok" else "fallback"
+            self.append_api_request_history(
+                kind="planner",
+                status=history_status,
+                trigger=trigger,
+                request_payload=self.last_plan_request,
+                runtime_payload=self.current_plan,
+                error_text=str(self.plan_execution_state.get("last_error", "") or ""),
+                latency_ms=float(self.plan_execution_state.get("last_latency_ms", 0.0) or 0.0),
+                fallback_used=bool(self.plan_execution_state.get("fallback_used", False)),
+            )
             return self.current_plan
 
     def should_auto_request_plan(self) -> bool:
@@ -2774,10 +3146,14 @@ class UAVControlBackend:
                 "search_runtime": self.search_runtime,
                 "doorway_runtime": self.doorway_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
-                    "search_result": self.search_result,
-                    "language_memory_runtime": self.language_memory_runtime,
-                    "phase5_mission_manual": self.phase5_mission_manual,
-                    "phase6_mission_runtime": self.phase6_mission_runtime,
+                "search_result": self.search_result,
+                "vlm_scene_runtime": self.vlm_scene_runtime,
+                "reference_match_runtime": self.reference_match_runtime,
+                "semantic_archive_runtime": self.semantic_archive_runtime,
+                "language_memory_runtime": self.language_memory_runtime,
+                "phase5_mission_manual": self.phase5_mission_manual,
+                "phase6_mission_runtime": self.phase6_mission_runtime,
+                "phase6_waypoint_runtime": self.phase6_waypoint_runtime,
                     "scene_waypoint_runtime": self.scene_waypoint_runtime,
                     "plan": self.current_plan,
                 "planner_runtime": self.plan_execution_state,
@@ -2789,6 +3165,7 @@ class UAVControlBackend:
                 "takeover_runtime": self.takeover_state,
                 "takeover_recent_events": self.takeover_events,
                 "person_evidence_recent_events": self.person_evidence_events,
+                "api_history_summary": self.get_api_history_summary(),
                 "last_plan_request": {
                     "schema_version": self.last_plan_request.get("schema_version", ""),
                     "trigger": self.last_plan_request.get("trigger", ""),
@@ -3135,9 +3512,13 @@ class UAVControlBackend:
                 "doorway_runtime": self.doorway_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
                 "search_result": self.search_result,
+                "vlm_scene_runtime": self.vlm_scene_runtime,
+                "reference_match_runtime": self.reference_match_runtime,
+                "semantic_archive_runtime": self.semantic_archive_runtime,
                 "language_memory_runtime": self.language_memory_runtime,
                 "phase5_mission_manual": self.phase5_mission_manual,
                 "phase6_mission_runtime": self.phase6_mission_runtime,
+                "phase6_waypoint_runtime": self.phase6_waypoint_runtime,
                 "scene_waypoint_runtime": self.scene_waypoint_runtime,
                 "runtime_debug": self.runtime_debug,
                 "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
@@ -3187,6 +3568,7 @@ class UAVControlBackend:
                 "language_memory_runtime": metadata["language_memory_runtime"],
                 "phase5_mission_manual": metadata["phase5_mission_manual"],
                 "phase6_mission_runtime": metadata["phase6_mission_runtime"],
+                "phase6_waypoint_runtime": metadata["phase6_waypoint_runtime"],
                 "scene_waypoint_runtime": metadata["scene_waypoint_runtime"],
                 "archive": metadata["archive"],
                 "reflex_runtime": metadata["reflex_runtime"],
@@ -3307,6 +3689,14 @@ def make_handler(backend: UAVControlBackend):
                     self._send_json({"status": "ok", "reflex_execution": backend.reflex_execution_state})
                 elif parsed.path == "/planner_executor":
                     self._send_json({"status": "ok", "planner_executor_runtime": backend.planner_executor_state})
+                elif parsed.path == "/api_history":
+                    self._send_json(
+                        {
+                            "status": "ok",
+                            "api_history_summary": backend.get_api_history_summary(),
+                            "api_request_history": backend.get_api_request_history(),
+                        }
+                    )
                 elif parsed.path == "/takeover":
                     self._send_json(
                         {
@@ -3523,6 +3913,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--takeover_recent_limit", type=int, default=12, help="How many recent takeover events to expose in /state")
     parser.add_argument("--search_log_dir", default="./phase4_search_logs", help="Directory used for person-evidence/search JSONL logs")
     parser.add_argument("--search_recent_limit", type=int, default=12, help="How many recent person-evidence events to expose in /state")
+    parser.add_argument("--api_history_limit", type=int, default=30, help="How many recent API request/reply history entries to retain")
     parser.add_argument("--fixed_spawn_pose_file", default="./uav_fixed_spawn_pose.json", help="Persistent fixed UAV spawn pose file used when task_json/spawn args are absent")
     parser.add_argument("--default_task_label", default="", help="Default task label used by capture/planner endpoints")
     parser.add_argument("--planner_name", default="phase2-planner", help="Planner name stored in /plan state")
@@ -3546,6 +3937,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--archive_depth_bin_cm", type=float, default=100.0, help="Quantization bin size for archive depth signature")
     parser.add_argument("--archive_recent_limit", type=int, default=6, help="How many recent archive cells to expose")
     parser.add_argument("--archive_retrieval_limit", type=int, default=3, help="How many archive candidates to include in planner context")
+    parser.add_argument("--target_house_reference_image", default="", help="Optional reference RGB image used for target-house verification in Phase 6")
+    parser.add_argument("--reference_match_threshold", type=float, default=0.78, help="Similarity threshold for target-house verification")
+    parser.add_argument("--semantic_archive_max_entries", type=int, default=256, help="Maximum number of semantic archive entries retained in memory")
+    parser.add_argument("--semantic_archive_retrieval_limit", type=int, default=5, help="How many semantic archive matches to expose in runtime state and prompts")
     parser.add_argument("--risk_near_cm", type=float, default=250.0, help="Distance threshold used for heuristic collision risk estimation")
     parser.add_argument("--shield_risk_threshold", type=float, default=0.85, help="Heuristic shield trigger threshold for runtime debug")
     parser.add_argument("--reflex_policy_name", default="phase3-reflex", help="Policy name stored in reflex runtime state")
