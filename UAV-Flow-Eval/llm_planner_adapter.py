@@ -299,6 +299,11 @@ def build_llm_planner_prompt(
         if isinstance(request_payload.get("phase5_mission_manual"), dict)
         else {}
     )
+    phase6_mission_runtime = (
+        request_payload.get("phase6_mission_runtime")
+        if isinstance(request_payload.get("phase6_mission_runtime"), dict)
+        else {}
+    )
     pose = request_payload.get("pose") if isinstance(request_payload.get("pose"), dict) else {}
     depth = request_payload.get("depth") if isinstance(request_payload.get("depth"), dict) else {}
     context = request_payload.get("context") if isinstance(request_payload.get("context"), dict) else {}
@@ -439,6 +444,18 @@ def build_llm_planner_prompt(
             for item in (phase5_environment.get("rationale") or [])[:3]
         ],
     }
+    phase6_summary = {
+        "active_stage_id": str(phase6_mission_runtime.get("active_stage_id", "")),
+        "active_stage_name": str(phase6_mission_runtime.get("active_stage_name", "")),
+        "scene_state": str(phase6_mission_runtime.get("scene_state", "unknown")),
+        "recommended_next_goal": str(phase6_mission_runtime.get("recommended_next_goal", "")),
+        "recommended_control_mode": str(phase6_mission_runtime.get("recommended_control_mode", "")),
+        "entry_visible": bool(phase6_mission_runtime.get("entry_visible", False)),
+        "entry_traversable": bool(phase6_mission_runtime.get("entry_traversable", False)),
+        "entry_label": str(phase6_mission_runtime.get("entry_label", "")),
+        "target_house_match_state": str(phase6_mission_runtime.get("target_house_match_state", "unavailable")),
+        "summary": str(phase6_mission_runtime.get("summary", "")),
+    }
 
     system_prompt = (
         "You are a high-level UAV house-search planner. "
@@ -470,10 +487,13 @@ def build_llm_planner_prompt(
         f"language_memory={_compact_json(language_memory_summary)}\n"
         f"doorway_runtime={_compact_json(doorway_summary)}\n"
         f"phase5_manual={_compact_json(phase5_summary)}\n"
+        f"phase6_runtime={_compact_json(phase6_summary)}\n"
         f"heuristic_seed={_compact_json(heuristic_summary)}\n"
         "Rules:\n"
         "- prioritize person-search semantics over generic navigation semantics when the task mentions people, survivors, suspects, rooms, or verification.\n"
         "- follow the active Phase 5 stage when it is available; treat it as the current mission manual.\n"
+        "- follow the Phase 6 stage and scene_state when they are available; they take precedence over weaker heuristic hints.\n"
+        "- if phase6_runtime.scene_state is outside_house, prefer target-house verification / entry-search / approach-entry style plans before indoor room search.\n"
         "- if the UAV appears to be outside and doorway_runtime reports a traversable entry candidate, prefer entry-oriented subgoals before generic interior search.\n"
         "- use find_entry_door / approach_entry_door / traverse_entry_door when doorway reasoning is central to progress.\n"
         "- prefer candidate_region_labels from the provided region list.\n"

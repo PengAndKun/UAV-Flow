@@ -223,6 +223,11 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         if isinstance(request_payload.get("phase5_mission_manual"), dict)
         else {}
     )
+    phase6_mission_runtime = (
+        request_payload.get("phase6_mission_runtime")
+        if isinstance(request_payload.get("phase6_mission_runtime"), dict)
+        else {}
+    )
     current_plan = request_payload.get("current_plan") if isinstance(request_payload.get("current_plan"), dict) else {}
     reflex_runtime = request_payload.get("reflex_runtime") if isinstance(request_payload.get("reflex_runtime"), dict) else {}
     runtime_debug = request_payload.get("runtime_debug") if isinstance(request_payload.get("runtime_debug"), dict) else {}
@@ -319,6 +324,17 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         "doorway_candidate_count": int(phase5_environment.get("doorway_candidate_count", 0)),
         "rationale": [str(item) for item in (phase5_environment.get("rationale") or [])[:3]],
     }
+    phase6_summary = {
+        "active_stage_id": str(phase6_mission_runtime.get("active_stage_id", "")),
+        "active_stage_name": str(phase6_mission_runtime.get("active_stage_name", "")),
+        "scene_state": str(phase6_mission_runtime.get("scene_state", "unknown")),
+        "recommended_next_goal": str(phase6_mission_runtime.get("recommended_next_goal", "")),
+        "recommended_control_mode": str(phase6_mission_runtime.get("recommended_control_mode", "")),
+        "entry_visible": bool(phase6_mission_runtime.get("entry_visible", False)),
+        "entry_traversable": bool(phase6_mission_runtime.get("entry_traversable", False)),
+        "entry_label": str(phase6_mission_runtime.get("entry_label", "")),
+        "summary": str(phase6_mission_runtime.get("summary", "")),
+    }
     current_plan_summary = {
         "semantic_subgoal": str(current_plan.get("semantic_subgoal", "")),
         "search_subgoal": str(current_plan.get("search_subgoal", "")),
@@ -368,6 +384,7 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         f"language_memory={_compact_json(language_memory_summary)}\n"
         f"doorway_runtime={_compact_json(doorway_summary)}\n"
         f"phase5_manual={_compact_json(phase5_summary)}\n"
+        f"phase6_runtime={_compact_json(phase6_summary)}\n"
         f"current_plan={_compact_json(current_plan_summary)}\n"
         f"pose={_compact_json(pose_summary)}\n"
         f"depth={_compact_json(depth_summary)}\n"
@@ -378,6 +395,8 @@ def build_llm_action_prompt(request_payload: Dict[str, Any]) -> Dict[str, str]:
         "- stop_condition must be one of continue_search, replan_after_step, hold_position, need_manual_review, target_confirmed.\n"
         "- should_request_plan should be true when the next macro-step should ask the high-level planner again.\n"
         "- follow the active Phase 5 stage when it is available; treat it as the current task manual.\n"
+        "- follow the Phase 6 scene_state and active_stage when they are available; use them as the primary stage context.\n"
+        "- if phase6_runtime.scene_state is outside_house and phase6_runtime.entry_traversable is true, prefer actions that approach or cross the entry instead of generic wandering.\n"
         "- when a traversable doorway is centered or nearly centered, prefer forward over unnecessary rotation.\n"
         "- when execution_context.planner_executor_runtime.continuous_mode is true and risk is low, avoid early hold decisions; prefer continuing safe progress.\n"
         "- if recent_actions already show a stable direction and it remains safe, continuing that direction is preferred over oscillation.\n"

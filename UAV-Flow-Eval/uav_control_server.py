@@ -651,7 +651,22 @@ class UAVControlBackend:
             scene_waypoint_runtime=self.scene_waypoint_runtime,
             depth_stats=self.last_depth_summary,
         )
+        self.sync_phase6_mission_runtime()
         return self.phase5_mission_manual
+
+    def sync_phase6_mission_runtime(self) -> Dict[str, Any]:
+        self.phase6_mission_runtime = build_phase6_mission_runtime(
+            task_label=self.current_task_label,
+            mission=self.current_mission,
+            search_runtime=self.search_runtime,
+            doorway_runtime=self.doorway_runtime,
+            phase5_mission_manual=self.phase5_mission_manual,
+            scene_waypoint_runtime=self.scene_waypoint_runtime,
+            language_memory_runtime=self.language_memory_runtime,
+            person_evidence_runtime=self.person_evidence_runtime,
+            search_result=self.search_result,
+        )
+        return self.phase6_mission_runtime
 
     def sync_mission_from_plan(self) -> Dict[str, Any]:
         candidate_regions = self.current_plan.get("candidate_regions") if isinstance(self.current_plan.get("candidate_regions"), list) else []
@@ -1454,6 +1469,7 @@ class UAVControlBackend:
                 search_runtime=self.search_runtime,
                 doorway_runtime=self.doorway_runtime,
                 phase5_mission_manual=self.phase5_mission_manual,
+                phase6_mission_runtime=self.phase6_mission_runtime,
                 person_evidence_runtime=self.person_evidence_runtime,
                 search_result=self.search_result,
                 language_memory_runtime=self.language_memory_runtime,
@@ -1534,6 +1550,7 @@ class UAVControlBackend:
                 search_runtime=self.search_runtime,
                 doorway_runtime=self.doorway_runtime,
                 phase5_mission_manual=self.phase5_mission_manual,
+                phase6_mission_runtime=self.phase6_mission_runtime,
                 person_evidence_runtime=self.person_evidence_runtime,
                 search_result=self.search_result,
                 language_memory_runtime=self.language_memory_runtime,
@@ -2276,6 +2293,11 @@ class UAVControlBackend:
                 source="none",
                 status="idle",
             )
+            self.phase6_mission_runtime = build_phase6_mission_runtime_state(
+                mission_id=str(self.current_mission.get("mission_id", "")),
+                mission_type=str(self.current_mission.get("mission_type", "semantic_navigation")),
+                task_label=self.current_task_label,
+            )
             self.last_llm_action_request = {}
             self.last_scene_waypoint_request = {}
             self.reset_person_search_state(reset_recent_events=True)
@@ -2293,6 +2315,7 @@ class UAVControlBackend:
                 "search_result": self.search_result,
                 "language_memory_runtime": self.language_memory_runtime,
                 "phase5_mission_manual": self.phase5_mission_manual,
+                "phase6_mission_runtime": self.phase6_mission_runtime,
             }
 
     def set_plan_state(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2369,6 +2392,7 @@ class UAVControlBackend:
                     search_runtime=self.search_runtime,
                     doorway_runtime=self.doorway_runtime,
                     phase5_mission_manual=self.phase5_mission_manual,
+                    phase6_mission_runtime=self.phase6_mission_runtime,
                     person_evidence_runtime=self.person_evidence_runtime,
                     search_result=self.search_result,
                     language_memory_runtime=self.language_memory_runtime,
@@ -2750,11 +2774,12 @@ class UAVControlBackend:
                 "search_runtime": self.search_runtime,
                 "doorway_runtime": self.doorway_runtime,
                 "person_evidence_runtime": self.person_evidence_runtime,
-                "search_result": self.search_result,
-                "language_memory_runtime": self.language_memory_runtime,
-                "phase5_mission_manual": self.phase5_mission_manual,
-                "scene_waypoint_runtime": self.scene_waypoint_runtime,
-                "plan": self.current_plan,
+                    "search_result": self.search_result,
+                    "language_memory_runtime": self.language_memory_runtime,
+                    "phase5_mission_manual": self.phase5_mission_manual,
+                    "phase6_mission_runtime": self.phase6_mission_runtime,
+                    "scene_waypoint_runtime": self.scene_waypoint_runtime,
+                    "plan": self.current_plan,
                 "planner_runtime": self.plan_execution_state,
                 "archive": archive_state,
                 "reflex_runtime": self.reflex_runtime,
@@ -3112,6 +3137,7 @@ class UAVControlBackend:
                 "search_result": self.search_result,
                 "language_memory_runtime": self.language_memory_runtime,
                 "phase5_mission_manual": self.phase5_mission_manual,
+                "phase6_mission_runtime": self.phase6_mission_runtime,
                 "scene_waypoint_runtime": self.scene_waypoint_runtime,
                 "runtime_debug": self.runtime_debug,
                 "archive": self.archive_runtime.get_state(limit=int(self.args.archive_recent_limit)),
@@ -3160,6 +3186,7 @@ class UAVControlBackend:
                 "search_result": metadata["search_result"],
                 "language_memory_runtime": metadata["language_memory_runtime"],
                 "phase5_mission_manual": metadata["phase5_mission_manual"],
+                "phase6_mission_runtime": metadata["phase6_mission_runtime"],
                 "scene_waypoint_runtime": metadata["scene_waypoint_runtime"],
                 "archive": metadata["archive"],
                 "reflex_runtime": metadata["reflex_runtime"],

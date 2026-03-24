@@ -170,6 +170,7 @@ class UAVControlPanel:
         self.evidence_var = tk.StringVar(value="Evidence: idle")
         self.doorway_var = tk.StringVar(value="Doorway: idle")
         self.phase5_var = tk.StringVar(value="Phase5: idle")
+        self.phase6_var = tk.StringVar(value="Phase6: idle")
         self.language_memory_var = tk.StringVar(value="LangMem: idle")
         self.api_reply_var = tk.StringVar(value="APIReply: idle")
         self.scene_waypoint_var = tk.StringVar(value="SceneWP: idle")
@@ -1022,6 +1023,7 @@ class UAVControlPanel:
         search_result = state.get("search_result", {})
         doorway_runtime = state.get("doorway_runtime", {})
         phase5_manual = state.get("phase5_mission_manual", {})
+        phase6_runtime = state.get("phase6_mission_runtime", {})
         language_memory = state.get("language_memory_runtime", {})
         planner_runtime = state.get("planner_runtime", {})
         scene_waypoint_runtime = state.get("scene_waypoint_runtime", {})
@@ -1188,6 +1190,25 @@ class UAVControlPanel:
             f"door={phase5_door}/{phase5_door_trav} "
             f"stages={len(phase5_stages)} "
             f"why={phase5_rat}"
+        )
+        phase6_stage = str(phase6_runtime.get("active_stage_id", "") or "none")
+        phase6_scene = str(phase6_runtime.get("scene_state", "") or "unknown")
+        phase6_goal = str(phase6_runtime.get("recommended_next_goal", "") or "none")
+        phase6_entry_label = str(phase6_runtime.get("entry_label", "") or "none")
+        phase6_target = str(phase6_runtime.get("target_house_match_state", "") or "unavailable")
+        phase6_summary = self.shorten_text(
+            str(phase6_runtime.get("summary", "") or "idle"),
+            limit=108,
+        ) or "idle"
+        self.phase6_var.set(
+            "Phase6 "
+            f"stage={phase6_stage} "
+            f"scene={phase6_scene} "
+            f"entry={int(bool(phase6_runtime.get('entry_visible', False)))}/{int(bool(phase6_runtime.get('entry_traversable', False)))} "
+            f"door={phase6_entry_label} "
+            f"target={phase6_target} "
+            f"goal={phase6_goal} "
+            f"summary={phase6_summary}"
         )
         language_focus = (
             language_memory.get("current_focus_region", {})
@@ -1580,6 +1601,7 @@ class UAVControlPanel:
         self.build_status_label(status_frame, self.evidence_var)
         self.build_status_label(status_frame, self.doorway_var)
         self.build_status_label(status_frame, self.phase5_var)
+        self.build_status_label(status_frame, self.phase6_var)
         self.build_status_label(status_frame, self.language_memory_var)
         self.build_status_label(status_frame, self.api_reply_var)
         self.build_status_label(status_frame, self.scene_waypoint_var)

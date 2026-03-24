@@ -3128,3 +3128,56 @@ Main integration target remains:
 - [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py)
 
 But Phase 6 should not continue bloating that file with all new logic. It should stay the orchestration hub while the new modules carry the new mission semantics.
+
+### Phase 6.1 Mission Controller Runtime Integrated
+
+Completed:
+- added [phase6_mission_controller.py](/E:/github/UAV-Flow/UAV-Flow-Eval/phase6_mission_controller.py)
+- added shared runtime schema in [runtime_interfaces.py](/E:/github/UAV-Flow/UAV-Flow-Eval/runtime_interfaces.py):
+  - `build_phase6_mission_runtime_state`
+- integrated `phase6_mission_runtime` into:
+  - [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py)
+  - [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py)
+  - [llm_planner_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_planner_adapter.py)
+  - [llm_action_adapter.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_action_adapter.py)
+
+What the first runtime version does:
+- consumes the existing:
+  - `scene_waypoint_runtime`
+  - `doorway_runtime`
+  - `phase5_mission_manual`
+  - `language_memory_runtime`
+  - `search_result`
+- synthesizes a clearer Phase 6 stage state:
+  - `outside_localization`
+  - `target_house_verification`
+  - `entry_search`
+  - `approach_entry`
+  - `cross_entry`
+  - `indoor_room_search`
+  - `suspect_verification`
+  - `mission_report`
+- exposes:
+  - `scene_state`
+  - `entry_visible`
+  - `entry_traversable`
+  - `recommended_next_goal`
+  - `recommended_control_mode`
+  - `stage_queue`
+  - `summary`
+
+Current UI/runtime impact:
+- `/state` now contains `phase6_mission_runtime`
+- capture bundles now contain `phase6_mission_runtime`
+- panel now has a `Phase6 ...` status line
+- planner/action prompts now receive `phase6_mission_runtime` explicitly
+
+Current limitations:
+- `target_house_match_state` is still a placeholder because `reference_house_matcher.py` is not implemented yet
+- this is still a controller/runtime layer, not the final VLM semantic-archive pipeline
+
+Next recommended code steps:
+- add `vlm_scene_descriptor.py`
+- add `reference_house_matcher.py`
+- add `semantic_archive_runtime.py`
+- then upgrade Phase 6 from a fused heuristic+LLM runtime to the full semantic-archive version
