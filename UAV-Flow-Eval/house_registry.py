@@ -132,6 +132,7 @@ class HouseRegistry:
         self._houses: Dict[str, House] = {}
         self._current_target_id: str = ""
         self._world_bounds: dict = {}   # preserved verbatim for serialisation
+        self._overhead_map: dict = {}   # optional top-down map config
 
         try:
             self.load_from_file(config_path)
@@ -165,6 +166,7 @@ class HouseRegistry:
             raw = json.load(fh)
 
         self._world_bounds = raw.get("world_bounds", {})
+        self._overhead_map = raw.get("overhead_map", {})
         houses_raw = raw.get("houses", [])
         # Restore persisted target (saved by save_to_file)
         self._current_target_id = str(raw.get("current_target_id", ""))
@@ -178,6 +180,7 @@ class HouseRegistry:
         """Serialise the current registry state to *path* (JSON)."""
         payload = {
             "world_bounds": self._world_bounds,
+            "overhead_map": self._overhead_map,
             "current_target_id": self._current_target_id,
             "houses": [h.to_dict() for h in self._houses.values()],
         }
@@ -214,6 +217,26 @@ class HouseRegistry:
             return None
         return min(candidates, key=lambda h: h.distance_to(uav_x, uav_y))
 
+    def get_nearest_house(self, uav_x: float, uav_y: float) -> Optional[House]:
+        """Return the geometrically nearest house regardless of status."""
+        if not self._houses:
+            return None
+        return min(self._houses.values(), key=lambda h: h.distance_to(uav_x, uav_y))
+
+    def get_containing_house(self, uav_x: float, uav_y: float, *, margin_cm: float = 0.0) -> Optional[House]:
+        """
+        Return the house whose radius currently contains the UAV position.
+
+        If multiple houses overlap, prefer the one with the smallest center distance.
+        """
+        containing = [
+            h for h in self._houses.values()
+            if h.distance_to(uav_x, uav_y) <= float(h.radius_cm) + float(margin_cm)
+        ]
+        if not containing:
+            return None
+        return min(containing, key=lambda h: h.distance_to(uav_x, uav_y))
+
     def get_status_summary(self) -> dict:
         """
         Return a summary dict with per-status counts and the current
@@ -241,10 +264,41 @@ class HouseRegistry:
         """
         return {
             "world_bounds":      self._world_bounds,
+            "overhead_map":      self._overhead_map,
             "current_target_id": self._current_target_id,
             "houses":            [h.to_dict() for h in self._houses.values()],
             "status_summary":    self.get_status_summary(),
         }
+
+    def update_overhead_map(self, patch: dict) -> None:
+        """Shallow-merge config into the persisted overhead-map settings."""
+        if not isinstance(patch, dict):
+            return
+        self._overhead_map.update(patch)
+
+    def set_overhead_calibration(
+        self,
+        *,
+        anchors: List[dict],
+        affine_world_to_image: List[List[float]],
+        image_width: int,
+        image_height: int,
+        rmse_px: float,
+    ) -> None:
+        """Persist a solved world->image affine calibration for the overhead map."""
+        self._overhead_map["calibration"] = {
+            "anchors": list(anchors),
+            "affine_world_to_image": affine_world_to_image,
+            "image_width": int(image_width),
+            "image_height": int(image_height),
+            "rmse_px": float(rmse_px),
+            "updated_at": time.time(),
+        }
+
+    def clear_overhead_calibration(self) -> None:
+        """Remove the stored overhead-map calibration if present."""
+        if "calibration" in self._overhead_map:
+            self._overhead_map.pop("calibration", None)
 
     # ------------------------------------------------------------------
     # Mutations

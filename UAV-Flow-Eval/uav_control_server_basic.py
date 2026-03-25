@@ -95,6 +95,7 @@ class BasicUAVControlBackend:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self.lock = threading.RLock()
+        self.unrealcv_lock = threading.RLock()
         self.httpd: Optional[ThreadingHTTPServer] = None
         self.last_raw_frame: Optional[np.ndarray] = None
         self.last_depth_frame: Optional[np.ndarray] = None
@@ -109,6 +110,10 @@ class BasicUAVControlBackend:
         self.command_task_yaw_deg = 0.0
         # --- House registry ---
         self.house_registry = HouseRegistry(args.houses_config)
+        self.overhead_cam_id = 0
+        self.last_overhead_frame: Optional[np.ndarray] = None
+        self.last_overhead_refresh_time = ""
+        self.last_overhead_info: Dict[str, Any] = {}
         self.last_depth_summary: Dict[str, Any] = {
             "frame_id": self.last_observation_id,
             "available": False,
@@ -160,9 +165,10 @@ class BasicUAVControlBackend:
         for idx, player_name in enumerate(self.env.unwrapped.player_list[1:], start=1):
             try:
                 hide_pos = [0.0, 0.0, -10000.0 - 100.0 * idx]
-                self.env.unwrapped.unrealcv.set_phy(player_name, 0)
-                self.env.unwrapped.unrealcv.set_obj_location(player_name, hide_pos)
-                self.env.unwrapped.unrealcv.set_obj_rotation(player_name, [0.0, 0.0, 0.0])
+                with self.unrealcv_lock:
+                    self.env.unwrapped.unrealcv.set_phy(player_name, 0)
+                    self.env.unwrapped.unrealcv.set_obj_location(player_name, hide_pos)
+                    self.env.unwrapped.unrealcv.set_obj_rotation(player_name, [0.0, 0.0, 0.0])
             except Exception as exc:
                 logger.warning("Failed to hide extra UAV agent %s: %s", player_name, exc)
 
@@ -186,29 +192,37 @@ class BasicUAVControlBackend:
             json.dump({k: float(pose[k]) for k in ("x", "y", "z", "yaw")}, pose_file, indent=2)
 
     def get_env_yaw_deg(self) -> float:
-        rotation = self.env.unwrapped.unrealcv.get_obj_rotation(self.player_name)
-        if isinstance(rotation, (list, tuple)) and len(rotation) > 1:
-            return normalize_angle_deg(float(rotation[1]))
+        with self.unrealcv_lock:
+            rotation = self.env.unwrapped.unrealcv.get_obj_rotation(self.player_name)
+            if isinstance(rotation, (list, tuple)) and len(rotation) > 1:
+                return normalize_angle_deg(float(rotation[1]))
         return 0.0
 
     def get_task_pose(self) -> List[float]:
         # In the basic-only controller, the displayed/input yaw is the real UAV yaw.
-        location = self.env.unwrapped.unrealcv.get_obj_location(self.player_name)
-        return [float(location[0]), float(location[1]), float(location[2]), float(self.get_env_yaw_deg())]
+        with self.unrealcv_lock:
+            location = self.env.unwrapped.unrealcv.get_obj_location(self.player_name)
+            rotation = self.env.unwrapped.unrealcv.get_obj_rotation(self.player_name)
+        yaw_deg = 0.0
+        if isinstance(rotation, (list, tuple)) and len(rotation) > 1:
+            yaw_deg = normalize_angle_deg(float(rotation[1]))
+        return [float(location[0]), float(location[1]), float(location[2]), float(yaw_deg)]
 
     def set_task_pose(self, position: List[float], yaw_deg: float) -> None:
         self.set_task_position_only(position)
         self.set_task_yaw_absolute(float(yaw_deg))
 
     def set_task_position_only(self, position: List[float]) -> None:
-        self.env.unwrapped.unrealcv.set_obj_location(self.player_name, list(position))
+        with self.unrealcv_lock:
+            self.env.unwrapped.unrealcv.set_obj_location(self.player_name, list(position))
 
     def set_task_yaw_absolute(self, yaw_deg: float, tolerance_deg: float = 1.5, attempts: int = 6) -> float:
         target_task_yaw = normalize_angle_deg(float(yaw_deg))
         current_task_yaw = self.get_task_pose()[3]
         for _ in range(max(1, int(attempts))):
             # This blueprint helper is the stable drone-facing API in the existing teleop path.
-            self.env.unwrapped.unrealcv.set_rotation(self.player_name, target_task_yaw - 180.0)
+            with self.unrealcv_lock:
+                self.env.unwrapped.unrealcv.set_rotation(self.player_name, target_task_yaw - 180.0)
             time.sleep(0.08)
             current_task_yaw = self.get_task_pose()[3]
             if abs(normalize_angle_deg(target_task_yaw - current_task_yaw)) <= float(tolerance_deg):
@@ -245,7 +259,8 @@ class BasicUAVControlBackend:
         if self.args.viewport_mode != "free" or not self.args.follow_free_view:
             return
         pose = self.get_task_pose()
-        set_free_view_near_pose(self.env, [pose[0], pose[1], pose[2], 0.0, pose[3]], self.free_view_offset, self.free_view_rotation)
+        with self.unrealcv_lock:
+            set_free_view_near_pose(self.env, [pose[0], pose[1], pose[2], 0.0, pose[3]], self.free_view_offset, self.free_view_rotation)
 
     def _coerce_fov_deg(self, raw_fov: Any) -> float:
         if isinstance(raw_fov, (int, float)):
@@ -262,14 +277,18 @@ class BasicUAVControlBackend:
         return float(self.last_depth_summary.get("fov_deg", self.args.default_depth_fov_deg))
 
     def get_preview_frame(self) -> np.ndarray:
-        if self.args.preview_mode == "third_person":
-            return get_third_person_preview_image(self.env, self.preview_cam_id, self.preview_offset, self.preview_rotation)
-        set_cam(self.env, self.policy_cam_id)
-        return self.env.unwrapped.unrealcv.get_image(self.policy_cam_id, "lit")
+        with self.unrealcv_lock:
+            if self.args.preview_mode == "third_person":
+                return get_third_person_preview_image(self.env, self.preview_cam_id, self.preview_offset, self.preview_rotation)
+            set_cam(self.env, self.policy_cam_id)
+            return self.env.unwrapped.unrealcv.get_image(self.policy_cam_id, "lit")
 
     def get_depth_observation(self) -> Tuple[np.ndarray, float]:
-        set_cam(self.env, self.policy_cam_id)
-        return coerce_depth_planar_image(self.env.unwrapped.unrealcv.get_depth(self.policy_cam_id)), self._coerce_fov_deg(self.env.unwrapped.unrealcv.get_cam_fov(self.policy_cam_id))
+        with self.unrealcv_lock:
+            set_cam(self.env, self.policy_cam_id)
+            depth = self.env.unwrapped.unrealcv.get_depth(self.policy_cam_id)
+            fov = self.env.unwrapped.unrealcv.get_cam_fov(self.policy_cam_id)
+        return coerce_depth_planar_image(depth), self._coerce_fov_deg(fov)
 
     def refresh_preview_only(self) -> None:
         self.frame_index += 1
@@ -305,6 +324,144 @@ class BasicUAVControlBackend:
         self.refresh_preview_only()
         self.refresh_depth_only()
 
+    def _get_overhead_map_config(self) -> Dict[str, Any]:
+        registry = self.house_registry.to_dict()
+        world_bounds = registry.get("world_bounds", {}) if isinstance(registry, dict) else {}
+        overhead_map = registry.get("overhead_map", {}) if isinstance(registry, dict) else {}
+
+        min_x = float(world_bounds.get("min_x", 0.0))
+        min_y = float(world_bounds.get("min_y", 0.0))
+        max_x = float(world_bounds.get("max_x", 0.0))
+        max_y = float(world_bounds.get("max_y", 0.0))
+        if max_x <= min_x or max_y <= min_y:
+            houses = self.house_registry.get_all_houses()
+            if houses:
+                min_x = min(h.center_x - h.radius_cm for h in houses) - 400.0
+                min_y = min(h.center_y - h.radius_cm for h in houses) - 400.0
+                max_x = max(h.center_x + h.radius_cm for h in houses) + 400.0
+                max_y = max(h.center_y + h.radius_cm for h in houses) + 400.0
+            else:
+                min_x, min_y, max_x, max_y = 1000.0, -500.0, 5000.0, 3000.0
+
+        span_x = max(1.0, max_x - min_x)
+        span_y = max(1.0, max_y - min_y)
+        center_x = float(overhead_map.get("center_x", (min_x + max_x) * 0.5))
+        center_y = float(overhead_map.get("center_y", (min_y + max_y) * 0.5))
+        height_z = float(overhead_map.get("height_z", max(span_x, span_y) * 1.25 + 400.0))
+        yaw_deg = float(overhead_map.get("yaw_deg", 0.0))
+        return {
+            "world_bounds": {"min_x": min_x, "min_y": min_y, "max_x": max_x, "max_y": max_y},
+            "center_x": center_x,
+            "center_y": center_y,
+            "height_z": height_z,
+            "yaw_deg": yaw_deg,
+            "image_path": str(overhead_map.get("image_path", "")),
+        }
+
+    def refresh_overhead_map_only(self) -> None:
+        cfg = self._get_overhead_map_config()
+        cam_loc = [float(cfg["center_x"]), float(cfg["center_y"]), float(cfg["height_z"])]
+        cam_rot = [-90.0, float(cfg["yaw_deg"]), 0.0]
+        with self.unrealcv_lock:
+            self.env.unwrapped.unrealcv.set_cam_location(self.overhead_cam_id, cam_loc)
+            self.env.unwrapped.unrealcv.set_cam_rotation(self.overhead_cam_id, cam_rot)
+        time.sleep(0.06)
+        with self.unrealcv_lock:
+            self.last_overhead_frame = self.env.unwrapped.unrealcv.get_image(self.overhead_cam_id, "lit")
+        self.last_overhead_refresh_time = now_timestamp()
+        saved_image_path = ""
+        image_path = str(cfg.get("image_path", "") or "").strip()
+        if self.last_overhead_frame is not None and image_path:
+            try:
+                os.makedirs(os.path.dirname(image_path), exist_ok=True)
+                if cv2.imwrite(image_path, self.last_overhead_frame):
+                    saved_image_path = image_path
+            except Exception as exc:
+                logger.warning("Failed to save overhead map image to %s: %s", image_path, exc)
+        self.last_overhead_info = {
+            "cam_id": int(self.overhead_cam_id),
+            "camera_location": cam_loc,
+            "camera_rotation": cam_rot,
+            "refresh_time": self.last_overhead_refresh_time,
+            "saved_image_path": saved_image_path,
+            "image_width": int(self.last_overhead_frame.shape[1]) if self.last_overhead_frame is not None else 0,
+            "image_height": int(self.last_overhead_frame.shape[0]) if self.last_overhead_frame is not None else 0,
+            **cfg,
+        }
+
+    def get_overhead_map_info(self) -> Dict[str, Any]:
+        if not self.last_overhead_info:
+            self.refresh_overhead_map_only()
+        return dict(self.last_overhead_info)
+
+    def set_overhead_calibration(
+        self,
+        *,
+        anchors: List[Dict[str, Any]],
+        image_width: int,
+        image_height: int,
+        image_path: str = "",
+    ) -> Dict[str, Any]:
+        if len(anchors) < 3:
+            return {"status": "error", "message": "At least 3 anchors are required for calibration."}
+
+        world_mat = []
+        image_x = []
+        image_y = []
+        clean_anchors: List[Dict[str, Any]] = []
+        for idx, anchor in enumerate(anchors, start=1):
+            wx = float(anchor["world_x"])
+            wy = float(anchor["world_y"])
+            ix = float(anchor["image_x"])
+            iy = float(anchor["image_y"])
+            world_mat.append([wx, wy, 1.0])
+            image_x.append(ix)
+            image_y.append(iy)
+            clean_anchors.append({
+                "index": idx,
+                "label": f"P{idx}",
+                "world_x": wx,
+                "world_y": wy,
+                "image_x": ix,
+                "image_y": iy,
+            })
+
+        A = np.asarray(world_mat, dtype=np.float64)
+        bx = np.asarray(image_x, dtype=np.float64)
+        by = np.asarray(image_y, dtype=np.float64)
+        coeff_x, _, _, _ = np.linalg.lstsq(A, bx, rcond=None)
+        coeff_y, _, _, _ = np.linalg.lstsq(A, by, rcond=None)
+        affine = np.asarray([
+            [float(coeff_x[0]), float(coeff_x[1]), float(coeff_x[2])],
+            [float(coeff_y[0]), float(coeff_y[1]), float(coeff_y[2])],
+        ], dtype=np.float64)
+
+        pred_x = A @ coeff_x
+        pred_y = A @ coeff_y
+        errors = np.sqrt((pred_x - bx) ** 2 + (pred_y - by) ** 2)
+        rmse_px = float(np.sqrt(np.mean(errors ** 2))) if errors.size else 0.0
+
+        self.house_registry.set_overhead_calibration(
+            anchors=clean_anchors,
+            affine_world_to_image=affine.tolist(),
+            image_width=int(image_width),
+            image_height=int(image_height),
+            rmse_px=rmse_px,
+        )
+        if image_path:
+            self.house_registry.update_overhead_map({"image_path": str(image_path)})
+        self.house_registry.save_to_file(self.args.houses_config)
+        return {
+            "status": "ok",
+            "message": f"Overhead calibration saved with {len(clean_anchors)} anchors (rmse={rmse_px:.2f}px).",
+            "calibration": self.house_registry.to_dict().get("overhead_map", {}).get("calibration", {}),
+        }
+
+    def clear_overhead_calibration(self) -> Dict[str, Any]:
+        self.house_registry.clear_overhead_calibration()
+        self.house_registry.save_to_file(self.args.houses_config)
+        return {"status": "ok", "message": "Overhead calibration cleared."}
+
     def _build_pose_state(self) -> Dict[str, Any]:
         pose = self.get_task_pose()
         return {
@@ -333,11 +490,45 @@ class BasicUAVControlBackend:
             "camera_info": dict(self.last_depth_summary.get("camera_info", {})),
             "last_capture": dict(self.last_capture) if isinstance(self.last_capture, dict) else None,
             "house_registry": self.house_registry.get_status_summary(),
+            "house_mission": self.get_house_mission_state(),
+            "overhead_map": dict(self.last_overhead_info),
         }
 
     # ------------------------------------------------------------------
     # House registry API helpers
     # ------------------------------------------------------------------
+    def get_house_mission_state(self) -> Dict[str, Any]:
+        x, y, z, yaw = self.get_task_pose()
+        current_house = self.house_registry.get_containing_house(x, y)
+        nearest_house = self.house_registry.get_nearest_house(x, y)
+        nearest_unsearched = self.house_registry.get_nearest_unsearched(x, y)
+        target_house = self.house_registry.get_target_house()
+        distance_to_target = target_house.distance_to(x, y) if target_house is not None else None
+        inside_target = (
+            target_house is not None
+            and distance_to_target is not None
+            and distance_to_target <= float(target_house.radius_cm)
+        )
+        return {
+            "current_house_id": current_house.id if current_house else "",
+            "current_house_name": current_house.name if current_house else "",
+            "current_house_status": current_house.status.value if current_house else "",
+            "nearest_house_id": nearest_house.id if nearest_house else "",
+            "nearest_house_name": nearest_house.name if nearest_house else "",
+            "nearest_unsearched_house_id": nearest_unsearched.id if nearest_unsearched else "",
+            "nearest_unsearched_house_name": nearest_unsearched.name if nearest_unsearched else "",
+            "target_house_id": target_house.id if target_house else "",
+            "target_house_name": target_house.name if target_house else "",
+            "target_house_status": target_house.status.value if target_house else "",
+            "distance_to_target_cm": float(distance_to_target) if distance_to_target is not None else None,
+            "inside_current_house": current_house is not None,
+            "inside_target_house": bool(inside_target),
+            "uav_x": float(x),
+            "uav_y": float(y),
+            "uav_z": float(z),
+            "uav_yaw": float(yaw),
+        }
+
     def get_house_registry(self) -> Dict[str, Any]:
         return {"status": "ok", "registry": self.house_registry.to_dict()}
 
@@ -352,7 +543,20 @@ class BasicUAVControlBackend:
             "message": f"Target set to '{house_id}'.",
             "target_house": house.to_dict() if house else None,
             "registry_summary": self.house_registry.get_status_summary(),
+            "house_mission": self.get_house_mission_state(),
         }
+
+    def select_nearest_unsearched_house(self) -> Dict[str, Any]:
+        x, y, _, _ = self.get_task_pose()
+        house = self.house_registry.get_nearest_unsearched(x, y)
+        if house is None:
+            return {
+                "status": "error",
+                "message": "No unsearched house available.",
+                "registry_summary": self.house_registry.get_status_summary(),
+                "house_mission": self.get_house_mission_state(),
+            }
+        return self.select_target_house(house.id)
 
     def mark_house_explored(self, house_id: str, *, person_found: bool = False,
                              person_location: Optional[Dict] = None, notes: str = "") -> Dict[str, Any]:
@@ -367,7 +571,26 @@ class BasicUAVControlBackend:
             "status": "ok",
             "message": f"House '{house_id}' marked {'PERSON_FOUND' if person_found else 'EXPLORED'}.",
             "registry_summary": self.house_registry.get_status_summary(),
+            "house_mission": self.get_house_mission_state(),
         }
+
+    def mark_current_house_explored(self, *, person_found: bool = False,
+                                    person_location: Optional[Dict] = None, notes: str = "") -> Dict[str, Any]:
+        x, y, _, _ = self.get_task_pose()
+        house = self.house_registry.get_containing_house(x, y)
+        if house is None:
+            return {
+                "status": "error",
+                "message": "UAV is not inside any configured house boundary.",
+                "registry_summary": self.house_registry.get_status_summary(),
+                "house_mission": self.get_house_mission_state(),
+            }
+        return self.mark_house_explored(
+            house.id,
+            person_found=person_found,
+            person_location=person_location,
+            notes=notes,
+        )
 
     def navigate_step_to_house(self, house_id: str) -> Dict[str, Any]:
         """Execute ONE movement step toward the target house at cruise altitude."""
@@ -530,6 +753,17 @@ class BasicUAVControlBackend:
                 raise RuntimeError("Failed to encode raw depth frame")
             return encoded.tobytes()
 
+    def get_overhead_map_jpeg(self) -> bytes:
+        with self.lock:
+            if self.last_overhead_frame is None:
+                self.refresh_overhead_map_only()
+            if self.last_overhead_frame is None:
+                raise RuntimeError("No overhead map frame available")
+            encode_ok, encoded = cv2.imencode(".jpg", self.last_overhead_frame, [int(cv2.IMWRITE_JPEG_QUALITY), int(self.args.frame_jpeg_quality)])
+            if not encode_ok:
+                raise RuntimeError("Failed to encode overhead map frame")
+            return encoded.tobytes()
+
     def get_camera_info(self) -> Dict[str, Any]:
         with self.lock:
             if not self.last_depth_summary.get("camera_info"):
@@ -653,6 +887,12 @@ def make_handler(backend: BasicUAVControlBackend):
                     self._send_json(backend.get_state())
                 elif parsed.path == "/house_registry":
                     self._send_json(backend.get_house_registry())
+                elif parsed.path == "/house_mission":
+                    self._send_json({"status": "ok", "house_mission": backend.get_house_mission_state()})
+                elif parsed.path == "/overhead_map_info":
+                    self._send_json({"status": "ok", "overhead_map": backend.get_overhead_map_info()})
+                elif parsed.path == "/overhead_map_frame":
+                    self._send_bytes(backend.get_overhead_map_jpeg(), "image/jpeg")
                 elif parsed.path == "/frame":
                     self._send_bytes(backend.get_frame_jpeg(), "image/jpeg")
                 elif parsed.path in ("/depth", "/depth_frame"):
@@ -697,12 +937,31 @@ def make_handler(backend: BasicUAVControlBackend):
                     with backend.lock:
                         backend.refresh_observations()
                         self._send_json(backend.get_state(message="Observations refreshed."))
+                elif parsed.path == "/refresh_overhead_map":
+                    with backend.lock:
+                        backend.refresh_overhead_map_only()
+                        self._send_json({"status": "ok", "overhead_map": backend.get_overhead_map_info()})
+                elif parsed.path == "/set_overhead_calibration":
+                    anchors = data.get("anchors", [])
+                    image_width = int(data.get("image_width", 0))
+                    image_height = int(data.get("image_height", 0))
+                    image_path = str(data.get("image_path", "") or "")
+                    self._send_json(backend.set_overhead_calibration(
+                        anchors=anchors if isinstance(anchors, list) else [],
+                        image_width=image_width,
+                        image_height=image_height,
+                        image_path=image_path,
+                    ))
+                elif parsed.path == "/clear_overhead_calibration":
+                    self._send_json(backend.clear_overhead_calibration())
                 elif parsed.path == "/select_target_house":
                     house_id = str(data.get("house_id", ""))
                     if not house_id:
                         self._send_json({"status": "error", "message": "house_id required."}, 400)
                     else:
                         self._send_json(backend.select_target_house(house_id))
+                elif parsed.path == "/select_nearest_unsearched_house":
+                    self._send_json(backend.select_nearest_unsearched_house())
                 elif parsed.path == "/mark_house_explored":
                     house_id = str(data.get("house_id", ""))
                     if not house_id:
@@ -714,6 +973,12 @@ def make_handler(backend: BasicUAVControlBackend):
                             person_location=data.get("person_location"),
                             notes=str(data.get("notes", "")),
                         ))
+                elif parsed.path == "/mark_current_house_explored":
+                    self._send_json(backend.mark_current_house_explored(
+                        person_found=bool(data.get("person_found", False)),
+                        person_location=data.get("person_location"),
+                        notes=str(data.get("notes", "")),
+                    ))
                 elif parsed.path == "/navigate_step_to_house":
                     house_id = str(data.get("house_id", ""))
                     target = backend.house_registry.get_target_house()
