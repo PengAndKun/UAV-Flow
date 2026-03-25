@@ -16,6 +16,7 @@ from urllib import request
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+from map_overhead_widget import OverheadMapWidget
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +102,17 @@ class BasicUAVControlPanel:
         self.sequence_stop_event = threading.Event()
         self.movement_enabled_state = False
 
+        # --- Mission map state ---
+        self.map_window: Optional[tk.Toplevel] = None
+        self.map_widget: Optional[OverheadMapWidget] = None
+        self.mission_status_var = tk.StringVar(value="Mission: idle")
+        self.target_house_var = tk.StringVar(value="Target: none")
+
         self.build_ui()
         self.root.after(200, self.schedule_state_refresh)
         self.root.after(350, self.schedule_preview_refresh)
         self.root.after(450, self.schedule_depth_refresh)
+        self.root.after(1200, self.schedule_map_refresh)
 
     def pause_background_refresh(self, seconds: float) -> None:
         self.background_pause_until = max(self.background_pause_until, time.time() + max(0.0, seconds))
@@ -208,6 +216,185 @@ class BasicUAVControlPanel:
             self.refresh_depth_window()
         self.root.after(self.args.depth_interval_ms, self.schedule_depth_refresh)
 
+    # ------------------------------------------------------------------
+    # Map and mission helpers
+    # ------------------------------------------------------------------
+    def schedule_map_refresh(self) -> None:
+        if self.map_widget is not None and self.map_window is not None and self.map_window.winfo_exists():
+            self._refresh_map_async()
+        self.root.after(1500, self.schedule_map_refresh)
+
+    def _refresh_map_async(self) -> None:
+        def worker() -> None:
+            try:
+                state = self.client.get_json("/state")
+                registry = self.client.get_json("/house_registry")
+            except Exception:
+                return
+            self.root.after(0, lambda: self._apply_map_data(state, registry))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_map_data(self, state: Dict[str, Any], registry: Dict[str, Any]) -> None:
+        pose = state.get("pose", {})
+        uav_x = float(pose.get("x", 0))
+        uav_y = float(pose.get("y", 0))
+        uav_yaw = float(pose.get("task_yaw", 0))
+
+        reg = registry.get("registry", {})
+        target_id = reg.get("target_house_id", "")
+        summary = state.get("house_registry", {})
+        counts = summary.get("counts", {})
+        self.mission_status_var.set(
+            f"Mission: unsearched={counts.get('UNSEARCHED',0)} "
+            f"in_progress={counts.get('IN_PROGRESS',0)} "
+            f"explored={counts.get('EXPLORED',0)} "
+            f"found={counts.get('PERSON_FOUND',0)}"
+        )
+        self.target_house_var.set(f"Target: {target_id or 'none'}")
+
+        if self.map_widget is None:
+            return
+        self.map_widget.update_uav(uav_x, uav_y, uav_yaw)
+        houses_raw = reg.get("houses", [])
+        houses_for_map = []
+        for h in houses_raw:
+            houses_for_map.append({
+                "id": h.get("id", ""),
+                "name": h.get("name", ""),
+                "center_x": float(h.get("center_x", 0)),
+                "center_y": float(h.get("center_y", 0)),
+                "radius_cm": float(h.get("radius_cm", 600)),
+                "status": h.get("status", "UNSEARCHED"),
+                "is_target": h.get("id", "") == target_id,
+            })
+        self.map_widget.update_houses(houses_for_map)
+
+    def toggle_map_window(self) -> None:
+        if self.map_window is not None and self.map_window.winfo_exists():
+            self.map_window.destroy()
+            self.map_window = None
+            self.map_widget = None
+            return
+        self.map_window = tk.Toplevel(self.root)
+        self.map_window.title("Mission Map — Overhead View")
+        self.map_window.resizable(False, False)
+        # Use world bounds from registry if available; fall back to defaults
+        try:
+            reg = self.client.get_json("/house_registry")
+            wb = reg.get("registry", {}).get("world_bounds", {})
+            bounds = (
+                float(wb.get("min_x", 1000)),
+                float(wb.get("min_y", -500)),
+                float(wb.get("max_x", 5000)),
+                float(wb.get("max_y", 3000)),
+            )
+        except Exception:
+            bounds = (1000, -500, 5000, 3000)
+        self.map_widget = OverheadMapWidget(self.map_window, world_bounds=bounds,
+                                            canvas_w=520, canvas_h=400)
+        self.map_widget.set_click_callback(self._on_map_house_click)
+        self._refresh_map_async()
+
+    def _on_map_house_click(self, house_id: str) -> None:
+        def worker() -> None:
+            resp = self.safe_request(
+                self.client.post_json, "/select_target_house",
+                {"house_id": house_id}, label=f"Select house {house_id}",
+            )
+            if isinstance(resp, dict):
+                msg = resp.get("message", "")
+                self.root.after(0, lambda: self.set_status(f"[Map] {msg}"))
+                self._refresh_map_async()
+        threading.Thread(target=worker, daemon=True).start()
+        self.set_status(f"Selecting target house: {house_id}...")
+
+    def on_auto_select_house(self) -> None:
+        def worker() -> None:
+            try:
+                state = self.client.get_json("/state")
+                reg = self.client.get_json("/house_registry")
+            except Exception as exc:
+                self.root.after(0, lambda: self.set_status(f"Auto-select failed: {exc}"))
+                return
+            pose = state.get("pose", {})
+            uav_x, uav_y = float(pose.get("x", 0)), float(pose.get("y", 0))
+            houses = reg.get("registry", {}).get("houses", [])
+            best_id, best_dist = None, float("inf")
+            for h in houses:
+                if h.get("status", "") not in ("UNSEARCHED",):
+                    continue
+                dx = float(h.get("center_x", 0)) - uav_x
+                dy = float(h.get("center_y", 0)) - uav_y
+                d = (dx**2 + dy**2) ** 0.5
+                if d < best_dist:
+                    best_dist, best_id = d, h["id"]
+            if best_id is None:
+                self.root.after(0, lambda: self.set_status("No unsearched houses remain."))
+                return
+            resp = self.safe_request(
+                self.client.post_json, "/select_target_house",
+                {"house_id": best_id}, label=f"Auto-select {best_id}",
+            )
+            msg = (resp or {}).get("message", best_id)
+            self.root.after(0, lambda: self.set_status(f"Auto-selected: {msg}"))
+            self._refresh_map_async()
+        threading.Thread(target=worker, daemon=True).start()
+        self.set_status("Auto-selecting nearest unsearched house...")
+
+    def on_navigate_step_to_house(self) -> None:
+        def worker() -> None:
+            resp = self.safe_request(
+                self.client.post_json, "/navigate_step_to_house", {},
+                label="Nav step to house",
+            )
+            if isinstance(resp, dict):
+                self.root.after(0, lambda: self.apply_state(resp))
+        self.run_manual_async_request("Nav step to house", worker)
+
+    def on_mark_explored(self) -> None:
+        def worker() -> None:
+            try:
+                reg = self.client.get_json("/house_registry")
+            except Exception:
+                return
+            target_id = reg.get("registry", {}).get("target_house_id", "")
+            if not target_id:
+                self.root.after(0, lambda: self.set_status("No target house set."))
+                return
+            resp = self.safe_request(
+                self.client.post_json, "/mark_house_explored",
+                {"house_id": target_id, "person_found": False},
+                label=f"Mark {target_id} explored",
+            )
+            msg = (resp or {}).get("message", "done")
+            self.root.after(0, lambda: self.set_status(msg))
+            self._refresh_map_async()
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_mark_person_found(self) -> None:
+        def worker() -> None:
+            try:
+                reg = self.client.get_json("/house_registry")
+                state = self.client.get_json("/state")
+            except Exception:
+                return
+            target_id = reg.get("registry", {}).get("target_house_id", "")
+            if not target_id:
+                self.root.after(0, lambda: self.set_status("No target house set."))
+                return
+            pose = state.get("pose", {})
+            loc = {"x": pose.get("x", 0), "y": pose.get("y", 0), "z": pose.get("z", 0)}
+            resp = self.safe_request(
+                self.client.post_json, "/mark_house_explored",
+                {"house_id": target_id, "person_found": True, "person_location": loc,
+                 "notes": "Confirmed by operator"},
+                label=f"Mark {target_id} person found",
+            )
+            msg = (resp or {}).get("message", "done")
+            self.root.after(0, lambda: self.set_status(msg))
+            self._refresh_map_async()
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_close(self) -> None:
         for window in (self.preview_window, self.depth_window):
             try:
@@ -284,6 +471,24 @@ class BasicUAVControlPanel:
         tk.Button(preview_frame, text="Toggle Depth", width=16, command=self.toggle_depth_window).grid(row=1, column=0, padx=4, pady=4)
         tk.Button(preview_frame, text="Refresh Depth", width=16, command=self.refresh_depth_window).grid(row=1, column=1, padx=4, pady=4)
         tk.Checkbutton(preview_frame, text="Auto Depth", variable=self.auto_depth_var).grid(row=1, column=2, padx=4, pady=4, sticky="w")
+
+        # --- Mission Map panel ---
+        mission_frame = tk.LabelFrame(main, text="Multi-House Mission", padx=8, pady=8)
+        mission_frame.pack(fill="x", pady=(0, 8))
+        tk.Label(mission_frame, textvariable=self.mission_status_var, anchor="w").pack(fill="x")
+        tk.Label(mission_frame, textvariable=self.target_house_var, anchor="w").pack(fill="x")
+        mission_btn_row = tk.Frame(mission_frame)
+        mission_btn_row.pack(fill="x", pady=(6, 0))
+        tk.Button(mission_btn_row, text="Open Map", width=14,
+                  command=self.toggle_map_window).pack(side="left", padx=(0, 6))
+        tk.Button(mission_btn_row, text="Auto-Select Nearest", width=18,
+                  command=self.on_auto_select_house).pack(side="left", padx=(0, 6))
+        tk.Button(mission_btn_row, text="Nav Step →House", width=18,
+                  command=self.on_navigate_step_to_house).pack(side="left", padx=(0, 6))
+        tk.Button(mission_btn_row, text="Mark Explored ✓", width=16,
+                  command=self.on_mark_explored).pack(side="left", padx=(0, 6))
+        tk.Button(mission_btn_row, text="Mark Person Found !", width=18,
+                  command=self.on_mark_person_found).pack(side="left")
 
         footer = tk.Frame(main)
         footer.pack(fill="x")

@@ -1,0 +1,35 @@
+{
+  "world_bounds": {"min_x": 1000, "min_y": -500, "max_x": 5000, "max_y": 3000},
+  "houses": [
+    {
+      "id": "house_A",
+      "name": "House A",
+      "center_x": 2400.0,
+      "center_y": 100.0,
+      "center_z": 200.0,
+      "approach_z": 600.0,
+      "radius_cm": 700.0,
+      "entry_yaw_hint": -90.0
+    },
+    {
+      "id": "house_B",
+      "name": "House B",
+      "center_x": 3800.0,
+      "center_y": 800.0,
+      "center_z": 200.0,
+      "approach_z": 600.0,
+      "radius_cm": 750.0,
+      "entry_yaw_hint": 180.0
+    },
+    {
+      "id": "house_C",
+      "name": "House C",
+      "center_x": 2100.0,
+      "center_y": 2200.0,
+      "center_z": 200.0,
+      "approach_z": 600.0,
+      "radius_cm": 680.0,
+      "entry_yaw_hint": 0.0
+    }
+  ]
+}

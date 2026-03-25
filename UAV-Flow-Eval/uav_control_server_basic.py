@@ -28,6 +28,7 @@ import cv2
 import gym
 import gym_unrealcv
 import numpy as np
+from house_registry import HouseRegistry, HouseStatus
 
 from batch_run_act_all import (
     configure_player_viewport,
@@ -106,6 +107,8 @@ class BasicUAVControlBackend:
         self.movement_enabled = bool(args.start_with_basic_movement)
         self.fixed_spawn_pose_path = os.path.abspath(args.fixed_spawn_pose_file) if args.fixed_spawn_pose_file else ""
         self.command_task_yaw_deg = 0.0
+        # --- House registry ---
+        self.house_registry = HouseRegistry(args.houses_config)
         self.last_depth_summary: Dict[str, Any] = {
             "frame_id": self.last_observation_id,
             "available": False,
@@ -329,7 +332,69 @@ class BasicUAVControlBackend:
             "depth": dict(self.last_depth_summary),
             "camera_info": dict(self.last_depth_summary.get("camera_info", {})),
             "last_capture": dict(self.last_capture) if isinstance(self.last_capture, dict) else None,
+            "house_registry": self.house_registry.get_status_summary(),
         }
+
+    # ------------------------------------------------------------------
+    # House registry API helpers
+    # ------------------------------------------------------------------
+    def get_house_registry(self) -> Dict[str, Any]:
+        return {"status": "ok", "registry": self.house_registry.to_dict()}
+
+    def select_target_house(self, house_id: str) -> Dict[str, Any]:
+        ok = self.house_registry.set_target(house_id)
+        if not ok:
+            return {"status": "error", "message": f"House '{house_id}' not found."}
+        self.house_registry.save_to_file(self.args.houses_config)
+        house = self.house_registry.get_house(house_id)
+        return {
+            "status": "ok",
+            "message": f"Target set to '{house_id}'.",
+            "target_house": house.to_dict() if house else None,
+            "registry_summary": self.house_registry.get_status_summary(),
+        }
+
+    def mark_house_explored(self, house_id: str, *, person_found: bool = False,
+                             person_location: Optional[Dict] = None, notes: str = "") -> Dict[str, Any]:
+        ok = self.house_registry.mark_explored(
+            house_id, person_found=person_found,
+            person_location=person_location, notes=notes,
+        )
+        if not ok:
+            return {"status": "error", "message": f"House '{house_id}' not found."}
+        self.house_registry.save_to_file(self.args.houses_config)
+        return {
+            "status": "ok",
+            "message": f"House '{house_id}' marked {'PERSON_FOUND' if person_found else 'EXPLORED'}.",
+            "registry_summary": self.house_registry.get_status_summary(),
+        }
+
+    def navigate_step_to_house(self, house_id: str) -> Dict[str, Any]:
+        """Execute ONE movement step toward the target house at cruise altitude."""
+        house = self.house_registry.get_house(house_id)
+        if house is None:
+            return {"status": "error", "message": f"House '{house_id}' not found."}
+        with self.lock:
+            if not self.movement_enabled:
+                return self.get_state(status="disabled", message="Enable movement first.")
+            x, y, z, yaw = self.get_task_pose()
+            tx, ty, tz_cruise = house.center_x, house.center_y, house.approach_z
+            # Step 1: climb to cruise altitude
+            if z < tz_cruise - 30:
+                return self.move_relative(up_cm=30.0, action_name="nav_climb")
+            # Step 2: yaw toward target
+            dx, dy = tx - x, ty - y
+            dist = (dx**2 + dy**2) ** 0.5
+            if dist < 100:
+                return self.get_state(message=f"Arrived near house '{house_id}'.")
+            target_yaw = float(np.degrees(np.arctan2(dy, dx)))
+            yaw_err = float(normalize_angle_deg(target_yaw - yaw))
+            if abs(yaw_err) > 20:
+                step = 20.0 if yaw_err > 0 else -20.0
+                return self.move_relative(yaw_delta_deg=step, action_name="nav_yaw")
+            # Step 3: fly forward
+            step_cm = min(50.0, dist)
+            return self.move_relative(forward_cm=step_cm, action_name="nav_forward")
 
     def set_movement_enabled(self, enabled: bool) -> Dict[str, Any]:
         with self.lock:
@@ -586,6 +651,8 @@ def make_handler(backend: BasicUAVControlBackend):
                     self._send_json({"status": "ok"})
                 elif parsed.path == "/state":
                     self._send_json(backend.get_state())
+                elif parsed.path == "/house_registry":
+                    self._send_json(backend.get_house_registry())
                 elif parsed.path == "/frame":
                     self._send_bytes(backend.get_frame_jpeg(), "image/jpeg")
                 elif parsed.path in ("/depth", "/depth_frame"):
@@ -630,6 +697,32 @@ def make_handler(backend: BasicUAVControlBackend):
                     with backend.lock:
                         backend.refresh_observations()
                         self._send_json(backend.get_state(message="Observations refreshed."))
+                elif parsed.path == "/select_target_house":
+                    house_id = str(data.get("house_id", ""))
+                    if not house_id:
+                        self._send_json({"status": "error", "message": "house_id required."}, 400)
+                    else:
+                        self._send_json(backend.select_target_house(house_id))
+                elif parsed.path == "/mark_house_explored":
+                    house_id = str(data.get("house_id", ""))
+                    if not house_id:
+                        self._send_json({"status": "error", "message": "house_id required."}, 400)
+                    else:
+                        self._send_json(backend.mark_house_explored(
+                            house_id,
+                            person_found=bool(data.get("person_found", False)),
+                            person_location=data.get("person_location"),
+                            notes=str(data.get("notes", "")),
+                        ))
+                elif parsed.path == "/navigate_step_to_house":
+                    house_id = str(data.get("house_id", ""))
+                    target = backend.house_registry.get_target_house()
+                    if not house_id and target:
+                        house_id = target.id
+                    if not house_id:
+                        self._send_json({"status": "error", "message": "No house_id and no target set."}, 400)
+                    else:
+                        self._send_json(backend.navigate_step_to_house(house_id))
                 elif parsed.path == "/shutdown":
                     backend.shutdown_async()
                     self._send_json({"status": "ok", "message": "Shutdown requested."})
@@ -690,6 +783,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--default_depth_fov_deg", type=float, default=90.0)
     parser.add_argument("--depth_camera_frame_id", default="uav_depth_camera")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+    parser.add_argument("--houses_config", default="./houses_config.json",
+                        help="Path to houses_config.json defining house positions and search state.")
     return parser.parse_args()
 
 
