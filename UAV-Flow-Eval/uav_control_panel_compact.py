@@ -72,6 +72,30 @@ PLANNER_PRESETS: Dict[str, Dict[str, Any]] = {
         "fallback_to_heuristic": True,
         "planner_request_timeout_s": 25.0,
     },
+    "Anthropic Qwen Next": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "llm",
+        "planner_route_mode": "llm_only",
+        "llm_api_style": "anthropic_sdk",
+        "llm_model": "qwen3-coder-next",
+        "llm_input_mode": "text_image",
+        "llm_base_url": "http://1.95.142.151:3000",
+        "llm_api_key_env": "ANTHROPIC_AUTH_TOKEN",
+        "fallback_to_heuristic": False,
+        "planner_request_timeout_s": 20.0,
+    },
+    "Anthropic Sonnet": {
+        "planner_name": "external_llm_planner",
+        "planner_mode": "llm",
+        "planner_route_mode": "llm_only",
+        "llm_api_style": "anthropic_sdk",
+        "llm_model": "claude-sonnet-4-6",
+        "llm_input_mode": "text_image",
+        "llm_base_url": "http://1.95.142.151:3000",
+        "llm_api_key_env": "ANTHROPIC_AUTH_TOKEN",
+        "fallback_to_heuristic": False,
+        "planner_request_timeout_s": 20.0,
+    },
 }
 
 MOVE_COMMANDS: Dict[str, Dict[str, Any]] = {
@@ -147,6 +171,8 @@ class CompactUAVControlPanel:
         self.state_refresh_inflight = False
         self.preview_refresh_inflight = False
         self.depth_refresh_inflight = False
+        self.manual_request_inflight = False
+        self.background_pause_until = 0.0
 
         self.preview_window: Optional[tk.Toplevel] = None
         self.preview_label: Optional[tk.Label] = None
@@ -289,43 +315,32 @@ class CompactUAVControlPanel:
     def build_move_frame(self, parent: tk.Widget) -> None:
         frame = tk.LabelFrame(parent, text="Basic Movement", padx=8, pady=8)
         frame.pack(fill="x", pady=(0, 10))
-        move_pad = tk.Frame(frame)
-        move_pad.pack(side="left", fill="x", expand=True)
-        orient_pad = tk.Frame(frame)
-        orient_pad.pack(side="left", padx=(8, 0))
+        pad = tk.Frame(frame)
+        pad.pack(fill="x", expand=True)
 
-        move_buttons: List[Tuple[str, str, int, int]] = [
+        buttons: List[Tuple[str, str, int, int]] = [
+            ("Yaw Left (Q)", "q", 0, 0),
             ("Forward (W)", "w", 0, 1),
+            ("Yaw Right (E)", "e", 0, 2),
             ("Left (A)", "a", 1, 0),
             ("Hold (X)", "x", 1, 1),
             ("Right (D)", "d", 1, 2),
+            ("Up (R)", "r", 2, 0),
             ("Backward (S)", "s", 2, 1),
+            ("Down (F)", "f", 2, 2),
         ]
-        for text, symbol, row, column in move_buttons:
-            tk.Button(move_pad, text=text, width=12, command=lambda symbol=symbol: self.send_move_symbol(symbol)).grid(
+        for text, symbol, row, column in buttons:
+            tk.Button(pad, text=text, width=12, command=lambda symbol=symbol: self.send_move_symbol(symbol)).grid(
                 row=row,
                 column=column,
                 padx=3,
                 pady=3,
                 sticky="nsew",
             )
+        for row in range(3):
+            pad.grid_rowconfigure(row, weight=1)
         for column in range(3):
-            move_pad.grid_columnconfigure(column, weight=1)
-
-        orient_buttons: List[Tuple[str, str, int, int]] = [
-            ("Up (R)", "r", 0, 0),
-            ("Yaw Left (Q)", "q", 0, 1),
-            ("Down (F)", "f", 1, 0),
-            ("Yaw Right (E)", "e", 1, 1),
-        ]
-        for text, symbol, row, column in orient_buttons:
-            tk.Button(orient_pad, text=text, width=12, command=lambda symbol=symbol: self.send_move_symbol(symbol)).grid(
-                row=row,
-                column=column,
-                padx=3,
-                pady=3,
-                sticky="nsew",
-            )
+            pad.grid_columnconfigure(column, weight=1)
 
     def build_sequence_frame(self, parent: tk.Widget) -> None:
         frame = tk.LabelFrame(parent, text="Sequence Control", padx=8, pady=8)
@@ -397,7 +412,7 @@ class CompactUAVControlPanel:
             ttk.Combobox(
                 frame,
                 textvariable=self.api_style_var,
-                values=["google_genai_sdk", "google_gemini", "openai_chat", "openai_responses", "anthropic_messages"],
+                values=["google_genai_sdk", "google_gemini", "anthropic_sdk", "anthropic_messages", "openai_chat", "openai_responses"],
                 state="readonly",
             ),
         )
@@ -442,6 +457,16 @@ class CompactUAVControlPanel:
             planner_timeout = 8.0
         self.client.timeout_s = max(float(self.args.timeout_s), planner_timeout + 4.0)
 
+    def pause_background_refresh(self, seconds: float = 1.2) -> None:
+        self.background_pause_until = max(self.background_pause_until, time.time() + max(0.0, seconds))
+
+    def background_refresh_allowed(self) -> bool:
+        return (
+            not self.manual_request_inflight
+            and not self.move_request_inflight
+            and time.time() >= self.background_pause_until
+        )
+
     def run_async_request(self, work, *, busy_message: str = "", on_success=None, on_error=None) -> None:
         if busy_message:
             self.status_var.set(busy_message)
@@ -460,12 +485,46 @@ class CompactUAVControlPanel:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def run_manual_async_request(
+        self,
+        work,
+        *,
+        busy_message: str = "",
+        pause_s: float = 1.5,
+        on_success=None,
+        on_error=None,
+    ) -> None:
+        if self.manual_request_inflight:
+            self.status_var.set("Another request is still running...")
+            return
+        self.manual_request_inflight = True
+        self.pause_background_refresh(pause_s)
+
+        def handle_success(result):
+            self.manual_request_inflight = False
+            if on_success is not None:
+                on_success(result)
+
+        def handle_error(exc: Exception) -> None:
+            self.manual_request_inflight = False
+            if on_error is not None:
+                on_error(exc)
+            else:
+                self.handle_async_error("Request", exc)
+
+        self.run_async_request(
+            work,
+            busy_message=busy_message,
+            on_success=handle_success,
+            on_error=handle_error,
+        )
+
     def handle_async_error(self, prefix: str, exc: Exception) -> None:
         self.status_var.set(f"{prefix} failed: {exc}")
         logger.warning("%s failed: %s", prefix, exc)
 
     def request_state_refresh_async(self) -> None:
-        if self.state_refresh_inflight or self.move_request_inflight:
+        if self.state_refresh_inflight or not self.background_refresh_allowed():
             return
         self.state_refresh_inflight = True
 
@@ -482,17 +541,27 @@ class CompactUAVControlPanel:
         self.run_async_request(lambda: self.client.get_json("/state"), on_success=on_done, on_error=on_error)
 
     def schedule_state_refresh(self) -> None:
-        if self.auto_state_var.get():
+        if self.auto_state_var.get() and self.background_refresh_allowed():
             self.request_state_refresh_async()
         self.root.after(max(400, int(self.args.state_interval_ms)), self.schedule_state_refresh)
 
     def schedule_preview_refresh(self) -> None:
-        if self.auto_preview_var.get() and self.preview_window is not None and self.preview_window.winfo_exists():
+        if (
+            self.auto_preview_var.get()
+            and self.preview_window is not None
+            and self.preview_window.winfo_exists()
+            and self.background_refresh_allowed()
+        ):
             self.request_preview_refresh_async()
         self.root.after(max(400, int(self.args.preview_interval_ms)), self.schedule_preview_refresh)
 
     def schedule_depth_refresh(self) -> None:
-        if self.auto_depth_var.get() and self.depth_window is not None and self.depth_window.winfo_exists():
+        if (
+            self.auto_depth_var.get()
+            and self.depth_window is not None
+            and self.depth_window.winfo_exists()
+            and self.background_refresh_allowed()
+        ):
             self.request_depth_refresh_async()
         self.root.after(max(400, int(self.args.depth_interval_ms)), self.schedule_depth_refresh)
 
@@ -507,6 +576,7 @@ class CompactUAVControlPanel:
                 next_symbol = self.move_queue.pop(0)
                 payload = MOVE_COMMANDS[next_symbol]
                 self.move_request_inflight = True
+                self.pause_background_refresh(0.9)
                 try:
                     result = self.client.post_json("/move_relative", payload)
                 except Exception as exc:  # noqa: BLE001
@@ -558,6 +628,7 @@ class CompactUAVControlPanel:
                         break
                     payload = MOVE_COMMANDS[symbol]
                     self.move_request_inflight = True
+                    self.pause_background_refresh(max(0.9, delay_ms / 1000.0))
                     result = self.client.post_json("/move_relative", payload)
                     executed = index
                     self.root.after(0, lambda result=result: self.handle_move_response(result))
@@ -584,7 +655,7 @@ class CompactUAVControlPanel:
 
     def set_task_label(self) -> None:
         payload = {"task_label": self.task_label_var.get().strip()}
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.post_json("/task", payload),
             busy_message="Setting task...",
             on_success=self.handle_set_task_result,
@@ -593,9 +664,10 @@ class CompactUAVControlPanel:
 
     def capture(self) -> None:
         payload = {"label": self.capture_label_var.get().strip(), "task_label": self.task_label_var.get().strip()}
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.post_json("/capture", payload),
             busy_message="Capturing...",
+            pause_s=2.0,
             on_success=self.handle_capture_result,
             on_error=lambda exc: self.handle_async_error("Capture", exc),
         )
@@ -653,9 +725,10 @@ class CompactUAVControlPanel:
         )
 
     def refresh_planner_config(self) -> None:
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.get_json("/planner_config"),
             busy_message="Refreshing planner config...",
+            pause_s=1.2,
             on_success=lambda result: self.sync_planner_controls_from_config(result) if isinstance(result, dict) else None,
             on_error=lambda exc: self.handle_async_error("Refresh Planner", exc),
         )
@@ -663,9 +736,10 @@ class CompactUAVControlPanel:
     def apply_planner_config(self) -> None:
         payload = self.build_planner_config_payload()
         self.refresh_client_timeout()
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.post_json("/planner_config", payload),
             busy_message="Applying planner config...",
+            pause_s=1.8,
             on_success=self.handle_apply_planner_config,
             on_error=lambda exc: self.handle_async_error("Apply Planner", exc),
         )
@@ -694,25 +768,28 @@ class CompactUAVControlPanel:
 
     def request_plan(self) -> None:
         payload = {"task_label": self.task_label_var.get().strip()}
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.post_json("/request_plan", payload),
             busy_message="Requesting planner...",
+            pause_s=3.0,
             on_success=self.handle_request_state_result,
             on_error=lambda exc: self.handle_async_error("Request Plan", exc),
         )
 
     def request_scene_waypoints(self) -> None:
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.post_json("/request_scene_waypoints", {"trigger": "manual_request", "refresh_observations": True}),
             busy_message="Requesting scene waypoints...",
+            pause_s=3.0,
             on_success=self.handle_request_state_result,
             on_error=lambda exc: self.handle_async_error("Request Scene", exc),
         )
 
     def request_llm_action(self) -> None:
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.post_json("/request_llm_action", {"trigger": "manual_request", "refresh_observations": True}),
             busy_message="Requesting LLM action...",
+            pause_s=3.0,
             on_success=self.handle_request_state_result,
             on_error=lambda exc: self.handle_async_error("Request LLM Action", exc),
         )
@@ -738,9 +815,10 @@ class CompactUAVControlPanel:
             "hold_retry_budget": hold_retry,
             "trigger": "manual_llm_action_segment",
         }
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.post_json("/execute_llm_action_segment", payload),
             busy_message=f"Running LLM action segment ({step_budget} steps)...",
+            pause_s=6.0,
             on_success=self.handle_request_state_result,
             on_error=lambda exc: self.handle_async_error("Execute LLM Segment", exc),
         )
@@ -847,9 +925,10 @@ class CompactUAVControlPanel:
         self.depth_label.configure(image=photo)
 
     def refresh_api_history_view(self) -> None:
-        self.run_async_request(
+        self.run_manual_async_request(
             lambda: self.client.get_json("/api_history"),
             busy_message="Loading API history...",
+            pause_s=1.5,
             on_success=self.handle_api_history_response,
             on_error=lambda exc: self.handle_async_error("Load API History", exc),
         )
@@ -1086,10 +1165,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compact remote control panel for uav_control_server.py")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5020)
-    parser.add_argument("--timeout_s", type=float, default=8.0)
-    parser.add_argument("--state_interval_ms", type=int, default=1500)
-    parser.add_argument("--preview_interval_ms", type=int, default=1500)
-    parser.add_argument("--depth_interval_ms", type=int, default=1800)
+    parser.add_argument("--timeout_s", type=float, default=10.0)
+    parser.add_argument("--state_interval_ms", type=int, default=1800)
+    parser.add_argument("--preview_interval_ms", type=int, default=1800)
+    parser.add_argument("--depth_interval_ms", type=int, default=2200)
     parser.add_argument("--default_task_label", default="")
     parser.add_argument("--log_level", default="INFO")
     return parser.parse_args()

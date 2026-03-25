@@ -3401,3 +3401,193 @@ Why this was changed:
 Validation:
 - `python -m py_compile` passed for:
   - `uav_control_panel_compact.py`
+
+### Phase 6.8 Standalone LLM/VLM Module Added
+
+Completed:
+- added a standalone multimodal scene descriptor:
+  - [vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/vlm_scene_descriptor.py)
+- the module can directly:
+  - load RGB image
+  - load depth image
+  - optionally load target-house reference image
+  - build a composite image
+  - call the configured model API
+  - request structured scene-state JSON
+- added usage documentation:
+  - [standalone_llm_module.md](/E:/github/UAV-Flow/docs/phase6_vlm_semantic_archive/standalone_llm_module.md)
+
+Why this was added:
+- the user requested that the LLM module be separated from the controller first
+- this provides a clean way to verify:
+  - real API connectivity
+  - model response quality
+  - RGB+depth multimodal interpretation
+without routing through the full control server and UI stack
+
+Validation:
+- `python -m py_compile` passed for:
+  - `vlm_scene_descriptor.py`
+
+### Phase 6.9 Anthropic Standalone LLM Module Added
+
+Completed:
+- added a standalone Anthropic-SDK scene descriptor:
+  - [anthropic_vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/anthropic_vlm_scene_descriptor.py)
+- the module uses:
+  - `import anthropic`
+  - `ANTHROPIC_BASE_URL`
+  - `ANTHROPIC_AUTH_TOKEN`
+- added Anthropic-specific usage documentation:
+  - [anthropic_standalone_llm_module.md](/E:/github/UAV-Flow/docs/phase6_vlm_semantic_archive/anthropic_standalone_llm_module.md)
+- documented target Anthropic-compatible models:
+  - `qwen3-coder-next`
+  - `claude-sonnet-4-6`
+
+Why this was added:
+- the user requested a standalone Anthropic-based LLM/VLM path separate from the main controller
+- this provides a clean way to verify whether Anthropic-compatible endpoints can truly consume RGB+depth scene composites and return structured JSON
+
+Validation:
+- `python -m py_compile` passed for:
+  - `anthropic_vlm_scene_descriptor.py`
+
+### Phase 6.10 Anthropic SDK Wired Into Unified Planner Client
+
+Completed:
+- added `anthropic_sdk` support to the shared planner client:
+  - [llm_planner_client.py](/E:/github/UAV-Flow/UAV-Flow-Eval/llm_planner_client.py)
+- wired `planner_server.py` to accept:
+  - `api_style=anthropic_sdk`
+  - `ANTHROPIC_AUTH_TOKEN`
+  - `ANTHROPIC_BASE_URL`
+- updated panel presets for:
+  - `Anthropic Qwen Next`
+  - `Anthropic Sonnet`
+- updated both control panels so Anthropic SDK can be selected directly from the UI:
+  - [uav_control_panel.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel.py)
+  - [uav_control_panel_compact.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel_compact.py)
+
+Why this was added:
+- the user wanted the Anthropic route not only as a standalone script, but also as a reusable backend in the unified planner stack
+- this now makes Anthropic models switchable alongside Gemini from the controller UI
+
+Validation:
+- `python -m py_compile` passed for:
+  - `llm_planner_client.py`
+  - `planner_server.py`
+  - `uav_control_panel.py`
+  - `uav_control_panel_compact.py`
+
+### Phase 6.11 Standalone Prompt Logging Added
+
+Completed:
+- added automatic prompt-log saving for both standalone scene descriptor scripts:
+  - [vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/vlm_scene_descriptor.py)
+  - [anthropic_vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/anthropic_vlm_scene_descriptor.py)
+- each run now writes the exact:
+  - system prompt
+  - user prompt
+  - task label
+  - image paths
+  - response schema
+  into:
+  - `E:\github\UAV-Flow\phase6_prompt_logs`
+- output JSON now also includes:
+  - `prompt_log_path`
+
+Why this was added:
+- the user requested that every standalone call store its prompt in a dedicated folder for later review
+
+Validation:
+- `python -m py_compile` passed for:
+  - `vlm_scene_descriptor.py`
+  - `anthropic_vlm_scene_descriptor.py`
+### Phase 6.12 Compact Controller Request Throttling Tightened
+
+Completed:
+- tightened compact panel request scheduling in:
+  - [uav_control_panel_compact.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel_compact.py)
+- background refreshes now pause while:
+  - a manual request is running
+  - a move request is in flight
+  - the panel is inside a short cooldown window after a manual action
+- serialized manual planner/scene/LLM/history requests through a dedicated manual-request gate
+- raised compact panel default intervals slightly:
+  - `timeout_s`: `10.0`
+  - `state_interval_ms`: `1800`
+  - `preview_interval_ms`: `1800`
+  - `depth_interval_ms`: `2200`
+
+Why this was changed:
+- the user reported repeated:
+  - `Move q failed`
+  - `timed out`
+  - unreliable delivery during repeated manual inputs
+- background refresh traffic was still competing with manual control and LLM requests
+
+Validation:
+- `python -m py_compile` passed for:
+  - `uav_control_panel_compact.py`
+### Phase 6.13 Restored Local VLM Scene Runtime Builder
+
+Completed:
+- restored `build_vlm_scene_runtime(...)` in:
+  - [vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/vlm_scene_descriptor.py)
+- this function now rebuilds a heuristic local `vlm_scene_runtime` from:
+  - mission/search runtime
+  - doorway runtime
+  - scene waypoint runtime
+  - phase5/phase6 stage state
+  - reference match runtime
+  - search result/evidence
+  - depth summary
+- fixed startup regression where:
+  - [uav_control_server.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server.py)
+  imported `build_vlm_scene_runtime` but the function was no longer present
+
+Why this was changed:
+- the user hit an import-time crash when launching `uav_control_server.py`
+- Phase 6 orchestration still depends on a local runtime summary even when standalone VLM testing exists separately
+
+Validation:
+- `python -m py_compile` passed for:
+  - `vlm_scene_descriptor.py`
+  - `uav_control_server.py`
+### Phase 6.14 Added Low-Latency Basic-Only Control Stack
+
+Completed:
+- added a new minimal server:
+  - [uav_control_server_basic.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_server_basic.py)
+- added a matching minimal panel:
+  - [uav_control_panel_basic.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel_basic.py)
+- the new server keeps only:
+  - environment startup / spawn handling
+  - fixed spawn pose loading/saving
+  - task label
+  - basic movement enable/disable
+  - `/move_relative`
+  - `/frame`
+  - `/depth_frame`
+  - `/depth_raw`
+  - `/camera_info`
+  - `/capture`
+  - `/state`
+  - `/shutdown`
+- the new panel keeps only:
+  - runtime status / pose / depth summary
+  - task label + capture
+  - enable basic movement
+  - compact 3x3 movement pad (`Q/W/E`, `A/X/D`, `R/S/F`)
+  - symbol sequence input
+  - RGB/depth preview toggles
+  - low-frequency state refresh
+
+Why this was changed:
+- the user reported high latency and repeated command delivery failures during manual control
+- the previous server/control path carried too much planner/reflex/Phase5/Phase6 logic for low-latency teleoperation
+
+Validation:
+- `python -m py_compile` should be run for:
+  - `uav_control_server_basic.py`
+  - `uav_control_panel_basic.py`

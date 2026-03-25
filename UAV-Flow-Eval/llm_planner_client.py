@@ -6,6 +6,7 @@ This module intentionally keeps dependencies minimal:
 - supports OpenAI-compatible chat-completions style endpoints
 - supports OpenAI responses-style endpoints
 - supports Anthropic Messages API style endpoints
+- supports the official Anthropic Python SDK
 - supports Google Gemini generateContent-style endpoints
 - supports the official Google GenAI Python SDK
 - keeps request/response parsing tolerant across vendors
@@ -59,6 +60,17 @@ def _extract_anthropic_text(content: Any) -> str:
             continue
         if str(item.get("type", "")) == "text" and isinstance(item.get("text"), str):
             parts.append(str(item.get("text")))
+    return "\n".join(part for part in parts if part)
+
+
+def _extract_anthropic_sdk_text(content: Any) -> str:
+    if not isinstance(content, list):
+        return ""
+    parts: List[str] = []
+    for item in content:
+        text_value = getattr(item, "text", None)
+        if isinstance(text_value, str) and text_value.strip():
+            parts.append(text_value)
     return "\n".join(part for part in parts if part)
 
 
@@ -197,12 +209,36 @@ def _coerce_object_to_dict(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def _extract_anthropic_sdk_usage(response: Any) -> Dict[str, Any]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    cache_creation_input_tokens = getattr(usage, "cache_creation_input_tokens", None)
+    cache_read_input_tokens = getattr(usage, "cache_read_input_tokens", None)
+    result: Dict[str, Any] = {}
+    total_tokens = 0
+    for key, value in (
+        ("input_tokens", input_tokens),
+        ("output_tokens", output_tokens),
+        ("cache_creation_input_tokens", cache_creation_input_tokens),
+        ("cache_read_input_tokens", cache_read_input_tokens),
+    ):
+        if isinstance(value, int):
+            result[key] = value
+            total_tokens += value
+    if total_tokens:
+        result["total_token_count"] = total_tokens
+    return result
+
+
 class LLMPlannerClient:
     """Thin HTTP client that talks to multiple planner API styles."""
 
     def __init__(self, config: LLMPlannerConfig) -> None:
         self.config = config
-        if self.config.api_style != "google_genai_sdk" and not str(config.base_url or "").strip():
+        if self.config.api_style not in {"google_genai_sdk"} and not str(config.base_url or "").strip():
             raise LLMPlannerClientError("LLM planner base_url is required.")
         if not str(config.model_name or "").strip():
             raise LLMPlannerClientError("LLM planner model_name is required.")
@@ -214,6 +250,8 @@ class LLMPlannerClient:
             return "/v1/responses"
         if self.config.api_style == "anthropic_messages":
             return "/v1/messages"
+        if self.config.api_style == "anthropic_sdk":
+            return ""
         if self.config.api_style == "google_gemini":
             encoded_model = parse.quote(str(self.config.model_name), safe="")
             return f"/v1beta/models/{encoded_model}:generateContent"
@@ -362,6 +400,13 @@ class LLMPlannerClient:
                 image_b64=image_b64,
                 json_schema=json_schema,
             )
+        if self.config.api_style == "anthropic_sdk":
+            return self.generate_with_anthropic_sdk(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_b64=image_b64,
+                json_schema=json_schema,
+            )
         endpoint_path = self.resolve_endpoint_path()
         url = f"{self.config.base_url.rstrip('/')}{endpoint_path}"
         if self.config.api_style == "google_gemini":
@@ -494,5 +539,90 @@ class LLMPlannerClient:
             "model_name": self.config.model_name,
             "api_style": self.config.api_style,
             "endpoint_path": "google.genai.Client.models.generate_content",
+            "attempt_count": 1,
+        }
+
+    def generate_with_anthropic_sdk(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        image_b64: str = "",
+        json_schema: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        try:
+            from anthropic import Anthropic  # type: ignore
+        except ImportError as exc:
+            raise LLMPlannerClientError(
+                "anthropic is not installed. Install it with `pip install anthropic` to use api_style=anthropic_sdk."
+            ) from exc
+
+        request_started = time.time()
+        client_kwargs: Dict[str, Any] = {
+            "api_key": str(self.config.api_key or "").strip(),
+            "timeout": float(self.config.timeout_s),
+        }
+        base_url = str(self.config.base_url or "").strip()
+        if base_url:
+            client_kwargs["base_url"] = base_url
+        try:
+            client = Anthropic(**client_kwargs)
+        except Exception as exc:
+            raise LLMPlannerClientError(f"Failed to initialize anthropic client: {exc}") from exc
+
+        include_image = bool(self.config.include_images and image_b64)
+        content_parts: List[Dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": user_prompt
+                + (
+                    "\nReturn only one JSON object. No markdown. No commentary."
+                    if self.config.force_json
+                    else ""
+                ),
+            }
+        ]
+        if self.config.force_json and isinstance(json_schema, dict) and json_schema:
+            content_parts[0]["text"] += "\nJSON schema reference:\n" + json.dumps(json_schema, ensure_ascii=False)
+        if include_image:
+            content_parts.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/jpeg",
+                        "data": image_b64,
+                    },
+                }
+            )
+
+        try:
+            response = client.messages.create(
+                model=self.config.model_name,
+                max_tokens=int(self.config.max_output_tokens),
+                system=system_prompt,
+                messages=[{"role": "user", "content": content_parts}],
+            )
+        except Exception as exc:
+            raise LLMPlannerClientError(f"anthropic SDK request failed: {exc}") from exc
+
+        text = _extract_anthropic_sdk_text(getattr(response, "content", None))
+        raw_response = _coerce_object_to_dict(response)
+        if not text:
+            try:
+                text = extract_text_from_response(raw_response)
+            except Exception as exc:
+                raise LLMPlannerClientError(f"anthropic SDK response did not contain usable text: {exc}") from exc
+
+        usage = _extract_anthropic_sdk_usage(response)
+        latency_ms = round((time.time() - request_started) * 1000.0, 2)
+        return {
+            "text": text,
+            "raw_response": raw_response,
+            "usage": usage,
+            "latency_ms": latency_ms,
+            "model_name": self.config.model_name,
+            "api_style": self.config.api_style,
+            "endpoint_path": "anthropic.Anthropic.messages.create",
             "attempt_count": 1,
         }

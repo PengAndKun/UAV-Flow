@@ -251,8 +251,8 @@ def build_llm_client_from_args(args: argparse.Namespace) -> Optional[LLMPlannerC
         env_candidates.append(str(args.llm_api_key_env).strip())
     if api_style in ("openai_chat", "openai_responses"):
         env_candidates.extend(["OPENAI_API_KEY"])
-    elif api_style == "anthropic_messages":
-        env_candidates.extend(["ANTHROPIC_API_KEY"])
+    elif api_style in ("anthropic_messages", "anthropic_sdk"):
+        env_candidates.extend(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"])
     elif api_style in ("google_gemini", "google_genai_sdk"):
         env_candidates.extend(["GEMINI_API_KEY", "GOOGLE_API_KEY"])
     if not api_key:
@@ -276,11 +276,13 @@ def build_llm_client_from_args(args: argparse.Namespace) -> Optional[LLMPlannerC
         )
     base_url = str(args.llm_base_url or "").strip()
     if not base_url:
-        if api_style == "anthropic_messages":
+        if api_style in ("anthropic_messages", "anthropic_sdk"):
+            base_url = str(os.getenv("ANTHROPIC_BASE_URL", "")).strip()
+        if not base_url and api_style in ("anthropic_messages", "anthropic_sdk"):
             base_url = "https://api.anthropic.com"
-        elif api_style == "google_gemini":
+        elif not base_url and api_style == "google_gemini":
             base_url = "https://generativelanguage.googleapis.com"
-        elif api_style == "google_genai_sdk":
+        elif not base_url and api_style == "google_genai_sdk":
             base_url = "google-genai-sdk"
     if not base_url:
         logger.info("Planner mode=%s without llm_base_url: LLM planner disabled until configured.", args.planner_mode)
@@ -679,7 +681,7 @@ def make_handler(args: argparse.Namespace, llm_client: Optional[LLMPlannerClient
                         args.llm_model = str(update_payload.get("llm_model", args.llm_model) or "")
                     if "llm_api_style" in update_payload:
                         api_style = str(update_payload.get("llm_api_style", args.llm_api_style) or args.llm_api_style)
-                        if api_style not in {"openai_chat", "openai_responses", "anthropic_messages", "google_gemini", "google_genai_sdk"}:
+                        if api_style not in {"openai_chat", "openai_responses", "anthropic_messages", "anthropic_sdk", "google_gemini", "google_genai_sdk"}:
                             raise ValueError(f"Unsupported llm_api_style: {api_style}")
                         args.llm_api_style = api_style
                     if "llm_base_url" in update_payload:
@@ -950,7 +952,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--llm_api_style",
         default="openai_chat",
-        choices=["openai_chat", "openai_responses", "anthropic_messages", "google_gemini", "google_genai_sdk"],
+        choices=["openai_chat", "openai_responses", "anthropic_messages", "anthropic_sdk", "google_gemini", "google_genai_sdk"],
         help="Request/response style used for the LLM planner API",
     )
     parser.add_argument("--llm_endpoint_path", default="", help="Override the LLM endpoint path instead of using the default for the selected style")
