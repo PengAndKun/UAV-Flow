@@ -1,5 +1,78 @@
 {
-  "world_bounds": {"min_x": 1000, "min_y": -500, "max_x": 5000, "max_y": 3000},
+  "world_bounds": {
+    "min_x": 1000,
+    "min_y": -500,
+    "max_x": 5000,
+    "max_y": 3000
+  },
+  "overhead_map": {
+    "center_x": 3000.0,
+    "center_y": 1250.0,
+    "height_z": 5400.0,
+    "yaw_deg": 0.0,
+    "image_path": "E:\\github\\UAV-Flow\\UAV-Flow-Eval\\map\\qq.png",
+    "calibration": {
+      "anchors": [
+        {
+          "index": 1,
+          "label": "P1",
+          "world_x": 2000.0,
+          "world_y": 85.3,
+          "image_x": 574.0736842105263,
+          "image_y": 706.4357142857143
+        },
+        {
+          "index": 2,
+          "label": "P2",
+          "world_x": 0.0,
+          "world_y": 85.3,
+          "image_x": 916.7605263157894,
+          "image_y": 704.3142857142857
+        },
+        {
+          "index": 3,
+          "label": "P3",
+          "world_x": 0.0,
+          "world_y": 1000.0,
+          "image_x": 916.7605263157894,
+          "image_y": 579.15
+        },
+        {
+          "index": 4,
+          "label": "P4",
+          "world_x": -2100.0,
+          "world_y": 802.5,
+          "image_x": 1241.8736842105263,
+          "image_y": 594.0
+        },
+        {
+          "index": 5,
+          "label": "P5",
+          "world_x": -5000,
+          "world_y": -200,
+          "image_x": 1701.7184210526316,
+          "image_y": 738.2571428571429
+        }
+      ],
+      "affine_world_to_image": [
+        [
+          -0.1603179814761225,
+          0.009336590696749525,
+          903.4020855225255
+        ],
+        [
+          0.0016405045064481697,
+          -0.14180976072398543,
+          716.393320515945
+        ]
+      ],
+      "image_width": 2226,
+      "image_height": 1188,
+      "rmse_px": 8.3654143238193,
+      "updated_at": 1774449940.4547892
+    }
+  },
+  "current_target_id": "house_A",
   "houses": [
     {
       "id": "house_A",
@@ -9,7 +82,12 @@
       "center_z": 200.0,
       "approach_z": 600.0,
       "radius_cm": 700.0,
-      "entry_yaw_hint": -90.0
+      "entry_yaw_hint": -90.0,
+      "status": "IN_PROGRESS",
+      "search_start_time": 1774429810.943255,
+      "search_end_time": null,
+      "person_location": null,
+      "notes": ""
     },
     {
       "id": "house_B",
@@ -19,7 +97,12 @@
       "center_z": 200.0,
       "approach_z": 600.0,
       "radius_cm": 750.0,
-      "entry_yaw_hint": 180.0
+      "entry_yaw_hint": 180.0,
+      "status": "IN_PROGRESS",
+      "search_start_time": 1774438559.2433753,
+      "search_end_time": null,
+      "person_location": null,
+      "notes": ""
     },
     {
       "id": "house_C",
@@ -29,7 +112,12 @@
       "center_z": 200.0,
       "approach_z": 600.0,
       "radius_cm": 680.0,
-      "entry_yaw_hint": 0.0
+      "entry_yaw_hint": 0.0,
+      "status": "IN_PROGRESS",
+      "search_start_time": 1774438560.3182566,
+      "search_end_time": null,
+      "person_location": null,
+      "notes": ""
     }
   ]
 }

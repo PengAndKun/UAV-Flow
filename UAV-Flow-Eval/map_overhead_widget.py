@@ -50,6 +50,10 @@ import math
 import tkinter as tk
 from typing import Callable, Dict, List, Optional, Tuple
 
+import cv2
+import numpy as np
+from PIL import Image, ImageTk
+
 # ---------------------------------------------------------------------------
 # Color constants
 # ---------------------------------------------------------------------------
@@ -59,6 +63,8 @@ GRID_COLOR    = "#2a2a3e"
 TEXT_COLOR    = "#e0e0f0"
 UAV_COLOR     = "#ff4444"
 UAV_DOT_COLOR = "#ffaaaa"
+CURRENT_RING_COLOR = "#55ccff"
+ROUTE_COLOR = "#66ddff"
 
 # House status → (fill, outline, outline_width)
 _STATUS_STYLE: Dict[str, Tuple[str, str, int]] = {
@@ -116,6 +122,12 @@ class OverheadMapWidget:
         self._uav_y: float   = 0.0
         self._uav_yaw: float = 0.0
         self._houses: List[dict] = []
+        self._background_bgr: Optional[np.ndarray] = None
+        self._background_photo: Optional[ImageTk.PhotoImage] = None
+        self._route_target: Optional[Tuple[float, float]] = None
+        self._image_size: Optional[Tuple[int, int]] = None
+        self._affine_world_to_image: Optional[np.ndarray] = None
+        self._calibration_anchors: List[dict] = []
 
         # House bounding boxes in canvas pixels, keyed by house id,
         # used for click-hit detection: {id: (cx, cy, r_px)}
@@ -123,6 +135,7 @@ class OverheadMapWidget:
 
         # Optional callback: fn(house_id: str)
         self._click_callback: Optional[Callable[[str], None]] = None
+        self._map_click_callback: Optional[Callable[[float, float], None]] = None
 
         # Draw initial background
         self._draw_grid()
@@ -160,6 +173,41 @@ class OverheadMapWidget:
         self.canvas.delete("dynamic")
         self._house_canvas_circles.clear()
 
+    def set_background_image(self, image_bgr: Optional[np.ndarray]) -> None:
+        """
+        Set an optional background image for the overhead map.
+
+        The image is interpreted as a top-down map already aligned to the
+        configured world bounds and is scaled to the canvas size.
+        """
+        self._background_bgr = None if image_bgr is None else image_bgr.copy()
+        self._redraw()
+
+    def set_route_target(self, world_xy: Optional[Tuple[float, float]]) -> None:
+        """
+        Set an optional route target in world coordinates.
+
+        When present, a dashed line is drawn from the UAV to the target house.
+        """
+        self._route_target = None if world_xy is None else (float(world_xy[0]), float(world_xy[1]))
+        self._redraw()
+
+    def set_calibration(
+        self,
+        affine_world_to_image: Optional[List[List[float]]],
+        image_size: Optional[Tuple[int, int]],
+        anchors: Optional[List[dict]] = None,
+    ) -> None:
+        """Set an optional affine world->image calibration for the background map."""
+        self._affine_world_to_image = None if affine_world_to_image is None else np.asarray(affine_world_to_image, dtype=np.float32)
+        self._image_size = None if image_size is None else (int(image_size[0]), int(image_size[1]))
+        self._calibration_anchors = list(anchors or [])
+        self._redraw()
+
+    def set_map_click_callback(self, fn: Callable[[float, float], None]) -> None:
+        """Register a callback for raw background clicks in image-pixel space."""
+        self._map_click_callback = fn
+
     def world_to_canvas(self, wx: float, wy: float) -> Tuple[float, float]:
         """
         Transform world (wx, wy) in cm to canvas pixel coordinates.
@@ -168,6 +216,19 @@ class OverheadMapWidget:
         World y (right/south)   → canvas y (top → bottom)
         A small margin of 5 % is kept on each side.
         """
+        if self._affine_world_to_image is not None and self._image_size is not None:
+            image_x = (
+                float(self._affine_world_to_image[0, 0]) * float(wx)
+                + float(self._affine_world_to_image[0, 1]) * float(wy)
+                + float(self._affine_world_to_image[0, 2])
+            )
+            image_y = (
+                float(self._affine_world_to_image[1, 0]) * float(wx)
+                + float(self._affine_world_to_image[1, 1]) * float(wy)
+                + float(self._affine_world_to_image[1, 2])
+            )
+            return self.image_to_canvas(image_x, image_y)
+
         margin_x = self._canvas_w * 0.05
         margin_y = self._canvas_h * 0.05
         avail_w  = self._canvas_w - 2 * margin_x
@@ -184,6 +245,28 @@ class OverheadMapWidget:
         cy = margin_y + (wy - self._world_min_y) * sy
 
         return cx, cy
+
+    def image_to_canvas(self, image_x: float, image_y: float) -> Tuple[float, float]:
+        """Convert background-image pixel coordinates to canvas coordinates."""
+        if self._image_size is None:
+            return float(image_x), float(image_y)
+        image_w = max(1, int(self._image_size[0]))
+        image_h = max(1, int(self._image_size[1]))
+        return (
+            float(image_x) * self._canvas_w / float(image_w),
+            float(image_y) * self._canvas_h / float(image_h),
+        )
+
+    def canvas_to_image(self, canvas_x: float, canvas_y: float) -> Tuple[float, float]:
+        """Convert canvas coordinates to background-image pixel coordinates."""
+        if self._image_size is None:
+            return float(canvas_x), float(canvas_y)
+        image_w = max(1, int(self._image_size[0]))
+        image_h = max(1, int(self._image_size[1]))
+        return (
+            float(canvas_x) * float(image_w) / self._canvas_w,
+            float(canvas_y) * float(image_h) / self._canvas_h,
+        )
 
     # ------------------------------------------------------------------
     # Private drawing helpers
@@ -209,16 +292,42 @@ class OverheadMapWidget:
 
     def _redraw(self) -> None:
         """Clear dynamic items and redraw everything."""
+        self.canvas.delete("background")
         self.canvas.delete("dynamic")
         self._house_canvas_circles.clear()
+
+        if self._background_bgr is not None:
+            self._draw_background_image()
+        else:
+            self._background_photo = None
 
         # Draw houses first (so UAV appears on top)
         for house in self._houses:
             self._draw_house(house)
 
+        if self._route_target is not None:
+            self._draw_route_line(*self._route_target)
+
+        for anchor in self._calibration_anchors:
+            self._draw_calibration_anchor(anchor)
+
         # Draw UAV marker
         cx, cy = self.world_to_canvas(self._uav_x, self._uav_y)
         self._draw_uav_marker(cx, cy, self._uav_yaw)
+
+    def _draw_background_image(self) -> None:
+        """Draw the optional top-down background image behind the grid/markers."""
+        if self._background_bgr is None or self._background_bgr.size == 0:
+            return
+        preview = cv2.resize(
+            self._background_bgr,
+            (self._canvas_w, self._canvas_h),
+            interpolation=cv2.INTER_AREA,
+        )
+        preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+        self._background_photo = ImageTk.PhotoImage(Image.fromarray(preview_rgb))
+        self.canvas.create_image(0, 0, image=self._background_photo, anchor="nw", tags="background")
+        self.canvas.tag_lower("background", "grid")
 
     def _draw_house(self, house: dict) -> None:
         """Draw a single house circle, label, and optional target rings."""
@@ -229,6 +338,7 @@ class OverheadMapWidget:
         r_cm    = float(house.get("radius_cm", 700.0))
         status  = str(house.get("status", "UNSEARCHED"))
         is_tgt  = bool(house.get("is_target", False))
+        is_current = bool(house.get("is_current", False))
 
         cx, cy = self.world_to_canvas(wx, wy)
 
@@ -255,6 +365,17 @@ class OverheadMapWidget:
                     width=1,
                     tags="dynamic",
                 )
+
+        if is_current:
+            current_r = r_px + 6
+            self.canvas.create_oval(
+                cx - current_r, cy - current_r,
+                cx + current_r, cy + current_r,
+                outline=CURRENT_RING_COLOR,
+                width=2,
+                dash=(5, 3),
+                tags="dynamic",
+            )
 
         # Main house circle
         self.canvas.create_oval(
@@ -292,6 +413,47 @@ class OverheadMapWidget:
 
         # Store canvas-space bounding circle for click detection
         self._house_canvas_circles[hid] = (cx, cy, r_px)
+
+    def _draw_route_line(self, wx: float, wy: float) -> None:
+        """Draw a dashed route line from the UAV to the current target."""
+        ux, uy = self.world_to_canvas(self._uav_x, self._uav_y)
+        tx, ty = self.world_to_canvas(wx, wy)
+        self.canvas.create_line(
+            ux, uy, tx, ty,
+            fill=ROUTE_COLOR,
+            width=2,
+            dash=(8, 6),
+            tags="dynamic",
+        )
+        dot_r = 4
+        self.canvas.create_oval(
+            tx - dot_r, ty - dot_r,
+            tx + dot_r, ty + dot_r,
+            fill=ROUTE_COLOR,
+            outline="",
+            tags="dynamic",
+        )
+
+    def _draw_calibration_anchor(self, anchor: dict) -> None:
+        """Draw a numbered calibration anchor marker on the map."""
+        ix = float(anchor.get("image_x", 0.0))
+        iy = float(anchor.get("image_y", 0.0))
+        label = str(anchor.get("label", anchor.get("index", "")))
+        cx, cy = self.image_to_canvas(ix, iy)
+        r = 5
+        self.canvas.create_oval(
+            cx - r, cy - r, cx + r, cy + r,
+            fill="#00d5ff", outline="#ffffff", width=1, tags="dynamic",
+        )
+        if label:
+            self.canvas.create_text(
+                cx + 8, cy - 2,
+                text=label,
+                fill="#00f0ff",
+                font=("Consolas", 8, "bold"),
+                anchor="w",
+                tags="dynamic",
+            )
 
     def _draw_uav_marker(self, cx: float, cy: float, yaw_deg: float) -> None:
         """
@@ -342,15 +504,16 @@ class OverheadMapWidget:
 
     def _on_canvas_click(self, event: tk.Event) -> None:
         """Find which house (if any) was clicked and fire the callback."""
-        if self._click_callback is None:
-            return
-
         ex, ey = event.x, event.y
-        for house_id, (cx, cy, r_px) in self._house_canvas_circles.items():
-            dist = math.sqrt((ex - cx) ** 2 + (ey - cy) ** 2)
-            if dist <= r_px:
-                self._click_callback(house_id)
-                return   # fire only the topmost (first matched) house
+        if self._click_callback is not None:
+            for house_id, (cx, cy, r_px) in self._house_canvas_circles.items():
+                dist = math.sqrt((ex - cx) ** 2 + (ey - cy) ** 2)
+                if dist <= r_px:
+                    self._click_callback(house_id)
+                    return
+        if self._map_click_callback is not None:
+            image_x, image_y = self.canvas_to_image(ex, ey)
+            self._map_click_callback(image_x, image_y)
 
 
 # ---------------------------------------------------------------------------
