@@ -1,4 +1,4 @@
-"""
+﻿"""
 map_overhead_widget.py
 ======================
 A standalone Tkinter overhead (top-down) map widget for visualising a UAV
@@ -20,11 +20,11 @@ Grid lines        : #2a2a3e  (slightly lighter navy)
 Text labels       : #e0e0f0  (off-white)
 UAV marker        : red triangle + small circle
 House status      :
-    UNSEARCHED    – gray fill,   gray outline
-    IN_PROGRESS   – yellow fill, orange outline (thick)
-    EXPLORED      – green fill,  dark-green outline
-    PERSON_FOUND  – red fill,    dark-red outline
-Target indicator  – double concentric red rings around the house circle
+    UNSEARCHED    鈥?gray fill,   gray outline
+    IN_PROGRESS   鈥?yellow fill, orange outline (thick)
+    EXPLORED      鈥?green fill,  dark-green outline
+    PERSON_FOUND  鈥?red fill,    dark-red outline
+Target indicator  鈥?double concentric red rings around the house circle
 
 Usage
 -----
@@ -66,7 +66,7 @@ UAV_DOT_COLOR = "#ffaaaa"
 CURRENT_RING_COLOR = "#55ccff"
 ROUTE_COLOR = "#66ddff"
 
-# House status → (fill, outline, outline_width)
+# House status 鈫?(fill, outline, outline_width)
 _STATUS_STYLE: Dict[str, Tuple[str, str, int]] = {
     "UNSEARCHED":   ("#888888", "#888888", 1),
     "IN_PROGRESS":  ("#ffdd44", "#ff8800", 3),
@@ -212,8 +212,8 @@ class OverheadMapWidget:
         """
         Transform world (wx, wy) in cm to canvas pixel coordinates.
 
-        World x (forward/east)  → canvas x (left → right)
-        World y (right/south)   → canvas y (top → bottom)
+        World x (forward/east)  鈫?canvas x (left 鈫?right)
+        World y (right/south)   鈫?canvas y (top 鈫?bottom)
         A small margin of 5 % is kept on each side.
         """
         if self._affine_world_to_image is not None and self._image_size is not None:
@@ -342,7 +342,7 @@ class OverheadMapWidget:
 
         cx, cy = self.world_to_canvas(wx, wy)
 
-        # Scale radius: use the x scale factor (world_w → canvas_w)
+        # Scale radius: use the x scale factor (world_w 鈫?canvas_w)
         world_w = self._world_max_x - self._world_min_x
         margin_x = self._canvas_w * 0.05
         avail_w  = self._canvas_w - 2 * margin_x
@@ -457,42 +457,48 @@ class OverheadMapWidget:
 
     def _draw_uav_marker(self, cx: float, cy: float, yaw_deg: float) -> None:
         """
-        Draw a small filled triangle pointing in *yaw_deg* direction.
+        Draw a compact UAV body marker with a forward arrow.
 
-        Convention: yaw_deg = 0 → pointing right (+x canvas direction).
-        Positive yaw is clockwise in canvas space (matches Unreal).
+        For the current map convention, yaw_deg = 0 points to canvas-left.
+        Positive yaw rotates clockwise in canvas space.
         """
-        size   = 10   # half-length of the triangle
-        width  = 6    # half-width at the base
+        body_r = 5
+        arrow_len = 18
+        angle_rad = math.radians(yaw_deg + 180.0)
+        base_x = cx + (body_r + 2) * math.cos(angle_rad)
+        base_y = cy + (body_r + 2) * math.sin(angle_rad)
+        tip_x = cx + arrow_len * math.cos(angle_rad)
+        tip_y = cy + arrow_len * math.sin(angle_rad)
 
-        angle_rad = math.radians(yaw_deg)
+        self.canvas.create_line(
+            base_x,
+            base_y,
+            tip_x,
+            tip_y,
+            fill="#ffffff",
+            width=2,
+            arrow="last",
+            arrowshape=(10, 12, 4),
+            tags="dynamic",
+        )
 
-        # Tip of the triangle (in the direction of travel)
-        tip_x = cx + size * math.cos(angle_rad)
-        tip_y = cy + size * math.sin(angle_rad)
-
-        # Two base corners (perpendicular to travel direction)
-        perp = angle_rad + math.pi / 2
-        bl_x = cx - (size * 0.4) * math.cos(angle_rad) + width * math.cos(perp)
-        bl_y = cy - (size * 0.4) * math.sin(angle_rad) + width * math.sin(perp)
-        br_x = cx - (size * 0.4) * math.cos(angle_rad) - width * math.cos(perp)
-        br_y = cy - (size * 0.4) * math.sin(angle_rad) - width * math.sin(perp)
-
-        self.canvas.create_polygon(
-            tip_x, tip_y,
-            bl_x,  bl_y,
-            br_x,  br_y,
+        self.canvas.create_oval(
+            cx - body_r,
+            cy - body_r,
+            cx + body_r,
+            cy + body_r,
             fill=UAV_COLOR,
             outline="#ffffff",
             width=1,
             tags="dynamic",
         )
 
-        # Small dot at the center of the UAV body
-        dot_r = 3
+        dot_r = 2
         self.canvas.create_oval(
-            cx - dot_r, cy - dot_r,
-            cx + dot_r, cy + dot_r,
+            cx - dot_r,
+            cy - dot_r,
+            cx + dot_r,
+            cy + dot_r,
             fill=UAV_DOT_COLOR,
             outline="",
             tags="dynamic",
@@ -524,7 +530,7 @@ if __name__ == "__main__":
     import random
 
     root = tk.Tk()
-    root.title("Overhead Map – Demo")
+    root.title("Overhead Map 鈥?Demo")
     root.configure(bg=BG_COLOR)
 
     bounds = (1000.0, -500.0, 5000.0, 3000.0)
@@ -558,3 +564,4 @@ if __name__ == "__main__":
 
     animate()
     root.mainloop()
+

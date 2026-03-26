@@ -448,15 +448,23 @@ class Panel:
                 f"Map pose: world=({pose_x:.1f}, {pose_y:.1f}) image=({image_point[0]:.1f}, {image_point[1]:.1f}) yaw={pose_yaw:.1f}"
             )
 
-        for widget in (self.map_widget, self.open_map_widget):
-            if widget is None:
-                continue
+        if self.map_widget is not None:
             if self.loaded_map_image is not None:
-                widget.set_background_image(self.loaded_map_image)
-            widget.set_calibration(affine, image_size, anchors)
-            widget.update_uav(pose_x, pose_y, pose_yaw)
-            widget.update_houses([])
-            widget.set_route_target(None)
+                self.map_widget.set_background_image(self.loaded_map_image)
+            self.map_widget.set_calibration(affine, image_size, anchors)
+            self.map_widget.update_uav(pose_x, pose_y, pose_yaw)
+            self.map_widget.update_houses([])
+            self.map_widget.set_route_target(None)
+
+        if self.open_map_widget is not None:
+            if self.loaded_map_image is not None:
+                self.open_map_widget.set_background_image(self.loaded_map_image)
+            # Open view only shows the calibrated map + UAV pose, not the
+            # calibration anchors used in the settings workflow.
+            self.open_map_widget.set_calibration(affine, image_size, [])
+            self.open_map_widget.update_uav(pose_x, pose_y, pose_yaw)
+            self.open_map_widget.update_houses([])
+            self.open_map_widget.set_route_target(None)
 
         if not self.map_widget or not self.show_houses_var.get():
             return
