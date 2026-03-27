@@ -200,14 +200,11 @@ Phase 1 → Phase 2 是串行的（先确认房屋，才能去找入口）。Pha
 ```
 Phase 1 分三步：
 
-Step 1. 原地扫描（In-Place Scan）
-  UAV 不飞行，在当前位置原地旋转 360°
-  → 每步拍 RGB
-  → YOLO 只检测 building（通用建筑物类别）
-  → 根据 UAV yaw + 坐标轴 → 确定每个方向上看到的是地图中哪栋房屋
-  → 一帧多栋房屋也能分别对应
-  → VLM 对每栋房屋生成外观描述
-  → 绑定到地图条目 → 标记"已确认"
+Step 1. 原地扫描 + YOLO 训练（In-Place Scan + Building Detector Training）
+  采集 RGB 图片 → 标注 building → 训练 YOLO
+  → UAV 原地旋转 360° → YOLO 检测 building
+  → 坐标方向匹配 → 确定每个 building 对应地图上哪栋房屋
+  → VLM 生成外观描述 → 绑定到地图条目
 
 Step 2. 运行时定位（Runtime Localization）
   正式搜索时，每步用坐标判断"我在哪栋房屋附近"
@@ -227,7 +224,7 @@ Step 3. 搜索状态管理（Search Status Tracking）
 地图上有若干房屋 bbox（如 `house_1`, `house_2`, `house_3`），坐标已对齐，但系统不知道：
 - 每个坐标框里的房屋在 RGB 画面中长什么样
 - 从当前位置看过去，各个方向上能看到哪些房屋
-- 如何将画面中的"一栋建筑物"对应到地图上的"house_1"
+- 如何将画面中的"一栋建筑物"对应到地图上的 house_id
 
 **原地扫描**用最低成本解决：不飞行，只旋转一圈，拍 12 张照片，每张对应一个方向，利用坐标几何匹配。
 
@@ -240,56 +237,148 @@ Step 3. 搜索状态管理（Search Status Tracking）
 | ~~判断能否进入~~ | 需要飞近 + depth，Phase 2 做 |
 | ~~爬升到高空~~ | 有坐标就够了，不需要俯瞰 |
 | ~~飞到房屋附近~~ | 原地旋转就能覆盖所有方向 |
+| ~~使用深度图~~ | Phase 1 纯 RGB，不需要 depth |
 
-#### 1.3 YOLO 模型——Phase 1 只用 1 个类别
+---
 
-Phase 1 的 YOLO 模型只需检测 **一个类别**：`building`。
+#### 1.3 YOLO building 检测模型——从标注到训练完整流程
+
+Phase 1 的 YOLO 模型只检测 **一个类别**：`building`。
+
+##### 1.3.1 为什么只要 1 个类别
+
+| 设计选择 | 原因 |
+|---------|------|
+| 只用 `building`，不区分 `house_1/2/3` | 换场景不用重训，一帧多房屋自然支持，房屋数量变化不影响 |
+| 不检测 `door_open/closed/window` | Phase 1 只确认"那个方向有没有建筑物"，门窗是 Phase 2 的事 |
+| YOLO 只回答"有/没有建筑物" | "是哪栋房屋"由坐标方向匹配回答 |
+
+##### 1.3.2 标注工具选择
+
+| 工具 | 说明 | 推荐度 |
+|------|------|--------|
+| **Roboflow** | 在线免费版，上传图片 → 鼠标拖框 → 导出 YOLO 格式，最快 | ⭐⭐⭐ |
+| **Label Studio** | 开源本地部署，功能全面 | ⭐⭐ |
+| **CVAT** | 开源，专业标注工具 | ⭐⭐ |
+| **labelImg** | 极简轻量，纯本地桌面应用 | ⭐ |
+
+##### 1.3.3 标注方法（手动拖框）
+
+**你只需要做一件事：对画面中的每栋建筑物画一个 bbox，类别选 `building`。**
+
+```
+标注示例：
+
+情况 A：一帧中只看到一栋房屋
+┌──────────────────────────┐
+│                          │
+│    ┌──────────────┐      │
+│    │  building    │      │
+│    │              │      │
+│    │   ┌──┐       │      │
+│    │   │  │       │      │
+│    │   └──┘       │      │
+│    └──────────────┘      │
+│         草地              │
+└──────────────────────────┘
+→ 标 1 个框：building
+
+情况 B：一帧中同时看到两栋房屋
+┌──────────────────────────┐
+│                          │
+│  ┌─────────┐ ┌────────┐ │
+│  │building │ │building│ │
+│  │  (近)   │ │ (远)   │ │
+│  │         │ │        │ │
+│  └─────────┘ └────────┘ │
+│         草地              │
+└──────────────────────────┘
+→ 标 2 个框：都标为 building
+
+情况 C：房屋被部分遮挡（树木等）
+→ 仍然标：框住可见部分
+
+情况 D：只有天空/地面/树，没有房屋
+→ 不标任何框（作为负样本放进数据集）
+```
+
+**标注原则**：
+- `building` 类别不区分具体是哪栋房屋——所有房屋都标为 `building`
+- bbox 框住建筑物整体轮廓（包括屋顶到地基，门窗都在框内但不需要单独标）
+- 一张图上可以有多个 `building` 框
+- 被遮挡的房屋也标（框住可见部分）
+- 纯天空/地面的图片不标框，直接放入数据集作为负样本
+
+##### 1.3.4 标注数据量
+
+| 内容 | 数量 | 说明 |
+|------|------|------|
+| 每栋房屋的 360° 旋转拍摄 | 每栋 12 张 | UAV 原地转一圈 |
+| 3 栋房屋 | 36 张 | 基础数据 |
+| 不同距离/位置补拍 | 每栋 10-15 张 | 远景/中景/侧面 |
+| 一帧多房屋的情况 | ~10 张 | 某些角度同时看到 2-3 栋 |
+| 负样本（无房屋） | ~10 张 | 纯天空/地面/树木 |
+| **总计** | **~90-100 张起步** | 仿真环境外观固定，不需太多 |
+
+> 仿真环境中房屋纹理固定，90 张足够第一版。如果 mAP 不够再补采。后续可混入公开建筑物检测数据集（xView、DOTA、Open Images 的 building 子集）增强泛化。
+
+##### 1.3.5 数据集目录结构
+
+标注完成后导出为 **YOLO 格式**：
+
+```
+building_detection_data/
+├── images/
+│   ├── train/                    ← 80% 的图片（~72 张）
+│   │   ├── scan_h1_00.jpg
+│   │   ├── scan_h1_01.jpg
+│   │   ├── scan_h2_00.jpg
+│   │   └── ...
+│   └── val/                      ← 20% 的图片（~18 张）
+│       ├── scan_h1_03.jpg
+│       └── ...
+├── labels/
+│   ├── train/                    ← 对应标注文件
+│   │   ├── scan_h1_00.txt
+│   │   ├── scan_h1_01.txt
+│   │   └── ...
+│   └── val/
+│       ├── scan_h1_03.txt
+│       └── ...
+└── phase1_building_detector.yaml
+```
+
+每个 `.txt` 标注文件内容（YOLO 格式，Roboflow 会自动生成）：
+
+```
+# class_id  center_x  center_y  width  height  （相对图像尺寸的 0-1 归一化值）
+0 0.45 0.40 0.50 0.60
+0 0.82 0.35 0.25 0.45
+```
+
+> 如果只有一栋房屋就一行，两栋就两行。负样本图片对应的 `.txt` 文件为空。
+
+##### 1.3.6 数据集配置文件
 
 ```yaml
 # phase1_building_detector.yaml
 path: ./building_detection_data
 train: images/train
 val: images/val
+
 names:
-  0: building        # 通用建筑物，不区分是哪栋
+  0: building
 ```
 
-**为什么只要 1 个类别**：
-- Phase 1 的任务是"确认那个方向有没有建筑物"，YOLO 负责回答"有 / 没有"
-- "那栋建筑物是 house_1 还是 house_2"由坐标方向匹配回答，不需要 YOLO 区分
-- 1 个类别比 4 个类别更容易训练、更泛化、更不容易过拟合
+**就 1 个类别，极简。**
 
-##### 为什么不用 `house_1/B/C` 作为类别
-
-| 问题 | 说明 |
-|------|------|
-| 不泛化 | 换场景就要重训 |
-| 一帧多房屋 | 画面中可能同时出现多栋，固定类名无法区分 |
-| 场景绑定 | 模型学到的是"这栋白房子=A"，不是通用建筑检测 |
-| 房屋数量变化 | 4 栋、5 栋就要改类别数 |
-
-##### 训练数据
-
-| 类别 | 采集方式 | 数量 | 标注 |
-|------|---------|------|------|
-| `building` | 远/中/近距离 × 多角度 × 所有房屋 | 180 张（每栋 60） | bbox 框住建筑物整体轮廓 |
-
-**180 张**就够 Phase 1 用。所有房屋统一标注为 `building`。
-
-一张图可能同时有多个 `building` 框（远距离看到 2-3 栋房屋时）：
-
-```
-# labels/frame_00042.txt
-# class_id  cx      cy      w       h
-0           0.25    0.45    0.30    0.60    # building（左侧房屋）
-0           0.72    0.42    0.35    0.65    # building（右侧房屋）
-```
-
-##### 训练命令
+##### 1.3.7 训练命令
 
 ```bash
+# 安装 ultralytics
 pip install ultralytics
 
+# 训练
 yolo train \
   model=yolov8n.pt \
   data=phase1_building_detector.yaml \
@@ -300,34 +389,142 @@ yolo train \
   name=v1
 ```
 
-##### 验证标准
+训练完成后权重保存在：`runs/building_detector/v1/weights/best.pt`
 
-| 指标 | 要求 |
-|------|------|
-| building mAP@0.5 | ≥ 0.85 |
-| building recall | ≥ 0.90（不能漏检建筑物） |
-| 推理速度（640px） | ≤ 8ms / 帧 |
+训练时间预估：
+- GPU（GTX 1080 / RTX 3060）：约 15-30 分钟
+- CPU：约 1-2 小时（不推荐）
 
-> **泛化增强**：可混入公开建筑物检测数据集（xView、DOTA、Open Images 的 building 子集），使模型不仅能识别仿真房屋，也能泛化到不同风格。
+##### 1.3.8 验证训练效果
 
-#### 1.4 方向-房屋匹配算法
+```bash
+# 在验证集上评估
+yolo val \
+  model=runs/building_detector/v1/weights/best.pt \
+  data=phase1_building_detector.yaml
 
-Phase 1 的核心：把画面中的 building 检测框映射到地图上的 house_id。
-
-##### 原理
-
-```
-UAV 在位置 (x, y)，朝向 yaw
-
-画面中检测到一个 building 框，bbox 中心在画面水平方向的位置是 cx
-
-cx → 相对于画面中心的偏移 → 角度偏移
-角度偏移 + yaw → 该 building 的绝对方位角
-绝对方位角 → 从 UAV 位置沿该方向发射线 → 射线穿过地图上哪个 bbox
-→ 得到 house_id
+# 对新图片跑预测看效果
+yolo predict \
+  model=runs/building_detector/v1/weights/best.pt \
+  source=test_image.jpg \
+  save=True
 ```
 
-##### 射线-bbox 相交
+验证标准：
+
+| 指标 | 要求 | 不达标怎么办 |
+|------|------|-------------|
+| building mAP@0.5 | ≥ 0.85 | 补采数据或增加 epochs |
+| building recall | ≥ 0.90（不能漏检） | 补采远距离/遮挡场景数据 |
+| 一帧多房屋全检出 | ≥ 85% | 补采多房屋同框的图片 |
+| 推理速度（640px） | ≤ 8ms / 帧 | 已用 YOLOv8n，通常满足 |
+
+##### 1.3.9 完整操作步骤总结
+
+```
+Step A → 采集图片（你已完成 ✓）
+          UAV 在仿真中原地旋转 + 不同位置拍照
+
+Step B → 标注（约 30-40 分钟）
+          打开 Roboflow → 上传图片
+          → 每张图中的建筑物画 bbox → 类别选 "building"
+          → 一张图有多栋就画多个框
+          → 标完后导出 YOLO 格式
+
+Step C → 组织数据（约 10 分钟）
+          按 8:2 分 train/val
+          → 创建 phase1_building_detector.yaml
+
+Step D → 训练（约 15-30 分钟）
+          运行 yolo train 命令
+
+Step E → 验证（约 10 分钟）
+          运行 yolo val 确认 mAP ≥ 0.85
+          → 对几张新图 yolo predict 看效果
+          → 不达标则补采数据重新训练
+
+总耗时：约 1-1.5 小时
+```
+
+---
+
+#### 1.4 地图与检测对齐——核心算法
+
+YOLO 训练好后，下一步是把检测到的 building 和地图上的房屋框对齐。
+
+##### 1.4.1 对齐的原理
+
+```
+已知信息：
+  ① UAV 当前位姿 (x, y, z, yaw) ← 从 /state 获取
+  ② 地图上每栋房屋的 bbox 坐标  ← houses_config.json
+  ③ 相机水平视场角 fov           ← 固定值（如 90°）
+  ④ YOLO 检测到的 building bbox  ← 训练好的模型输出
+
+对齐过程：
+  building 在画面中的水平位置 (像素)
+    → 转换为相对画面中心的偏移比例
+    → 转换为角度偏移
+    → 加上 UAV 当前 yaw
+    → 得到该 building 的绝对方位角
+    → 从 UAV 位置沿该方位角发射线
+    → 射线穿过地图上哪个 house bbox
+    → 该 building = 那栋 house
+
+一句话：画面中 building 的位置 → 方向 → 地图上的房屋
+```
+
+##### 1.4.2 图解对齐过程
+
+```
+         地图俯视（UE4 坐标系）
+
+         N (y+)
+         │
+    ┌────┤────┐
+    │ house_2 │
+    └────┬────┘
+         │
+         │          ┌──────────┐
+    ─────┼──────────│ house_1  │──── E (x+)
+         │          └──────────┘
+         │
+    ┌────┤────┐
+    │ house_3 │
+    └────┬────┘
+         │
+    UAV ◈ (朝向 yaw = 0°，即朝东)
+    位置 (500, 0)
+
+UAV 拍到的 RGB 画面（640px 宽）：
+┌──────────────────────────────────────────┐
+│                                          │
+│      ┌───────┐              ┌────┐       │
+│      │bld #1 │              │bld │       │
+│      │       │              │ #2 │       │
+│      │       │              │    │       │
+│      └───────┘              └────┘       │
+│  0px    200px                 500px  640px│
+└──────────────────────────────────────────┘
+
+对齐计算：
+
+bld #1 的 bbox 中心 = 200px
+  偏移比例 = (200 - 320) / 320 = -0.375（偏左）
+  角度偏移 = -0.375 × 45° = -16.9°（FOV=90°的一半=45°）
+  绝对方位角 = 0° + (-16.9°) = -16.9°
+  从 UAV 发射线 → 穿过 house_1 的 bbox
+  → bld #1 = house_1 ✓
+
+bld #2 的 bbox 中心 = 500px
+  偏移比例 = (500 - 320) / 320 = +0.5625（偏右）
+  角度偏移 = +0.5625 × 45° = +25.3°
+  绝对方位角 = 0° + 25.3° = 25.3°
+  从 UAV 发射线 → 穿过 house_3 的 bbox
+  → bld #2 = house_3 ✓
+```
+
+##### 1.4.3 射线-bbox 相交算法
 
 ```python
 import math
@@ -357,12 +554,13 @@ def get_expected_house(uav_x, uav_y, yaw_deg, houses_config):
         # 投影到视线方向（正数=在前方）
         proj = to_house_x * dx + to_house_y * dy
         if proj <= 0:
-            continue
+            continue  # 在 UAV 背后，跳过
 
-        # 横向偏移
+        # 横向偏移（射线到房屋中心的垂直距离）
         perp = abs(to_house_x * (-dy) + to_house_y * dx)
         dist = math.sqrt(to_house_x**2 + to_house_y**2)
 
+        # 房屋半宽 + 容差
         house_half_width = max(
             bbox["x_max"] - bbox["x_min"],
             bbox["y_max"] - bbox["y_min"]
@@ -375,18 +573,20 @@ def get_expected_house(uav_x, uav_y, yaw_deg, houses_config):
     return best_house, best_dist
 ```
 
-##### 一帧多 building 匹配
+##### 1.4.4 一帧多 building 匹配
 
-画面中可能同时看到 2-3 栋房屋，每栋在画面的不同水平位置：
+画面中可能同时看到 2-3 栋房屋，每栋在画面不同水平位置，分别匹配：
 
 ```python
 def match_detections_to_houses(detections, uav_pose, houses_config, frame_width, fov_deg=90):
     """
     将一帧中的所有 building 检测框匹配到地图房屋。
 
-    每个 building 在画面中的水平位置不同
-    → 对应不同的视线方向
-    → 分别匹配到不同的 house_id
+    流程：
+    1. 取每个 building bbox 的水平中心
+    2. 计算该 building 相对于画面中心的角度偏移
+    3. 加上 UAV yaw → 该 building 的绝对方位角
+    4. 射线匹配 → 对应哪栋 house
     """
     results = []
 
@@ -418,7 +618,18 @@ def match_detections_to_houses(detections, uav_pose, houses_config, frame_width,
     return results
 ```
 
-#### 1.5 扫描流程详细
+##### 1.4.5 对齐失败的处理
+
+| 情况 | 原因 | 处理 |
+|------|------|------|
+| YOLO 检测到 building 但射线没命中任何 bbox | 地图上没有标注该房屋，或 bbox 范围太小 | 记录为 `unmatched_building`，扩大 bbox 容差 |
+| 地图上有 bbox 但 YOLO 没检测到 | 房屋被遮挡/距离太远/检测漏了 | 标记为 `pending`，后续飞近补扫 |
+| 两个 building 匹配到同一个 house_id | 实际只有一栋房屋但 YOLO 检测出两个框 | 取置信度更高的那个，另一个可能是误检 |
+| shooting 射线在两个 bbox 交界处 | UAV 处于两栋房屋的方位角边界 | 取距离更近的那栋 |
+
+---
+
+#### 1.5 完整扫描流程
 
 ```
 任务开始（UAV 在任意初始位置）
@@ -426,27 +637,28 @@ def match_detections_to_houses(detections, uav_pose, houses_config, frame_width,
   ▼
 读取 UAV 当前 pose (x, y, z, yaw_0)
 读取地图 houses_config.json
+加载训练好的 YOLO building 检测模型
   │
   ▼
 原地旋转一圈（12步 × 30°= 360°），每步：
   │
-  │  ┌─────────────────────────────────────────┐
-  │  │ 当前朝向 yaw_i = yaw_0 + i × 30°       │
-  │  │                                          │
-  │  │ ① 拍 RGB → recon/frame_{i:02d}.jpg      │
-  │  │    （不拍 depth——Phase 1 不需要深度）     │
-  │  │                                          │
-  │  │ ② YOLO 检测 → building 框 ×N            │
-  │  │    只检测 building，不检测门窗            │
-  │  │                                          │
-  │  │ ③ 对每个 building 框：                   │
-  │  │    bbox 水平中心 → 角度偏移              │
-  │  │    + yaw_i → 绝对方位角                  │
-  │  │    → 射线与地图 bbox 相交                │
-  │  │    → matched_house_id                    │
-  │  │                                          │
-  │  │ ④ 保存记录                               │
-  │  └─────────────────────────────────────────┘
+  │  ┌─────────────────────────────────────────────┐
+  │  │ 当前朝向 yaw_i = yaw_0 + i × 30°           │
+  │  │                                              │
+  │  │ ① 拍 RGB → recon/frame_{i:02d}.jpg          │
+  │  │    （不拍 depth——Phase 1 不需要深度）         │
+  │  │                                              │
+  │  │ ② YOLO 检测 → building 框 ×N                │
+  │  │    只检测 building，不检测门窗                │
+  │  │                                              │
+  │  │ ③ 对每个 building 框做方向-地图对齐：        │
+  │  │    bbox 水平中心 → 角度偏移                  │
+  │  │    + yaw_i → 绝对方位角                      │
+  │  │    → 射线与地图 bbox 相交                    │
+  │  │    → matched_house_id                        │
+  │  │                                              │
+  │  │ ④ 保存该帧记录                               │
+  │  └─────────────────────────────────────────────┘
   │
   ▼
 旋转完成，汇总结果：
@@ -468,6 +680,8 @@ def match_detections_to_houses(detections, uav_pose, houses_config, frame_width,
   │
   ▼
 Phase 1 完成 → 系统知道每个方向上是哪栋房屋
+               → 每栋房屋有了参考图和文字描述
+               → 地图上所有 confirmed 房屋标记为 unexplored
 ```
 
 #### 1.6 侦察记录数据结构
@@ -503,7 +717,7 @@ Phase 1 的每帧记录很简洁——只有 building 信息，没有门窗：
 }
 ```
 
-> 一帧中看到 2 栋房屋（house_2 和 house_3），每栋独立匹配。
+> 一帧中看到 2 栋房屋（house_2 和 house_3），每栋独立匹配到地图。
 
 ##### 扫描完成后的地图状态
 
@@ -558,6 +772,8 @@ Phase 1 的每帧记录很简洁——只有 building 信息，没有门窗：
 
 **补扫机制**：后续飞行中进入 `pending` 房屋的 `approach_radius` 范围内时，自动对该方向拍 RGB + YOLO 检测 + 方向匹配。
 
+---
+
 #### 1.7 VLM 描述生成
 
 对每栋 `confirmed` 房屋的最佳参考帧调用 VLM，生成外观描述：
@@ -585,27 +801,39 @@ VLM 描述的用途：
 2. **GCMA archive 初始化**：作为 semantic cell 初始描述
 3. **人类可读报告**：俯视图地图上标注房屋名字旁的描述文字
 
+---
+
 #### 1.8 完整扫描脚本
 
 ```python
+import requests
+import time
+import json
+import math
+from datetime import datetime
+
 def run_phase1_scan(server_url, houses_config, yolo_model, vlm_model=None):
     """
     Phase 1 原地扫描：确定每个方向上是哪栋房屋。
 
     只检测 building，不检测门窗。
+    不使用 depth，纯 RGB + 坐标。
     """
     # 1. 读取 UAV 位姿
     state = requests.get(f"{server_url}/state").json()
     uav_pose = state["pose"]
     frame_width = 640
+    fov_deg = houses_config["map_info"].get("fov_deg", 90)
 
     all_frames = []
+    print(f"[Phase 1] 开始原地扫描，UAV 位置: ({uav_pose['x']:.0f}, {uav_pose['y']:.0f})")
 
     # 2. 原地旋转 12 步
     for step in range(12):
         # 只拍 RGB（不需要 depth）
         rgb = requests.get(f"{server_url}/frame").content
-        save_frame(rgb, f"recon/frame_{step:02d}.jpg")
+        rgb_path = f"recon/frame_{step:02d}.jpg"
+        save_frame(rgb, rgb_path)
 
         state = requests.get(f"{server_url}/state").json()
         current_yaw = state["pose"]["yaw"]
@@ -614,19 +842,23 @@ def run_phase1_scan(server_url, houses_config, yolo_model, vlm_model=None):
         detections = yolo_model.predict(rgb)
         building_dets = [d for d in detections if d["class"] == "building"]
 
-        # 方向匹配
+        # 方向-地图对齐
         building_matches = match_detections_to_houses(
-            detections, state["pose"], houses_config, frame_width
+            building_dets, state["pose"], houses_config, frame_width, fov_deg
         )
 
         frame_record = {
             "recon_frame_id": step,
             "yaw_deg": current_yaw,
-            "rgb_path": f"recon/frame_{step:02d}.jpg",
+            "rgb_path": rgb_path,
             "building_matches": building_matches,
             "total_buildings_detected": len(building_dets)
         }
         all_frames.append(frame_record)
+
+        print(f"  Step {step:2d} | yaw={current_yaw:6.1f}° | "
+              f"buildings={len(building_dets)} | "
+              f"matched={[m['matched_house_id'] for m in building_matches]}")
 
         # 旋转 30°
         if step < 11:
@@ -634,7 +866,8 @@ def run_phase1_scan(server_url, houses_config, yolo_model, vlm_model=None):
                          json={"action": "yaw_right"})
             time.sleep(0.3)
 
-    # 3. 汇总：为每栋房屋选最佳参考帧
+    # 3. 汇总：为每栋房屋选最佳参考帧 + VLM 描述
+    confirmed_count = 0
     for house in houses_config["houses"]:
         house_id = house["house_id"]
 
@@ -673,14 +906,24 @@ def run_phase1_scan(server_url, houses_config, yolo_model, vlm_model=None):
                                   / len(observations)
             }
             house["search_status"] = "unexplored"
+            confirmed_count += 1
+            print(f"  ✓ {house_id} confirmed | "
+                  f"best_conf={best_obs['confidence']:.2f} | "
+                  f"seen_in={len(observations)} frames")
         else:
             house["recon_status"] = "pending"
             house["recon_data"] = {
                 "scan_attempted_at": datetime.now().isoformat(),
                 "failure_reason": "not_detected_in_any_frame"
             }
+            print(f"  ✗ {house_id} NOT detected — marked as pending")
 
+    print(f"\n[Phase 1] 扫描完成: {confirmed_count}/{len(houses_config['houses'])} 房屋已确认")
+
+    # 4. 保存更新后的配置
     save_json(houses_config, "houses_config_after_recon.json")
+    save_json(all_frames, "recon_frames_log.json")
+
     return houses_config
 ```
 
@@ -1002,14 +1245,22 @@ YOLO 视觉特征（3维，概率性）：
 
 ### 验证流程
 
-#### 扫描验证
+#### YOLO 模型验证
+
+| 验证项 | 通过标准 | 不达标处理 |
+|--------|---------|-----------|
+| building mAP@0.5 | ≥ 0.85 | 补采数据或增加 epochs |
+| building recall | ≥ 0.90 | 补采远距离/遮挡场景 |
+| 一帧多房屋全检出 | ≥ 85% | 补采多房屋同框图片 |
+| 推理速度 | ≤ 8ms | 已用 YOLOv8n，通常满足 |
+
+#### 扫描对齐验证
 
 | 验证项 | 通过标准 |
 |--------|---------|
 | 所有房屋被确认 | 100%（如有 pending 需说明原因） |
 | 方向匹配准确率 | ≥ 90% building 正确匹配到 house_id |
 | 一帧多房屋匹配 | ≥ 85% 全部正确 |
-| YOLO building 检测率 | ≥ 90% 有建筑的帧检测成功 |
 | VLM 描述质量 | 包含颜色+风格+层数 |
 | 补扫触发 | pending 房屋飞近后自动变 confirmed |
 
@@ -1036,8 +1287,9 @@ YOLO 视觉特征（3维，概率性）：
 ### 交付物
 
 - [ ] 地图配置文件 `houses_config.json`（bbox + 高度范围 + 初始状态）
-- [ ] YOLO building 检测模型训练数据（180 张，1 类：building）
+- [ ] YOLO building 检测标注数据（90-100 张，1 类：building）
 - [ ] YOLO building 检测模型权重 `building_detector_v1/best.pt`
+- [ ] 数据集配置 `phase1_building_detector.yaml`
 - [ ] 方向-房屋匹配模块 `direction_house_matcher.py`
 - [ ] 原地扫描脚本 `phase1_scan.py`
 - [ ] 坐标定位模块 `house_locator.py`
