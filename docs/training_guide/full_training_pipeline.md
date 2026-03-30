@@ -180,30 +180,55 @@ Phase 1 → Phase 2 是串行的（先确认房屋，才能去找入口）。Pha
 
 ---
 
-## Phase 1：房屋确认与地图标记
+## Phase 1：房屋发现、确认与地图标记
 
 ### 目标
 
-**Phase 1 只做一件事：确定地图上每个坐标框里是哪栋房屋，并记录它的视觉特征。**
+**Phase 1 要完成两件事：**
+1. **发现房屋**——找到场景中有哪些房屋，确定它们在地图（UE4 世界坐标系）上的大致位置
+2. **确认并标记**——为每栋房屋绑定视觉特征（参考帧 + VLM 描述），在地图上标记
 
 不检测门、不检测窗、不判断能否进入。Phase 1 结束时系统知道的是：
-- 地图上的 `house_1` 框里是一栋"白色两层殖民风格房屋"
-- 地图上的 `house_2` 框里是一栋"红砖一层平房"
+- 场景中有 N 栋房屋，每栋在地图上的大致坐标范围
+- `house_1` 是一栋"白色两层殖民风格房屋"
+- `house_2` 是一栋"红砖一层平房"
 - 每栋房屋在 RGB 画面中长什么样（参考帧 + VLM 描述）
 
 入口探索（门/窗检测 + depth 判断）是 Phase 2 的事情。
 
-**核心前提**：已有一张预制地图，标注了每栋房屋的 bbox 坐标范围，坐标轴已与 UE4 世界坐标对齐。
+### 核心问题：houses_config.json 从哪来？
+
+之前的方案假设地图上已经有了每栋房屋的 bbox 坐标。但实际情况是：
+
+```
+你已有的：
+  ✓ UAV 的精确位置和朝向（UE4 的 /state 接口，每步更新）
+  ✓ 一张俯视图地图（对齐了 UE4 坐标轴）
+  ✓ 已采集的 RGB 图片（各角度拍到了房屋）
+
+你还没有的：
+  ✗ 每栋房屋在 UE4 坐标系中的 bbox（center, x_min/max, y_min/max）
+  ✗ 房屋的数量、编号
+
+所以第一步是：建立 houses_config.json —— 确定场景中有几栋房屋，每栋在哪
+```
 
 ### 整体流程
 
 ```
-Phase 1 分三步：
+Phase 1 分四步：
 
-Step 1. 原地扫描 + YOLO 训练（In-Place Scan + Building Detector Training）
-  采集 RGB 图片 → 标注 building → 训练 YOLO
+Step 0. 房屋发现与坐标建立（House Discovery）
+  确定场景中有几栋房屋 + 每栋的大致世界坐标
+  → 生成 houses_config.json（房屋 bbox 列表）
+  方式 A：手动在 UE4 编辑器中读取坐标（最快，10 分钟）
+  方式 B：UAV 扫描 + depth 测距自动估算（自动化）
+  方式 C：在俯视图上鼠标点击标记（可视化）
+
+Step 1. YOLO 训练 + 原地扫描（Building Detector + Scan）
+  标注 building → 训练 YOLO
   → UAV 原地旋转 360° → YOLO 检测 building
-  → 坐标方向匹配 → 确定每个 building 对应地图上哪栋房屋
+  → 方向 + 坐标匹配 → 确定每个 building 对应 houses_config 中哪栋
   → VLM 生成外观描述 → 绑定到地图条目
 
 Step 2. 运行时定位（Runtime Localization）
@@ -217,16 +242,354 @@ Step 3. 搜索状态管理（Search Status Tracking）
 
 ---
 
-### Step 1：原地扫描——确定每个方向上是哪栋房屋
+### Step 0：房屋发现与坐标建立——生成 houses_config.json
+
+#### 0.1 为什么需要这一步
+
+Phase 1 后续的方向匹配算法需要知道每栋房屋在 UE4 世界坐标系中的位置（bbox）。但一开始 `houses_config.json` 是空的——系统不知道场景中有几栋房屋，更不知道它们的坐标。
+
+**Step 0 就是建立这份地图数据。**
+
+#### 0.2 UAV 自身的位置和朝向
+
+这个不需要额外操作——UE4/AirSim 的 `/state` 接口直接返回：
+
+```json
+{
+  "pose": {
+    "x": 2359.9,     ← UE4 世界坐标 X（单位 cm）
+    "y": 85.3,        ← UE4 世界坐标 Y（单位 cm）
+    "z": 225.0,       ← UE4 世界坐标 Z（高度，单位 cm）
+    "yaw": -1.7       ← 偏航角（度）
+  }
+}
+```
+
+UAV 的位置和朝向是**精确已知的**，每步都能获取。
+
+#### 0.3 三种方式获取房屋坐标
+
+##### 方式 A：手动在 UE4 编辑器中读取（推荐先用这个）
+
+**最简单、最快、最精确。**
+
+操作步骤：
+1. 打开 UE4 编辑器
+2. 在场景中找到每栋房屋的 Actor
+3. 读取其 Transform 中的 Location (X, Y)
+4. 估算房屋的宽度和长度（或看 Actor 的 BoundingBox）
+5. 手动填入 `houses_config.json`
+
+```
+在 UE4 编辑器中：
+  选中房屋 Actor → Details 面板 → Transform → Location
+  house_1: X=2400, Y=100  （读到的值）
+  house_2: X=1200, Y=500
+  house_3: X=800,  Y=-300
+
+  每栋房屋大约 600cm × 600cm → bbox 向四周扩展 300cm
+```
+
+手动填写：
+
+```json
+{
+  "houses": [
+    {
+      "house_id": "house_1",
+      "center": [2400.0, 100.0],
+      "bbox": {
+        "x_min": 2100.0, "x_max": 2700.0,
+        "y_min": -200.0, "y_max": 400.0
+      }
+    }
+  ]
+}
+```
+
+**耗时：约 10 分钟。** 第一版直接用这个即可。
+
+##### 方式 B：UAV 扫描 + depth 测距自动估算
+
+如果不想手动读坐标，可以让 UAV 自动发现房屋位置：
+
+```
+原理：
+  UAV 原地旋转一圈 → YOLO 检测到 building
+  → building 在画面中的位置 → 方位角
+  → depth 帧中 building 区域的深度 → 距离
+  → 方位角 + 距离 + UAV 位置 → 房屋的世界坐标
+
+公式：
+  house_x = uav_x + distance × cos(bearing_rad)
+  house_y = uav_y + distance × sin(bearing_rad)
+```
+
+```python
+import numpy as np
+import math
+
+def estimate_house_position(uav_pose, bearing_deg, depth_frame, building_bbox):
+    """
+    根据方位角和 depth 估算房屋的世界坐标。
+
+    Args:
+        uav_pose: {"x", "y", "z", "yaw"}
+        bearing_deg: building 的绝对方位角
+        depth_frame: depth 帧 (numpy array, cm)
+        building_bbox: [x1, y1, x2, y2] 像素坐标
+    """
+    # 取 building bbox 区域的 depth 中位值作为距离估算
+    x1, y1, x2, y2 = [int(v) for v in building_bbox]
+    building_depth_region = depth_frame[y1:y2, x1:x2]
+
+    # 去掉极端值（天空=很大值，太近=很小值）
+    valid_depths = building_depth_region[
+        (building_depth_region > 100) & (building_depth_region < 10000)
+    ]
+
+    if len(valid_depths) == 0:
+        return None
+
+    estimated_distance_cm = np.median(valid_depths)
+
+    # 极坐标 → 世界坐标
+    bearing_rad = math.radians(bearing_deg)
+    house_x = uav_pose["x"] + estimated_distance_cm * math.cos(bearing_rad)
+    house_y = uav_pose["y"] + estimated_distance_cm * math.sin(bearing_rad)
+
+    return {
+        "estimated_center": [round(house_x, 1), round(house_y, 1)],
+        "estimated_distance_cm": round(estimated_distance_cm, 1),
+        "bearing_deg": round(bearing_deg, 1)
+    }
+```
+
+自动发现流程：
+
+```
+UAV 在初始位置原地旋转 360°（12步 × 30°）
+  │
+  每步：
+  ├── 拍 RGB + depth
+  ├── YOLO 检测 building
+  ├── 对每个 building：
+  │     ├── 画面位置 → 方位角
+  │     ├── depth 区域 → 距离
+  │     └── 方位角 + 距离 → 世界坐标估算
+  │
+  ▼
+汇总所有检测：
+  ├── 同一栋房屋在多帧中被检测到（方位角相近）
+  ├── 聚类 → 去重 → 每簇 = 一栋房屋
+  ├── 取每簇的平均坐标作为 center
+  ├── center ± 300cm 作为 bbox
+  │
+  ▼
+生成 houses_config.json
+  ├── house_1: center=[2400, 100],  bbox=...
+  ├── house_2: center=[1200, 500],  bbox=...
+  └── house_3: center=[800, -300],  bbox=...
+```
+
+聚类逻辑：
+
+```python
+def cluster_building_detections(all_detections, merge_radius_cm=500):
+    """
+    将多帧中的 building 检测聚类成独立房屋。
+
+    如果两次检测的估算世界坐标距离 < merge_radius → 同一栋房屋。
+    """
+    clusters = []  # 每个 cluster = 一栋房屋的所有观测
+
+    for det in all_detections:
+        if det["estimated_center"] is None:
+            continue
+
+        merged = False
+        for cluster in clusters:
+            # 与该 cluster 的平均位置比较
+            avg_x = np.mean([d["estimated_center"][0] for d in cluster])
+            avg_y = np.mean([d["estimated_center"][1] for d in cluster])
+            dx = det["estimated_center"][0] - avg_x
+            dy = det["estimated_center"][1] - avg_y
+            dist = math.sqrt(dx**2 + dy**2)
+
+            if dist < merge_radius_cm:
+                cluster.append(det)
+                merged = True
+                break
+
+        if not merged:
+            clusters.append([det])
+
+    # 每个 cluster → 一栋房屋
+    houses = []
+    for i, cluster in enumerate(clusters):
+        avg_x = round(np.mean([d["estimated_center"][0] for d in cluster]), 1)
+        avg_y = round(np.mean([d["estimated_center"][1] for d in cluster]), 1)
+
+        houses.append({
+            "house_id": f"house_{i+1}",
+            "center": [avg_x, avg_y],
+            "bbox": {
+                "x_min": avg_x - 300,
+                "x_max": avg_x + 300,
+                "y_min": avg_y - 300,
+                "y_max": avg_y + 300
+            },
+            "observation_count": len(cluster),
+            "avg_confidence": round(
+                np.mean([d["confidence"] for d in cluster]), 2
+            )
+        })
+
+    return houses
+```
+
+##### 方式 C：在俯视图上鼠标点击标记
+
+如果有俯视图地图（截图或渲染），可以做一个简单的标记工具：
+
+```python
+import cv2
+
+def mark_houses_on_map(map_image_path, map_origin, map_scale):
+    """
+    在俯视图上鼠标点击标记房屋位置。
+
+    map_origin: 图片左上角对应的 UE4 坐标 [x, y]
+    map_scale:  每像素对应的 cm 数
+    """
+    img = cv2.imread(map_image_path)
+    houses = []
+    click_count = [0]
+
+    def on_click(event, px, py, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            # 像素 → UE4 坐标
+            world_x = map_origin[0] + px * map_scale
+            world_y = map_origin[1] + py * map_scale
+            click_count[0] += 1
+
+            house = {
+                "house_id": f"house_{click_count[0]}",
+                "center": [round(world_x, 1), round(world_y, 1)],
+                "bbox": {
+                    "x_min": round(world_x - 300, 1),
+                    "x_max": round(world_x + 300, 1),
+                    "y_min": round(world_y - 300, 1),
+                    "y_max": round(world_y + 300, 1)
+                }
+            }
+            houses.append(house)
+
+            # 画圆标记
+            cv2.circle(img, (px, py), 10, (0, 0, 255), -1)
+            cv2.putText(img, f"house_{click_count[0]}", (px+15, py),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.imshow("Map", img)
+            print(f"  Marked house_{click_count[0]} at ({world_x:.0f}, {world_y:.0f})")
+
+    cv2.imshow("Map", img)
+    cv2.setMouseCallback("Map", on_click)
+    print("点击地图上的房屋位置，按 ESC 完成")
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+    return houses
+```
+
+#### 0.4 推荐做法
+
+```
+第一次做（现在）：
+  → 方式 A（手动读 UE4 坐标）
+  → 10 分钟搞定，精度最高
+  → 快速跑通后续全流程
+
+后续自动化：
+  → 方式 B（UAV 扫描 + depth 自动发现）
+  → 论文中可以作为"自动环境建图"能力展示
+  → 换新场景时不需要手动标注
+```
+
+#### 0.5 Step 0 的输出
+
+不管用哪种方式，最终输出是一个 `houses_config.json`：
+
+```json
+{
+  "map_info": {
+    "name": "neighborhood_scene_v1",
+    "coordinate_system": "unreal_engine_cm",
+    "origin_note": "UE4 world origin, units in cm",
+    "fov_deg": 90,
+    "discovery_method": "manual_ue4_editor"
+  },
+
+  "houses": [
+    {
+      "house_id": "house_1",
+      "center": [2400.0, 100.0],
+      "bbox": {
+        "x_min": 2100.0, "x_max": 2700.0,
+        "y_min": -200.0, "y_max": 400.0
+      },
+      "approach_radius_cm": 800.0,
+      "floor_z_range": [200.0, 350.0],
+      "recon_status": "pending",
+      "recon_data": null,
+      "search_status": "pending"
+    },
+    {
+      "house_id": "house_2",
+      "center": [1200.0, 500.0],
+      "bbox": {
+        "x_min": 900.0, "x_max": 1500.0,
+        "y_min": 250.0, "y_max": 750.0
+      },
+      "approach_radius_cm": 800.0,
+      "floor_z_range": [200.0, 350.0],
+      "recon_status": "pending",
+      "recon_data": null,
+      "search_status": "pending"
+    }
+  ],
+
+  "search_altitude_cm": 270.0,
+  "global_step_budget": 2000
+}
+```
+
+> **关键字段说明**：
+> - `center`：房屋中心的 UE4 世界坐标 [x, y]
+> - `bbox`：中心向四周扩展约 300cm 的矩形范围（精度不需要很高，±100cm 都可以）
+> - `floor_z_range`：室内地面的 z 高度范围，用于判断 UAV 是否在室内
+> - `recon_status`: "pending" 表示还没被 Phase 1 扫描确认
+> - `discovery_method`：记录坐标来源，方便后续复查
+
+#### 0.6 交付物
+
+- [ ] `houses_config.json`（包含所有房屋的 bbox 坐标）
+- [ ] 如用方式 B：房屋自动发现脚本 `discover_houses.py`
+- [ ] 如用方式 C：俯视图标记工具 `mark_houses_on_map.py`
+
+---
+
+### Step 1：YOLO 训练 + 原地扫描——确认每栋房屋的视觉特征
+
+**前置条件**：Step 0 已完成，`houses_config.json` 中有了每栋房屋的大致坐标。
 
 #### 1.1 这一步要解决什么
 
-地图上有若干房屋 bbox（如 `house_1`, `house_2`, `house_3`），坐标已对齐，但系统不知道：
+Step 0 给了每栋房屋的坐标，但系统还不知道：
 - 每个坐标框里的房屋在 RGB 画面中长什么样
-- 从当前位置看过去，各个方向上能看到哪些房屋
-- 如何将画面中的"一栋建筑物"对应到地图上的 house_id
+- 从当前位置看过去，YOLO 检测到的 building 对应的是哪个 house_id
+- 每栋房屋的视觉特征描述（颜色、风格、层数等）
 
-**原地扫描**用最低成本解决：不飞行，只旋转一圈，拍 12 张照片，每张对应一个方向，利用坐标几何匹配。
+**Step 1 用 YOLO + 方向匹配解决**：检测画面中的 building → 利用 Step 0 的坐标做方向匹配 → 绑定视觉特征。
 
 #### 1.2 这一步不做什么
 
@@ -995,56 +1358,23 @@ def locate_uav(uav_pose, houses_config, target_house_id):
     }
 ```
 
-#### 2.3 地图配置文件：`houses_config.json`
+#### 2.3 地图配置文件
+
+`houses_config.json` 由 Step 0 生成（参见 Step 0.5 节）。运行时定位使用其中的 `bbox` 字段判断 UAV 在哪栋房屋范围内。
+
+关键字段回顾：
 
 ```json
 {
-  "map_info": {
-    "name": "neighborhood_scene_v1",
-    "coordinate_system": "unreal_engine_cm",
-    "origin_note": "UE4 world origin, units in cm",
-    "fov_deg": 90
-  },
-
   "houses": [
     {
       "house_id": "house_1",
       "center": [2400.0, 100.0],
-      "bbox": {
-        "x_min": 2100.0, "x_max": 2700.0,
-        "y_min": -200.0, "y_max": 400.0
-      },
+      "bbox": { "x_min": 2100.0, "x_max": 2700.0, "y_min": -200.0, "y_max": 400.0 },
       "approach_radius_cm": 800.0,
       "floor_z_range": [200.0, 350.0],
-      "recon_status": "pending",
-      "recon_data": null,
-      "search_status": "pending"
-    },
-    {
-      "house_id": "house_2",
-      "center": [1200.0, 500.0],
-      "bbox": {
-        "x_min": 900.0, "x_max": 1500.0,
-        "y_min": 250.0, "y_max": 750.0
-      },
-      "approach_radius_cm": 800.0,
-      "floor_z_range": [200.0, 350.0],
-      "recon_status": "pending",
-      "recon_data": null,
-      "search_status": "pending"
-    },
-    {
-      "house_id": "house_3",
-      "center": [800.0, -300.0],
-      "bbox": {
-        "x_min": 500.0, "x_max": 1100.0,
-        "y_min": -600.0, "y_max": 0.0
-      },
-      "approach_radius_cm": 800.0,
-      "floor_z_range": [200.0, 350.0],
-      "recon_status": "pending",
-      "recon_data": null,
-      "search_status": "pending"
+      "recon_status": "confirmed",
+      "search_status": "unexplored"
     }
   ],
 
