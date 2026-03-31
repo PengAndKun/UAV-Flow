@@ -50,6 +50,7 @@ UAV-Flow-Eval/captures_manual/
 UAV-Flow-Eval/captures_remote/
 UAV-Flow-Eval/debug.jpg
 UAV-Flow-Eval/results/
+UAV-Flow-Eval/__pycache__
 
 # Local Unreal environment binaries and saved data
 UnrealEnv/
