@@ -55,3 +55,8 @@ UAV-Flow-Eval/results/
 UnrealEnv/
 captures_remote
 phase1_yolo26_training
+phase3_dataset_export
+phase3_online_eval
+phase4_search_logs
+phase4_takeover_logs
+phase6_prompt_logs
