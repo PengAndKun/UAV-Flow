@@ -1,6 +1,7 @@
 # Python bytecode and caches
 __pycache__/
 **/__pycache__/
+yolo26_dataset
 
 *.py[cod]
 **/*.py[cod]
@@ -49,7 +50,15 @@ UAV-Flow-Eval/captures_manual/
 UAV-Flow-Eval/captures_remote/
 UAV-Flow-Eval/debug.jpg
 UAV-Flow-Eval/results/
+UAV-Flow-Eval/__pycache__
 
 # Local Unreal environment binaries and saved data
 UnrealEnv/
 captures_remote
+phase1_yolo26_training
+phase3_dataset_export
+phase3_online_eval
+phase4_search_logs
+phase4_takeover_logs
+phase6_prompt_logs
+runs
