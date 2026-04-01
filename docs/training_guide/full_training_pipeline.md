@@ -39,11 +39,11 @@
 Phase 0  环境准备 / 数据采集基础设施
   │
   ▼
-Phase 1  房屋确认（原地扫描 + YOLO building 检测 + 坐标匹配 + VLM 描述）
+Phase 1  地图标记 + 坐标定位（手动标房屋坐标 + 运行时坐标判断）
   │
   ▼
-Phase 2  入口探索（飞近目标房屋 + 门/窗检测 + depth 判断可进入性）
-  │
+Phase 2  入口探索（★ 重头戏：多模态融合检测可进入入口）
+  │       YOLO 检测 + depth 深度分析 + VLM 语义理解
   ▼
 Phase 3  跨房屋导航（规则策略 + 轨迹采集验证）
   │
@@ -60,14 +60,14 @@ Phase 6  在线微调 / 数据飞轮
 ### 模块依赖关系
 
 ```
-Phase 1 (房屋确认) ──► Phase 2 (入口探索) ──┐
-                                              │
-Phase 3 (跨房屋导航) ──────────────────────┤──► Phase 5 (统一蒸馏)
-                                              │
-Phase 4 (室内搜索) ───────────────────────┘
+Phase 1 (地图标记) ──► Phase 2 (★ 入口探索：多模态融合) ──┐
+                                                            │
+Phase 3 (跨房屋导航) ──────────────────────────────────┤──► Phase 5 (统一蒸馏)
+                                                            │
+Phase 4 (室内搜索) ───────────────────────────────────┘
 ```
 
-Phase 1 → Phase 2 是串行的（先确认房屋，才能去找入口）。Phase 3、Phase 4 与 Phase 2 并行推进。Phase 5 依赖前四个阶段的数据。
+Phase 1 很轻量（手动标坐标即可），Phase 2 是核心（多模态融合检测入口）。Phase 3、Phase 4 与 Phase 2 并行推进。Phase 5 依赖前四个阶段的数据。
 
 ---
 
@@ -180,60 +180,33 @@ Phase 1 → Phase 2 是串行的（先确认房屋，才能去找入口）。Pha
 
 ---
 
-## Phase 1：房屋发现、确认与地图标记
+## Phase 1：地图标记与坐标定位（轻量化）
 
 ### 目标
 
-**Phase 1 要完成两件事：**
-1. **发现房屋**——找到场景中有哪些房屋，确定它们在地图（UE4 世界坐标系）上的大致位置
-2. **确认并标记**——为每栋房屋绑定视觉特征（参考帧 + VLM 描述），在地图上标记
+**Phase 1 只做地图层面的事情：手动标记房屋坐标 + 运行时坐标定位。**
 
-不检测门、不检测窗、不判断能否进入。Phase 1 结束时系统知道的是：
-- 场景中有 N 栋房屋，每栋在地图上的大致坐标范围
-- `house_1` 是一栋"白色两层殖民风格房屋"
-- `house_2` 是一栋"红砖一层平房"
-- 每栋房屋在 RGB 画面中长什么样（参考帧 + VLM 描述）
+Phase 1 不做任何视觉识别——不训练 YOLO building 检测器、不做视觉-地图对齐、不做 VLM 描述。所有视觉感知能力集中在 Phase 2（入口探索）。
 
-入口探索（门/窗检测 + depth 判断）是 Phase 2 的事情。
-
-### 核心问题：houses_config.json 从哪来？
-
-之前的方案假设地图上已经有了每栋房屋的 bbox 坐标。但实际情况是：
-
-```
-你已有的：
-  ✓ UAV 的精确位置和朝向（UE4 的 /state 接口，每步更新）
-  ✓ 一张俯视图地图（对齐了 UE4 坐标轴）
-  ✓ 已采集的 RGB 图片（各角度拍到了房屋）
-
-你还没有的：
-  ✗ 每栋房屋在 UE4 坐标系中的 bbox（center, x_min/max, y_min/max）
-  ✗ 房屋的数量、编号
-
-所以第一步是：建立 houses_config.json —— 确定场景中有几栋房屋，每栋在哪
-```
+Phase 1 结束时系统知道的是：
+- 场景中有 N 栋房屋，每栋在 UE4 世界坐标系中的位置和范围
+- UAV 每步能通过坐标判断"我在哪栋房屋附近/内部"
 
 ### 整体流程
 
 ```
-Phase 1 分四步：
+Phase 1 分两步：
 
-Step 0. 房屋发现与坐标建立（House Discovery）
-  确定场景中有几栋房屋 + 每栋的大致世界坐标
-  → 生成 houses_config.json（房屋 bbox 列表）
-  方式 A：手动在 UE4 编辑器中读取坐标（最快，10 分钟）
-  方式 B：UAV 扫描 + depth 测距自动估算（自动化）
-  方式 C：在俯视图上鼠标点击标记（可视化）
+Step 1. 手动标记房屋坐标（Map Marking）
+  在 UE4 编辑器中读取每栋房屋的坐标
+  → 手动填写 houses_config.json
+  → 耗时约 10-15 分钟
 
-Step 1. YOLO 训练 + 原地扫描（Building Detector + Scan）
-  标注 building → 训练 YOLO
-  → UAV 原地旋转 360° → YOLO 检测 building
-  → 方向 + 坐标匹配 → 确定每个 building 对应 houses_config 中哪栋
-  → VLM 生成外观描述 → 绑定到地图条目
-
-Step 2. 运行时定位（Runtime Localization）
-  正式搜索时，每步用坐标判断"我在哪栋房屋附近"
-  + YOLO building 检测做交叉验证
+Step 2. 运行时坐标定位（Runtime Localization）
+  正式搜索时，每步用 UAV 的 (x, y, z) 坐标判断：
+  → 我在哪栋房屋附近？
+  → 我在室内还是室外？
+  → 我到目标房屋还有多远？
 
 Step 3. 搜索状态管理（Search Status Tracking）
   搜索完一栋 → 标记 explored → 永不重复进入
@@ -242,291 +215,38 @@ Step 3. 搜索状态管理（Search Status Tracking）
 
 ---
 
-### Step 0：房屋发现与坐标建立——生成 houses_config.json
+### Step 1：手动标记房屋坐标——生成 houses_config.json
 
-#### 0.1 为什么需要这一步
+#### 1.1 操作方法
 
-Phase 1 后续的方向匹配算法需要知道每栋房屋在 UE4 世界坐标系中的位置（bbox）。但一开始 `houses_config.json` 是空的——系统不知道场景中有几栋房屋，更不知道它们的坐标。
+在 UE4 编辑器中读取每栋房屋的坐标，手动写入配置文件。
 
-**Step 0 就是建立这份地图数据。**
-
-#### 0.2 UAV 自身的位置和朝向
-
-这个不需要额外操作——UE4/AirSim 的 `/state` 接口直接返回：
-
-```json
-{
-  "pose": {
-    "x": 2359.9,     ← UE4 世界坐标 X（单位 cm）
-    "y": 85.3,        ← UE4 世界坐标 Y（单位 cm）
-    "z": 225.0,       ← UE4 世界坐标 Z（高度，单位 cm）
-    "yaw": -1.7       ← 偏航角（度）
-  }
-}
 ```
+操作步骤（约 10-15 分钟）：
 
-UAV 的位置和朝向是**精确已知的**，每步都能获取。
-
-#### 0.3 三种方式获取房屋坐标
-
-##### 方式 A：手动在 UE4 编辑器中读取（推荐先用这个）
-
-**最简单、最快、最精确。**
-
-操作步骤：
 1. 打开 UE4 编辑器
-2. 在场景中找到每栋房屋的 Actor
-3. 读取其 Transform 中的 Location (X, Y)
-4. 估算房屋的宽度和长度（或看 Actor 的 BoundingBox）
-5. 手动填入 `houses_config.json`
+2. 在场景中找到每栋房屋的 Actor（World Outliner 搜索）
+3. 选中房屋 Actor → Details 面板 → Transform → Location
+   读取 X, Y 值
+4. 估算房屋的宽度和长度（或查看 Actor 的 BoundingBox 组件）
+5. 手动填入 houses_config.json
 
-```
-在 UE4 编辑器中：
-  选中房屋 Actor → Details 面板 → Transform → Location
-  house_1: X=2400, Y=100  （读到的值）
-  house_2: X=1200, Y=500
-  house_3: X=800,  Y=-300
+示例：
+  house_1: X=2400, Y=100   → center=[2400, 100]
+  house_2: X=1200, Y=500   → center=[1200, 500]
+  house_3: X=800,  Y=-300  → center=[800, -300]
 
-  每栋房屋大约 600cm × 600cm → bbox 向四周扩展 300cm
-```
-
-手动填写：
-
-```json
-{
-  "houses": [
-    {
-      "house_id": "house_1",
-      "center": [2400.0, 100.0],
-      "bbox": {
-        "x_min": 2100.0, "x_max": 2700.0,
-        "y_min": -200.0, "y_max": 400.0
-      }
-    }
-  ]
-}
+  每栋房屋约 600cm × 600cm → center ± 300cm = bbox
 ```
 
-**耗时：约 10 分钟。** 第一版直接用这个即可。
-
-##### 方式 B：UAV 扫描 + depth 测距自动估算
-
-如果不想手动读坐标，可以让 UAV 自动发现房屋位置：
-
-```
-原理：
-  UAV 原地旋转一圈 → YOLO 检测到 building
-  → building 在画面中的位置 → 方位角
-  → depth 帧中 building 区域的深度 → 距离
-  → 方位角 + 距离 + UAV 位置 → 房屋的世界坐标
-
-公式：
-  house_x = uav_x + distance × cos(bearing_rad)
-  house_y = uav_y + distance × sin(bearing_rad)
-```
-
-```python
-import numpy as np
-import math
-
-def estimate_house_position(uav_pose, bearing_deg, depth_frame, building_bbox):
-    """
-    根据方位角和 depth 估算房屋的世界坐标。
-
-    Args:
-        uav_pose: {"x", "y", "z", "yaw"}
-        bearing_deg: building 的绝对方位角
-        depth_frame: depth 帧 (numpy array, cm)
-        building_bbox: [x1, y1, x2, y2] 像素坐标
-    """
-    # 取 building bbox 区域的 depth 中位值作为距离估算
-    x1, y1, x2, y2 = [int(v) for v in building_bbox]
-    building_depth_region = depth_frame[y1:y2, x1:x2]
-
-    # 去掉极端值（天空=很大值，太近=很小值）
-    valid_depths = building_depth_region[
-        (building_depth_region > 100) & (building_depth_region < 10000)
-    ]
-
-    if len(valid_depths) == 0:
-        return None
-
-    estimated_distance_cm = np.median(valid_depths)
-
-    # 极坐标 → 世界坐标
-    bearing_rad = math.radians(bearing_deg)
-    house_x = uav_pose["x"] + estimated_distance_cm * math.cos(bearing_rad)
-    house_y = uav_pose["y"] + estimated_distance_cm * math.sin(bearing_rad)
-
-    return {
-        "estimated_center": [round(house_x, 1), round(house_y, 1)],
-        "estimated_distance_cm": round(estimated_distance_cm, 1),
-        "bearing_deg": round(bearing_deg, 1)
-    }
-```
-
-自动发现流程：
-
-```
-UAV 在初始位置原地旋转 360°（12步 × 30°）
-  │
-  每步：
-  ├── 拍 RGB + depth
-  ├── YOLO 检测 building
-  ├── 对每个 building：
-  │     ├── 画面位置 → 方位角
-  │     ├── depth 区域 → 距离
-  │     └── 方位角 + 距离 → 世界坐标估算
-  │
-  ▼
-汇总所有检测：
-  ├── 同一栋房屋在多帧中被检测到（方位角相近）
-  ├── 聚类 → 去重 → 每簇 = 一栋房屋
-  ├── 取每簇的平均坐标作为 center
-  ├── center ± 300cm 作为 bbox
-  │
-  ▼
-生成 houses_config.json
-  ├── house_1: center=[2400, 100],  bbox=...
-  ├── house_2: center=[1200, 500],  bbox=...
-  └── house_3: center=[800, -300],  bbox=...
-```
-
-聚类逻辑：
-
-```python
-def cluster_building_detections(all_detections, merge_radius_cm=500):
-    """
-    将多帧中的 building 检测聚类成独立房屋。
-
-    如果两次检测的估算世界坐标距离 < merge_radius → 同一栋房屋。
-    """
-    clusters = []  # 每个 cluster = 一栋房屋的所有观测
-
-    for det in all_detections:
-        if det["estimated_center"] is None:
-            continue
-
-        merged = False
-        for cluster in clusters:
-            # 与该 cluster 的平均位置比较
-            avg_x = np.mean([d["estimated_center"][0] for d in cluster])
-            avg_y = np.mean([d["estimated_center"][1] for d in cluster])
-            dx = det["estimated_center"][0] - avg_x
-            dy = det["estimated_center"][1] - avg_y
-            dist = math.sqrt(dx**2 + dy**2)
-
-            if dist < merge_radius_cm:
-                cluster.append(det)
-                merged = True
-                break
-
-        if not merged:
-            clusters.append([det])
-
-    # 每个 cluster → 一栋房屋
-    houses = []
-    for i, cluster in enumerate(clusters):
-        avg_x = round(np.mean([d["estimated_center"][0] for d in cluster]), 1)
-        avg_y = round(np.mean([d["estimated_center"][1] for d in cluster]), 1)
-
-        houses.append({
-            "house_id": f"house_{i+1}",
-            "center": [avg_x, avg_y],
-            "bbox": {
-                "x_min": avg_x - 300,
-                "x_max": avg_x + 300,
-                "y_min": avg_y - 300,
-                "y_max": avg_y + 300
-            },
-            "observation_count": len(cluster),
-            "avg_confidence": round(
-                np.mean([d["confidence"] for d in cluster]), 2
-            )
-        })
-
-    return houses
-```
-
-##### 方式 C：在俯视图上鼠标点击标记
-
-如果有俯视图地图（截图或渲染），可以做一个简单的标记工具：
-
-```python
-import cv2
-
-def mark_houses_on_map(map_image_path, map_origin, map_scale):
-    """
-    在俯视图上鼠标点击标记房屋位置。
-
-    map_origin: 图片左上角对应的 UE4 坐标 [x, y]
-    map_scale:  每像素对应的 cm 数
-    """
-    img = cv2.imread(map_image_path)
-    houses = []
-    click_count = [0]
-
-    def on_click(event, px, py, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            # 像素 → UE4 坐标
-            world_x = map_origin[0] + px * map_scale
-            world_y = map_origin[1] + py * map_scale
-            click_count[0] += 1
-
-            house = {
-                "house_id": f"house_{click_count[0]}",
-                "center": [round(world_x, 1), round(world_y, 1)],
-                "bbox": {
-                    "x_min": round(world_x - 300, 1),
-                    "x_max": round(world_x + 300, 1),
-                    "y_min": round(world_y - 300, 1),
-                    "y_max": round(world_y + 300, 1)
-                }
-            }
-            houses.append(house)
-
-            # 画圆标记
-            cv2.circle(img, (px, py), 10, (0, 0, 255), -1)
-            cv2.putText(img, f"house_{click_count[0]}", (px+15, py),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            cv2.imshow("Map", img)
-            print(f"  Marked house_{click_count[0]} at ({world_x:.0f}, {world_y:.0f})")
-
-    cv2.imshow("Map", img)
-    cv2.setMouseCallback("Map", on_click)
-    print("点击地图上的房屋位置，按 ESC 完成")
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
-
-    return houses
-```
-
-#### 0.4 推荐做法
-
-```
-第一次做（现在）：
-  → 方式 A（手动读 UE4 坐标）
-  → 10 分钟搞定，精度最高
-  → 快速跑通后续全流程
-
-后续自动化：
-  → 方式 B（UAV 扫描 + depth 自动发现）
-  → 论文中可以作为"自动环境建图"能力展示
-  → 换新场景时不需要手动标注
-```
-
-#### 0.5 Step 0 的输出
-
-不管用哪种方式，最终输出是一个 `houses_config.json`：
+#### 1.2 `houses_config.json` 完整格式
 
 ```json
 {
   "map_info": {
     "name": "neighborhood_scene_v1",
     "coordinate_system": "unreal_engine_cm",
-    "origin_note": "UE4 world origin, units in cm",
-    "fov_deg": 90,
-    "discovery_method": "manual_ue4_editor"
+    "origin_note": "UE4 world origin, units in cm"
   },
 
   "houses": [
@@ -539,9 +259,7 @@ def mark_houses_on_map(map_image_path, map_origin, map_scale):
       },
       "approach_radius_cm": 800.0,
       "floor_z_range": [200.0, 350.0],
-      "recon_status": "pending",
-      "recon_data": null,
-      "search_status": "pending"
+      "search_status": "unexplored"
     },
     {
       "house_id": "house_2",
@@ -552,9 +270,18 @@ def mark_houses_on_map(map_image_path, map_origin, map_scale):
       },
       "approach_radius_cm": 800.0,
       "floor_z_range": [200.0, 350.0],
-      "recon_status": "pending",
-      "recon_data": null,
-      "search_status": "pending"
+      "search_status": "unexplored"
+    },
+    {
+      "house_id": "house_3",
+      "center": [800.0, -300.0],
+      "bbox": {
+        "x_min": 500.0, "x_max": 1100.0,
+        "y_min": -600.0, "y_max": 0.0
+      },
+      "approach_radius_cm": 800.0,
+      "floor_z_range": [200.0, 350.0],
+      "search_status": "unexplored"
     }
   ],
 
@@ -563,759 +290,52 @@ def mark_houses_on_map(map_image_path, map_origin, map_scale):
 }
 ```
 
-> **关键字段说明**：
-> - `center`：房屋中心的 UE4 世界坐标 [x, y]
-> - `bbox`：中心向四周扩展约 300cm 的矩形范围（精度不需要很高，±100cm 都可以）
-> - `floor_z_range`：室内地面的 z 高度范围，用于判断 UAV 是否在室内
-> - `recon_status`: "pending" 表示还没被 Phase 1 扫描确认
-> - `discovery_method`：记录坐标来源，方便后续复查
+**关键字段说明**：
 
-#### 0.6 交付物
+| 字段 | 说明 | 怎么填 |
+|------|------|--------|
+| `center` | 房屋中心 UE4 坐标 [x, y] | 从编辑器 Transform 读取 |
+| `bbox` | 房屋占地范围 | center ± 300cm（大致即可，±100cm 误差无影响） |
+| `approach_radius_cm` | 接近范围（进入此范围触发 Phase 2） | 800cm（可调） |
+| `floor_z_range` | 室内地面高度范围 | 飞进房屋后读 /state 的 z 值确定 |
+| `search_status` | 搜索状态 | 初始填 "unexplored" |
+
+#### 1.3 UAV 位姿来源
+
+UAV 的位置和朝向通过 `/state` 接口获取，**精确已知**，无需额外标定：
+
+```json
+{
+  "pose": {
+    "x": 2359.9,
+    "y": 85.3,
+    "z": 225.0,
+    "yaw": -1.7
+  }
+}
+```
+
+#### 1.4 交付物
 
 - [ ] `houses_config.json`（包含所有房屋的 bbox 坐标）
-- [ ] 如用方式 B：房屋自动发现脚本 `discover_houses.py`
-- [ ] 如用方式 C：俯视图标记工具 `mark_houses_on_map.py`
 
 ---
 
-### Step 1：YOLO 训练 + 原地扫描——确认每栋房屋的视觉特征
+### Step 2：运行时坐标定位——每步知道"我在哪"
 
-**前置条件**：Step 0 已完成，`houses_config.json` 中有了每栋房屋的大致坐标。
-
-#### 1.1 这一步要解决什么
-
-Step 0 给了每栋房屋的坐标，但系统还不知道：
-- 每个坐标框里的房屋在 RGB 画面中长什么样
-- 从当前位置看过去，YOLO 检测到的 building 对应的是哪个 house_id
-- 每栋房屋的视觉特征描述（颜色、风格、层数等）
-
-**Step 1 用 YOLO + 方向匹配解决**：检测画面中的 building → 利用 Step 0 的坐标做方向匹配 → 绑定视觉特征。
-
-#### 1.2 这一步不做什么
-
-| 不做 | 原因 |
-|------|------|
-| ~~检测门是开是关~~ | 那是 Phase 2（入口探索）的任务 |
-| ~~检测窗户~~ | Phase 1 只关心"这是不是一栋建筑物" |
-| ~~判断能否进入~~ | 需要飞近 + depth，Phase 2 做 |
-| ~~爬升到高空~~ | 有坐标就够了，不需要俯瞰 |
-| ~~飞到房屋附近~~ | 原地旋转就能覆盖所有方向 |
-| ~~使用深度图~~ | Phase 1 纯 RGB，不需要 depth |
-
----
-
-#### 1.3 YOLO building 检测模型——从标注到训练完整流程
-
-Phase 1 的 YOLO 模型只检测 **一个类别**：`building`。
-
-##### 1.3.1 为什么只要 1 个类别
-
-| 设计选择 | 原因 |
-|---------|------|
-| 只用 `building`，不区分 `house_1/2/3` | 换场景不用重训，一帧多房屋自然支持，房屋数量变化不影响 |
-| 不检测 `door_open/closed/window` | Phase 1 只确认"那个方向有没有建筑物"，门窗是 Phase 2 的事 |
-| YOLO 只回答"有/没有建筑物" | "是哪栋房屋"由坐标方向匹配回答 |
-
-##### 1.3.2 标注工具选择
-
-| 工具 | 说明 | 推荐度 |
-|------|------|--------|
-| **Roboflow** | 在线免费版，上传图片 → 鼠标拖框 → 导出 YOLO 格式，最快 | ⭐⭐⭐ |
-| **Label Studio** | 开源本地部署，功能全面 | ⭐⭐ |
-| **CVAT** | 开源，专业标注工具 | ⭐⭐ |
-| **labelImg** | 极简轻量，纯本地桌面应用 | ⭐ |
-
-##### 1.3.3 标注方法（手动拖框）
-
-**你只需要做一件事：对画面中的每栋建筑物画一个 bbox，类别选 `building`。**
+纯坐标判断，不需要任何视觉识别。每步从 `/state` 获取 UAV 位姿，和 `houses_config.json` 中的 bbox 做比较。
 
 ```
-标注示例：
+每步判断逻辑（≈ 0ms，确定性）：
 
-情况 A：一帧中只看到一栋房屋
-┌──────────────────────────┐
-│                          │
-│    ┌──────────────┐      │
-│    │  building    │      │
-│    │              │      │
-│    │   ┌──┐       │      │
-│    │   │  │       │      │
-│    │   └──┘       │      │
-│    └──────────────┘      │
-│         草地              │
-└──────────────────────────┘
-→ 标 1 个框：building
-
-情况 B：一帧中同时看到两栋房屋
-┌──────────────────────────┐
-│                          │
-│  ┌─────────┐ ┌────────┐ │
-│  │building │ │building│ │
-│  │  (近)   │ │ (远)   │ │
-│  │         │ │        │ │
-│  └─────────┘ └────────┘ │
-│         草地              │
-└──────────────────────────┘
-→ 标 2 个框：都标为 building
-
-情况 C：房屋被部分遮挡（树木等）
-→ 仍然标：框住可见部分
-
-情况 D：只有天空/地面/树，没有房屋
-→ 不标任何框（作为负样本放进数据集）
+  pose (x,y) 落在哪个 house bbox 内 → current_house_id
+  pose (x,y) 不在任何 bbox 内 → "outdoor"
+  pose.z 是否在 floor_z_range 内 → is_inside
+  与 target_house 中心的距离和方位角 → 导航用
+  distance < approach_radius → 触发 Phase 2 入口探索
 ```
 
-**标注原则**：
-- `building` 类别不区分具体是哪栋房屋——所有房屋都标为 `building`
-- bbox 框住建筑物整体轮廓（包括屋顶到地基，门窗都在框内但不需要单独标）
-- 一张图上可以有多个 `building` 框
-- 被遮挡的房屋也标（框住可见部分）
-- 纯天空/地面的图片不标框，直接放入数据集作为负样本
-
-##### 1.3.4 标注数据量
-
-| 内容 | 数量 | 说明 |
-|------|------|------|
-| 每栋房屋的 360° 旋转拍摄 | 每栋 12 张 | UAV 原地转一圈 |
-| 3 栋房屋 | 36 张 | 基础数据 |
-| 不同距离/位置补拍 | 每栋 10-15 张 | 远景/中景/侧面 |
-| 一帧多房屋的情况 | ~10 张 | 某些角度同时看到 2-3 栋 |
-| 负样本（无房屋） | ~10 张 | 纯天空/地面/树木 |
-| **总计** | **~90-100 张起步** | 仿真环境外观固定，不需太多 |
-
-> 仿真环境中房屋纹理固定，90 张足够第一版。如果 mAP 不够再补采。后续可混入公开建筑物检测数据集（xView、DOTA、Open Images 的 building 子集）增强泛化。
-
-##### 1.3.5 数据集目录结构
-
-标注完成后导出为 **YOLO 格式**：
-
-```
-building_detection_data/
-├── images/
-│   ├── train/                    ← 80% 的图片（~72 张）
-│   │   ├── scan_h1_00.jpg
-│   │   ├── scan_h1_01.jpg
-│   │   ├── scan_h2_00.jpg
-│   │   └── ...
-│   └── val/                      ← 20% 的图片（~18 张）
-│       ├── scan_h1_03.jpg
-│       └── ...
-├── labels/
-│   ├── train/                    ← 对应标注文件
-│   │   ├── scan_h1_00.txt
-│   │   ├── scan_h1_01.txt
-│   │   └── ...
-│   └── val/
-│       ├── scan_h1_03.txt
-│       └── ...
-└── phase1_building_detector.yaml
-```
-
-每个 `.txt` 标注文件内容（YOLO 格式，Roboflow 会自动生成）：
-
-```
-# class_id  center_x  center_y  width  height  （相对图像尺寸的 0-1 归一化值）
-0 0.45 0.40 0.50 0.60
-0 0.82 0.35 0.25 0.45
-```
-
-> 如果只有一栋房屋就一行，两栋就两行。负样本图片对应的 `.txt` 文件为空。
-
-##### 1.3.6 数据集配置文件
-
-```yaml
-# phase1_building_detector.yaml
-path: ./building_detection_data
-train: images/train
-val: images/val
-
-names:
-  0: building
-```
-
-**就 1 个类别，极简。**
-
-##### 1.3.7 训练命令
-
-```bash
-# 安装 ultralytics
-pip install ultralytics
-
-# 训练
-yolo train \
-  model=yolov8n.pt \
-  data=phase1_building_detector.yaml \
-  epochs=100 \
-  imgsz=640 \
-  batch=16 \
-  project=runs/building_detector \
-  name=v1
-```
-
-训练完成后权重保存在：`runs/building_detector/v1/weights/best.pt`
-
-训练时间预估：
-- GPU（GTX 1080 / RTX 3060）：约 15-30 分钟
-- CPU：约 1-2 小时（不推荐）
-
-##### 1.3.8 验证训练效果
-
-```bash
-# 在验证集上评估
-yolo val \
-  model=runs/building_detector/v1/weights/best.pt \
-  data=phase1_building_detector.yaml
-
-# 对新图片跑预测看效果
-yolo predict \
-  model=runs/building_detector/v1/weights/best.pt \
-  source=test_image.jpg \
-  save=True
-```
-
-验证标准：
-
-| 指标 | 要求 | 不达标怎么办 |
-|------|------|-------------|
-| building mAP@0.5 | ≥ 0.85 | 补采数据或增加 epochs |
-| building recall | ≥ 0.90（不能漏检） | 补采远距离/遮挡场景数据 |
-| 一帧多房屋全检出 | ≥ 85% | 补采多房屋同框的图片 |
-| 推理速度（640px） | ≤ 8ms / 帧 | 已用 YOLOv8n，通常满足 |
-
-##### 1.3.9 完整操作步骤总结
-
-```
-Step A → 采集图片（你已完成 ✓）
-          UAV 在仿真中原地旋转 + 不同位置拍照
-
-Step B → 标注（约 30-40 分钟）
-          打开 Roboflow → 上传图片
-          → 每张图中的建筑物画 bbox → 类别选 "building"
-          → 一张图有多栋就画多个框
-          → 标完后导出 YOLO 格式
-
-Step C → 组织数据（约 10 分钟）
-          按 8:2 分 train/val
-          → 创建 phase1_building_detector.yaml
-
-Step D → 训练（约 15-30 分钟）
-          运行 yolo train 命令
-
-Step E → 验证（约 10 分钟）
-          运行 yolo val 确认 mAP ≥ 0.85
-          → 对几张新图 yolo predict 看效果
-          → 不达标则补采数据重新训练
-
-总耗时：约 1-1.5 小时
-```
-
----
-
-#### 1.4 地图与检测对齐——核心算法
-
-YOLO 训练好后，下一步是把检测到的 building 和地图上的房屋框对齐。
-
-##### 1.4.1 对齐的原理
-
-```
-已知信息：
-  ① UAV 当前位姿 (x, y, z, yaw) ← 从 /state 获取
-  ② 地图上每栋房屋的 bbox 坐标  ← houses_config.json
-  ③ 相机水平视场角 fov           ← 固定值（如 90°）
-  ④ YOLO 检测到的 building bbox  ← 训练好的模型输出
-
-对齐过程：
-  building 在画面中的水平位置 (像素)
-    → 转换为相对画面中心的偏移比例
-    → 转换为角度偏移
-    → 加上 UAV 当前 yaw
-    → 得到该 building 的绝对方位角
-    → 从 UAV 位置沿该方位角发射线
-    → 射线穿过地图上哪个 house bbox
-    → 该 building = 那栋 house
-
-一句话：画面中 building 的位置 → 方向 → 地图上的房屋
-```
-
-##### 1.4.2 图解对齐过程
-
-```
-         地图俯视（UE4 坐标系）
-
-         N (y+)
-         │
-    ┌────┤────┐
-    │ house_2 │
-    └────┬────┘
-         │
-         │          ┌──────────┐
-    ─────┼──────────│ house_1  │──── E (x+)
-         │          └──────────┘
-         │
-    ┌────┤────┐
-    │ house_3 │
-    └────┬────┘
-         │
-    UAV ◈ (朝向 yaw = 0°，即朝东)
-    位置 (500, 0)
-
-UAV 拍到的 RGB 画面（640px 宽）：
-┌──────────────────────────────────────────┐
-│                                          │
-│      ┌───────┐              ┌────┐       │
-│      │bld #1 │              │bld │       │
-│      │       │              │ #2 │       │
-│      │       │              │    │       │
-│      └───────┘              └────┘       │
-│  0px    200px                 500px  640px│
-└──────────────────────────────────────────┘
-
-对齐计算：
-
-bld #1 的 bbox 中心 = 200px
-  偏移比例 = (200 - 320) / 320 = -0.375（偏左）
-  角度偏移 = -0.375 × 45° = -16.9°（FOV=90°的一半=45°）
-  绝对方位角 = 0° + (-16.9°) = -16.9°
-  从 UAV 发射线 → 穿过 house_1 的 bbox
-  → bld #1 = house_1 ✓
-
-bld #2 的 bbox 中心 = 500px
-  偏移比例 = (500 - 320) / 320 = +0.5625（偏右）
-  角度偏移 = +0.5625 × 45° = +25.3°
-  绝对方位角 = 0° + 25.3° = 25.3°
-  从 UAV 发射线 → 穿过 house_3 的 bbox
-  → bld #2 = house_3 ✓
-```
-
-##### 1.4.3 射线-bbox 相交算法
-
-```python
-import math
-
-def get_expected_house(uav_x, uav_y, yaw_deg, houses_config):
-    """
-    根据 UAV 位置和绝对方位角，找该方向上最近的房屋。
-
-    从 UAV 位置沿 yaw 方向发射射线，
-    检查射线穿过哪个房屋的 bbox。
-    """
-    yaw_rad = math.radians(yaw_deg)
-    dx = math.cos(yaw_rad)
-    dy = math.sin(yaw_rad)
-
-    best_house = None
-    best_dist = float('inf')
-
-    for house in houses_config["houses"]:
-        bbox = house["bbox"]
-        cx = (bbox["x_min"] + bbox["x_max"]) / 2
-        cy = (bbox["y_min"] + bbox["y_max"]) / 2
-
-        to_house_x = cx - uav_x
-        to_house_y = cy - uav_y
-
-        # 投影到视线方向（正数=在前方）
-        proj = to_house_x * dx + to_house_y * dy
-        if proj <= 0:
-            continue  # 在 UAV 背后，跳过
-
-        # 横向偏移（射线到房屋中心的垂直距离）
-        perp = abs(to_house_x * (-dy) + to_house_y * dx)
-        dist = math.sqrt(to_house_x**2 + to_house_y**2)
-
-        # 房屋半宽 + 容差
-        house_half_width = max(
-            bbox["x_max"] - bbox["x_min"],
-            bbox["y_max"] - bbox["y_min"]
-        ) / 2
-
-        if perp < house_half_width + 200 and dist < best_dist:
-            best_dist = dist
-            best_house = house["house_id"]
-
-    return best_house, best_dist
-```
-
-##### 1.4.4 一帧多 building 匹配
-
-画面中可能同时看到 2-3 栋房屋，每栋在画面不同水平位置，分别匹配：
-
-```python
-def match_detections_to_houses(detections, uav_pose, houses_config, frame_width, fov_deg=90):
-    """
-    将一帧中的所有 building 检测框匹配到地图房屋。
-
-    流程：
-    1. 取每个 building bbox 的水平中心
-    2. 计算该 building 相对于画面中心的角度偏移
-    3. 加上 UAV yaw → 该 building 的绝对方位角
-    4. 射线匹配 → 对应哪栋 house
-    """
-    results = []
-
-    for det in detections:
-        if det["class"] != "building":
-            continue
-
-        # bbox 水平中心 → 角度偏移
-        bbox_cx = (det["bbox"][0] + det["bbox"][2]) / 2
-        offset_ratio = (bbox_cx - frame_width / 2) / (frame_width / 2)
-        yaw_offset = offset_ratio * (fov_deg / 2)
-
-        # 绝对方位角
-        abs_yaw = uav_pose["yaw"] + yaw_offset
-
-        # 射线匹配
-        house_id, dist = get_expected_house(
-            uav_pose["x"], uav_pose["y"], abs_yaw, houses_config
-        )
-
-        results.append({
-            "detection": det,
-            "matched_house_id": house_id,
-            "bearing_deg": abs_yaw,
-            "estimated_distance_cm": dist,
-            "confidence": det["confidence"]
-        })
-
-    return results
-```
-
-##### 1.4.5 对齐失败的处理
-
-| 情况 | 原因 | 处理 |
-|------|------|------|
-| YOLO 检测到 building 但射线没命中任何 bbox | 地图上没有标注该房屋，或 bbox 范围太小 | 记录为 `unmatched_building`，扩大 bbox 容差 |
-| 地图上有 bbox 但 YOLO 没检测到 | 房屋被遮挡/距离太远/检测漏了 | 标记为 `pending`，后续飞近补扫 |
-| 两个 building 匹配到同一个 house_id | 实际只有一栋房屋但 YOLO 检测出两个框 | 取置信度更高的那个，另一个可能是误检 |
-| shooting 射线在两个 bbox 交界处 | UAV 处于两栋房屋的方位角边界 | 取距离更近的那栋 |
-
----
-
-#### 1.5 完整扫描流程
-
-```
-任务开始（UAV 在任意初始位置）
-  │
-  ▼
-读取 UAV 当前 pose (x, y, z, yaw_0)
-读取地图 houses_config.json
-加载训练好的 YOLO building 检测模型
-  │
-  ▼
-原地旋转一圈（12步 × 30°= 360°），每步：
-  │
-  │  ┌─────────────────────────────────────────────┐
-  │  │ 当前朝向 yaw_i = yaw_0 + i × 30°           │
-  │  │                                              │
-  │  │ ① 拍 RGB → recon/frame_{i:02d}.jpg          │
-  │  │    （不拍 depth——Phase 1 不需要深度）         │
-  │  │                                              │
-  │  │ ② YOLO 检测 → building 框 ×N                │
-  │  │    只检测 building，不检测门窗                │
-  │  │                                              │
-  │  │ ③ 对每个 building 框做方向-地图对齐：        │
-  │  │    bbox 水平中心 → 角度偏移                  │
-  │  │    + yaw_i → 绝对方位角                      │
-  │  │    → 射线与地图 bbox 相交                    │
-  │  │    → matched_house_id                        │
-  │  │                                              │
-  │  │ ④ 保存该帧记录                               │
-  │  └─────────────────────────────────────────────┘
-  │
-  ▼
-旋转完成，汇总结果：
-  │
-  ├── 对每栋房屋，选 YOLO 置信度最高的帧
-  │   → 该帧作为参考帧（best_reference_frame）
-  │   → VLM 生成外观描述
-  │
-  ├── 标记 recon_status = "confirmed"
-  │   search_status = "unexplored"
-  │
-  └── 未被检测到的房屋：
-      → recon_status 保持 "pending"
-      → 后续飞近时自动补扫
-  │
-  ▼
-在俯视图地图上标记：
-  房屋框 + 确认状态 + VLM 描述 + UAV 位置
-  │
-  ▼
-Phase 1 完成 → 系统知道每个方向上是哪栋房屋
-               → 每栋房屋有了参考图和文字描述
-               → 地图上所有 confirmed 房屋标记为 unexplored
-```
-
-#### 1.6 侦察记录数据结构
-
-##### 每帧记录
-
-Phase 1 的每帧记录很简洁——只有 building 信息，没有门窗：
-
-```json
-{
-  "recon_frame_id": 5,
-  "yaw_deg": 150.0,
-  "rgb_path": "recon/frame_05.jpg",
-
-  "building_matches": [
-    {
-      "matched_house_id": "house_2",
-      "bearing_deg": 142.3,
-      "estimated_distance_cm": 1820.0,
-      "confidence": 0.87,
-      "bbox_in_frame": [120, 80, 480, 400]
-    },
-    {
-      "matched_house_id": "house_3",
-      "bearing_deg": 168.5,
-      "estimated_distance_cm": 2450.0,
-      "confidence": 0.62,
-      "bbox_in_frame": [450, 100, 620, 380]
-    }
-  ],
-
-  "total_buildings_detected": 2
-}
-```
-
-> 一帧中看到 2 栋房屋（house_2 和 house_3），每栋独立匹配到地图。
-
-##### 扫描完成后的地图状态
-
-```json
-{
-  "house_id": "house_1",
-  "center": [2400.0, 100.0],
-  "bbox": {
-    "x_min": 2100.0, "x_max": 2700.0,
-    "y_min": -200.0, "y_max": 400.0
-  },
-
-  "recon_status": "confirmed",
-  "recon_data": {
-    "confirmed_at": "2026-03-26T10:15:30",
-    "scan_origin": {"x": 2000.0, "y": 300.0, "z": 270.0},
-
-    "best_reference_frame": {
-      "path": "recon/frame_01.jpg",
-      "yaw_deg": 30.0,
-      "confidence": 0.91,
-      "distance_cm": 520.0
-    },
-
-    "vlm_description": "白色殖民风格两层房屋，有前廊和美国国旗",
-
-    "observed_from_frames": [0, 1, 2],
-    "total_observations": 3,
-    "avg_confidence": 0.86
-  },
-
-  "search_status": "unexplored"
-}
-```
-
-**注意**：`recon_data` 中没有 `door_candidates`——Phase 1 不检测门。门的信息会在 Phase 2 飞近目标房屋时才获取。
-
-##### 未确认房屋
-
-```json
-{
-  "house_id": "house_3",
-  "recon_status": "pending",
-  "recon_data": {
-    "scan_attempted_at": "2026-03-26T10:15:30",
-    "failure_reason": "not_detected_in_any_frame",
-    "note": "距离太远或被遮挡，需飞近补扫"
-  },
-  "search_status": "pending"
-}
-```
-
-**补扫机制**：后续飞行中进入 `pending` 房屋的 `approach_radius` 范围内时，自动对该方向拍 RGB + YOLO 检测 + 方向匹配。
-
----
-
-#### 1.7 VLM 描述生成
-
-对每栋 `confirmed` 房屋的最佳参考帧调用 VLM，生成外观描述：
-
-```python
-VLM_PROMPT = """Describe this building in one sentence, focusing on:
-- Color and material (e.g., white painted wood, red brick)
-- Architectural style (e.g., colonial, ranch, modern)
-- Number of floors
-- Porch, balcony, or other visible structures
-- Any distinctive features (flags, decorations, plants)
-
-Do NOT describe doors or windows in detail — just focus on the
-overall appearance that makes this building recognizable.
-"""
-```
-
-VLM 可选：
-- **LLaVA-1.5-7B**（本地部署，RTX 3060 可跑）
-- **GPT-4V / GPT-4o**（API 调用，质量更高）
-- **Qwen-VL**（本地备选）
-
-VLM 描述的用途：
-1. **SSP 规划器上下文**：高层规划时知道每栋房屋的外观
-2. **GCMA archive 初始化**：作为 semantic cell 初始描述
-3. **人类可读报告**：俯视图地图上标注房屋名字旁的描述文字
-
----
-
-#### 1.8 完整扫描脚本
-
-```python
-import requests
-import time
-import json
-import math
-from datetime import datetime
-
-def run_phase1_scan(server_url, houses_config, yolo_model, vlm_model=None):
-    """
-    Phase 1 原地扫描：确定每个方向上是哪栋房屋。
-
-    只检测 building，不检测门窗。
-    不使用 depth，纯 RGB + 坐标。
-    """
-    # 1. 读取 UAV 位姿
-    state = requests.get(f"{server_url}/state").json()
-    uav_pose = state["pose"]
-    frame_width = 640
-    fov_deg = houses_config["map_info"].get("fov_deg", 90)
-
-    all_frames = []
-    print(f"[Phase 1] 开始原地扫描，UAV 位置: ({uav_pose['x']:.0f}, {uav_pose['y']:.0f})")
-
-    # 2. 原地旋转 12 步
-    for step in range(12):
-        # 只拍 RGB（不需要 depth）
-        rgb = requests.get(f"{server_url}/frame").content
-        rgb_path = f"recon/frame_{step:02d}.jpg"
-        save_frame(rgb, rgb_path)
-
-        state = requests.get(f"{server_url}/state").json()
-        current_yaw = state["pose"]["yaw"]
-
-        # YOLO 只检测 building
-        detections = yolo_model.predict(rgb)
-        building_dets = [d for d in detections if d["class"] == "building"]
-
-        # 方向-地图对齐
-        building_matches = match_detections_to_houses(
-            building_dets, state["pose"], houses_config, frame_width, fov_deg
-        )
-
-        frame_record = {
-            "recon_frame_id": step,
-            "yaw_deg": current_yaw,
-            "rgb_path": rgb_path,
-            "building_matches": building_matches,
-            "total_buildings_detected": len(building_dets)
-        }
-        all_frames.append(frame_record)
-
-        print(f"  Step {step:2d} | yaw={current_yaw:6.1f}° | "
-              f"buildings={len(building_dets)} | "
-              f"matched={[m['matched_house_id'] for m in building_matches]}")
-
-        # 旋转 30°
-        if step < 11:
-            requests.post(f"{server_url}/move_relative",
-                         json={"action": "yaw_right"})
-            time.sleep(0.3)
-
-    # 3. 汇总：为每栋房屋选最佳参考帧 + VLM 描述
-    confirmed_count = 0
-    for house in houses_config["houses"]:
-        house_id = house["house_id"]
-
-        observations = []
-        for frame in all_frames:
-            for bm in frame["building_matches"]:
-                if bm["matched_house_id"] == house_id:
-                    observations.append({
-                        "frame_id": frame["recon_frame_id"],
-                        "confidence": bm["confidence"],
-                        "rgb_path": frame["rgb_path"],
-                        "yaw_deg": frame["yaw_deg"],
-                        "distance_cm": bm["estimated_distance_cm"]
-                    })
-
-        if observations:
-            best_obs = max(observations, key=lambda o: o["confidence"])
-
-            vlm_desc = ""
-            if vlm_model:
-                vlm_desc = vlm_model.describe(best_obs["rgb_path"], VLM_PROMPT)
-
-            house["recon_status"] = "confirmed"
-            house["recon_data"] = {
-                "confirmed_at": datetime.now().isoformat(),
-                "scan_origin": {
-                    "x": uav_pose["x"],
-                    "y": uav_pose["y"],
-                    "z": uav_pose["z"]
-                },
-                "best_reference_frame": best_obs,
-                "vlm_description": vlm_desc,
-                "observed_from_frames": [o["frame_id"] for o in observations],
-                "total_observations": len(observations),
-                "avg_confidence": sum(o["confidence"] for o in observations)
-                                  / len(observations)
-            }
-            house["search_status"] = "unexplored"
-            confirmed_count += 1
-            print(f"  ✓ {house_id} confirmed | "
-                  f"best_conf={best_obs['confidence']:.2f} | "
-                  f"seen_in={len(observations)} frames")
-        else:
-            house["recon_status"] = "pending"
-            house["recon_data"] = {
-                "scan_attempted_at": datetime.now().isoformat(),
-                "failure_reason": "not_detected_in_any_frame"
-            }
-            print(f"  ✗ {house_id} NOT detected — marked as pending")
-
-    print(f"\n[Phase 1] 扫描完成: {confirmed_count}/{len(houses_config['houses'])} 房屋已确认")
-
-    # 4. 保存更新后的配置
-    save_json(houses_config, "houses_config_after_recon.json")
-    save_json(all_frames, "recon_frames_log.json")
-
-    return houses_config
-```
-
----
-
-### Step 2：运行时定位——每步知道"我在哪栋房屋附近"
-
-Phase 1 扫描完成后，进入正式搜索阶段。每一步需要回答"我在哪栋房屋附近"。
-
-#### 2.1 两层定位机制
-
-```
-每步判断"我在哪栋房屋"：
-
-第1层 — 坐标判断（≈ 0ms，确定性，最可靠）
-  ├─ pose (x,y) 落在哪个 house bbox 内 → current_house_id
-  ├─ pose (x,y) 不在任何 bbox 内 → "outdoor"
-  ├─ pose.z 是否在 floor_z_range 内 → is_inside
-  └─ 与 target_house 中心的距离和方位角 → 导航用
-
-第2层 — YOLO building 检测 + 方向匹配（≤ 8ms，可选交叉验证）
-  ├─ 当前帧是否看到 building → building_detected
-  ├─ 方向匹配到哪个 house_id → visual_house_id
-  └─ 与坐标判断对比 → 一致则高置信度，不一致则以坐标为准
-```
-
-**注意**：运行时定位只判断"在哪栋房屋附近"，不判断门窗。门窗检测是 Phase 2 在 `house_circling` 阶段才开始做的。
-
-#### 2.2 坐标定位函数
+#### 2.1 坐标定位函数
 
 ```python
 def locate_uav(uav_pose, houses_config, target_house_id):
@@ -1358,32 +378,7 @@ def locate_uav(uav_pose, houses_config, target_house_id):
     }
 ```
 
-#### 2.3 地图配置文件
-
-`houses_config.json` 由 Step 0 生成（参见 Step 0.5 节）。运行时定位使用其中的 `bbox` 字段判断 UAV 在哪栋房屋范围内。
-
-关键字段回顾：
-
-```json
-{
-  "houses": [
-    {
-      "house_id": "house_1",
-      "center": [2400.0, 100.0],
-      "bbox": { "x_min": 2100.0, "x_max": 2700.0, "y_min": -200.0, "y_max": 400.0 },
-      "approach_radius_cm": 800.0,
-      "floor_z_range": [200.0, 350.0],
-      "recon_status": "confirmed",
-      "search_status": "unexplored"
-    }
-  ],
-
-  "search_altitude_cm": 270.0,
-  "global_step_budget": 2000
-}
-```
-
-#### 2.4 "在错误房屋"的处理
+#### 2.2 "在错误房屋"的处理
 
 ```
 场景：UAV 飞向 house_1，途中经过 house_2 附近
@@ -1549,113 +544,104 @@ class SearchStatusManager:
 Phase 1 为 Phase 5 蒸馏提供以下特征：
 
 ```
-坐标定位特征（6维，确定性）：
+坐标定位特征（6维，全部确定性）：
   distance_to_target_norm        ← 到目标中心归一化距离（/2000cm）
   bearing_error_norm             ← 方位角误差归一化（/180°）
   is_at_target_house             ← 在目标房屋范围内（0/1）
   is_at_wrong_house              ← 在非目标房屋范围内（0/1）
   is_inside                      ← 在室内（0/1）
   target_approach_progress       ← 接近进度（0-1）
-
-YOLO 视觉特征（3维，概率性）：
-  yolo_building_detected         ← 检测到 building（0/1）
-  yolo_building_confidence       ← building 最高置信度（0-1）
-  yolo_building_count            ← building 数量（归一化 /5）
-
-方向匹配特征（2维，确定性）：
-  direction_match_confirmed      ← 方向匹配确认看到目标房屋（0/1）
-  nearest_building_bearing_error ← 最近 building 与目标方位角误差（归一化 /180°）
 ```
 
-总计 **11 维**（6 确定性 + 3 概率性 + 2 方向匹配）。
-
-> Phase 1 不输出门相关特征。门特征（`door_detected`, `door_confidence` 等）由 Phase 2 提供。
+总计 **6 维**，全部由坐标计算得到，无需视觉模型。
 
 ---
 
 ### 验证流程
 
-#### YOLO 模型验证
-
-| 验证项 | 通过标准 | 不达标处理 |
-|--------|---------|-----------|
-| building mAP@0.5 | ≥ 0.85 | 补采数据或增加 epochs |
-| building recall | ≥ 0.90 | 补采远距离/遮挡场景 |
-| 一帧多房屋全检出 | ≥ 85% | 补采多房屋同框图片 |
-| 推理速度 | ≤ 8ms | 已用 YOLOv8n，通常满足 |
-
-#### 扫描对齐验证
-
 | 验证项 | 通过标准 |
 |--------|---------|
-| 所有房屋被确认 | 100%（如有 pending 需说明原因） |
-| 方向匹配准确率 | ≥ 90% building 正确匹配到 house_id |
-| 一帧多房屋匹配 | ≥ 85% 全部正确 |
-| VLM 描述质量 | 包含颜色+风格+层数 |
-| 补扫触发 | pending 房屋飞近后自动变 confirmed |
-
-#### 运行时定位验证
-
-| 验证项 | 通过标准 |
-|--------|---------|
-| 坐标房屋归属准确率 | 100% |
-| 方向匹配交叉验证一致率 | ≥ 85% |
+| 坐标房屋归属准确率 | 100%（坐标判断是确定性的） |
 | 错误房屋告警准确率 | 100% |
 | 室内/室外切换准确率 | ≥ 98% |
-
-#### 搜索状态验证
-
-| 验证项 | 通过标准 |
-|--------|---------|
 | explored 后不重复进入 | 0 次 |
 | 多房屋自动切换 | 所有房屋被访问 |
-| person_found 准确率 | ≥ 95% |
 | 状态流转正确性 | 符合定义规则 |
 
 ---
 
 ### 交付物
 
-- [ ] 地图配置文件 `houses_config.json`（bbox + 高度范围 + 初始状态）
-- [ ] YOLO building 检测标注数据（90-100 张，1 类：building）
-- [ ] YOLO building 检测模型权重 `building_detector_v1/best.pt`
-- [ ] 数据集配置 `phase1_building_detector.yaml`
-- [ ] 方向-房屋匹配模块 `direction_house_matcher.py`
-- [ ] 原地扫描脚本 `phase1_scan.py`
+- [ ] `houses_config.json`（手动标记的房屋 bbox 坐标）
 - [ ] 坐标定位模块 `house_locator.py`
 - [ ] 搜索状态管理模块 `search_status_manager.py`
-- [ ] 俯视地图渲染模块
-- [ ] 扫描结果报告（每帧记录 + 每栋房屋汇总 + VLM 描述）
 
 ---
 
-## Phase 2：入口探索——找到目标房屋的可进入入口
+## Phase 2：入口探索——多模态融合检测可进入入口（重头戏）
 
 ### 目标
 
-UAV 到达目标房屋附近后，**在房屋周围探索，找到可以进入的入口**。
+UAV 到达目标房屋附近后，**融合多种感知模态，找到可以进入的入口（门、窗、洞口）**。
 
-Phase 2 的触发条件：Phase 1 确认了目标房屋 + Phase 3 飞到了目标房屋附近。
+这是整个系统的**核心创新点**——不是单纯用一个 YOLO 检测器，而是融合三种模态做出更准确的入口判断。
 
-Phase 2 需要回答：
-1. 这栋房屋有没有门？门在哪个方向？
-2. 门是开着的还是关着的？
-3. 门前有没有障碍物？能不能通过？（depth 判断）
-4. 现在检测到的门确实属于目标房屋吗？（坐标确认）
+### Phase 2 需要回答的问题
 
-### 与 Phase 1 的区别
+| 问题 | 回答方式 |
+|------|---------|
+| 画面中有没有可进入的开口？ | YOLO 检测 `door_open`, `window`, `opening` |
+| 这个开口离我多远？够不够大？ | depth 深度分析 |
+| 这个开口能不能安全通过？有没有障碍？ | depth 可穿越性判断 |
+| 这到底是门还是窗还是墙上的装饰？ | VLM 语义确认 |
+| 检测到的入口属于目标房屋吗？ | 坐标验证（Phase 1 提供） |
 
-| | Phase 1（房屋确认） | Phase 2（入口探索） |
-|---|---|---|
-| **时机** | 任务开始时，原地扫描 | 到达目标房屋附近后 |
-| **检测对象** | 只检测 `building` | 检测 `door_open`, `door_closed`, `window` |
-| **是否用 depth** | 不用 | 用（判断门距、障碍物） |
-| **UAV 行为** | 原地旋转，不飞行 | 绕房屋飞行，找门 |
-| **YOLO 模型** | Phase 1 building 检测器 | Phase 2 入口检测器（独立模型） |
+### 多模态融合架构
 
-### Phase 2 入口检测 YOLO 模型
+```
+                        ┌─────────────────────────┐
+                        │     每步输入             │
+                        │  RGB 帧 + depth 帧      │
+                        │  + UAV 位姿              │
+                        └────────┬────────────────┘
+                                 │
+              ┌──────────────────┼──────────────────┐
+              ▼                  ▼                   ▼
+    ┌──────────────────┐ ┌──────────────┐  ┌──────────────────┐
+    │  模态 1: YOLO    │ │ 模态 2: Depth│  │ 模态 3: VLM      │
+    │  入口检测        │ │ 深度分析      │  │ 语义理解          │
+    │                  │ │              │  │                  │
+    │  检测类别：      │ │ 分析内容：    │  │ 判断内容：        │
+    │  · door_open     │ │ · 入口距离   │  │ · 这是什么类型？  │
+    │  · door_closed   │ │ · 开口宽高   │  │ · 能不能通过？    │
+    │  · window        │ │ · 可穿越性   │  │ · 安全性如何？    │
+    │  · opening       │ │ · 障碍物检测 │  │ · 最佳进入方式？  │
+    └────────┬─────────┘ └──────┬───────┘  └────────┬─────────┘
+             │                  │                    │
+             └──────────────────┼────────────────────┘
+                                ▼
+                    ┌───────────────────────┐
+                    │    融合决策模块        │
+                    │                       │
+                    │  YOLO 说有门          │
+                    │  + depth 说够近且可穿 │
+                    │  + VLM 确认是门       │
+                    │  = 高置信度入口 ✓     │
+                    │                       │
+                    │  YOLO 说有门          │
+                    │  + depth 说前方有障碍 │
+                    │  = 不可穿越 ✗         │
+                    │                       │
+                    │  YOLO 没检测到        │
+                    │  + VLM 说"这面墙有缝隙"│
+                    │  + depth 确认有深度   │
+                    │  = 可能的入口？→ 靠近 │
+                    └───────────────────────┘
+```
 
-Phase 2 使用**独立的 YOLO 模型**，专门检测入口相关类别：
+### 模态 1：YOLO 入口检测
+
+#### 检测类别
 
 ```yaml
 # phase2_entry_detector.yaml
@@ -1665,34 +651,61 @@ val: images/val
 names:
   0: door_open       # 开着的门（可进入）
   1: door_closed     # 关闭的门（不可进入）
-  2: window          # 窗户（辅助定位，不可进入）
+  2: window          # 窗户（可能可进入，需 depth 确认尺寸）
+  3: opening         # 其他洞口/缺口（破损墙壁、车库口等）
 ```
 
-**为什么用独立模型而不复用 Phase 1 的**：
-- Phase 1 的 building 检测器针对远/中距离的整栋建筑物轮廓优化
-- Phase 2 的入口检测器针对近距离的门框、窗框等小目标优化
-- 训练数据分布不同：Phase 1 是远景全貌，Phase 2 是近景细节
-- 分开训练，各自效果最优
+> 相比之前的 3 类，新增了 `opening`（通用洞口），覆盖非标准入口。
 
-#### 训练数据采集
+#### 标注方法
 
-UAV 到达每栋房屋附近后，绕房屋飞行采集近距离图片：
+和之前一样用 Roboflow 拖框，但多了一个类别：
 
-| 类别 | 距离 | 角度 | 数量 | 标注 |
-|------|------|------|------|------|
-| `door_open` | 近（1-3m）| 正面 ±45° | 每门 25 张 | bbox 框住门框 |
-| `door_open` | 中（3-6m）| 正面 ±60° | 每门 15 张 | bbox 框住门框 |
-| `door_closed` | 近+中 | 多角度 | 每门 15 张 | bbox 框住门框 |
-| `window` | 近+中 | 多角度 | 每栋 15 张 | bbox 框住窗框 |
-| 负样本（无门墙面）| 近+中 | — | 100 张 | 无标注 |
+```
+标注示例：
+
+正面看到一栋房屋的墙面：
+┌────────────────────────────────────┐
+│                                    │
+│     ┌──────┐    ┌────┐   ┌────┐   │
+│     │door  │    │win │   │win │   │
+│     │_open │    │dow │   │dow │   │
+│     │      │    │    │   │    │   │
+│     │      │    └────┘   └────┘   │
+│     └──────┘                      │
+│                                    │
+└────────────────────────────────────┘
+→ 标 3 个框：1 × door_open + 2 × window
+
+看到一个有破洞的墙壁：
+┌────────────────────────────────────┐
+│                                    │
+│     墙面         ┌───────┐        │
+│                  │opening│        │
+│                  │(破洞) │        │
+│                  └───────┘        │
+│                                    │
+└────────────────────────────────────┘
+→ 标 1 个框：opening
+```
+
+#### 训练数据量
+
+| 类别 | 距离 | 数量 | 标注 |
+|------|------|------|------|
+| `door_open` | 近（1-3m）+ 中（3-6m）| 每门 40 张 | bbox 框住门框 |
+| `door_closed` | 近+中 | 每门 15 张 | bbox 框住门框 |
+| `window` | 近+中 | 每栋 15 张 | bbox 框住窗框 |
+| `opening` | 近+中 | 20 张 | bbox 框住洞口 |
+| 负样本（纯墙面）| 近+中 | 100 张 | 无标注 |
 
 假设 3 栋房屋 × 2 门 = 6 门：
 - door_open: 6 × 40 = 240 张
 - door_closed: 6 × 15 = 90 张
 - window: 3 × 15 = 45 张
+- opening: 20 张
 - 负样本: 100 张
-
-总计约 **475 张**，按 8:2 分训练/验证。
+- **总计约 495 张**，按 8:2 分训练/验证。
 
 #### 训练命令
 
@@ -1707,135 +720,354 @@ yolo train \
   name=v1
 ```
 
-#### 训练验证标准
+#### YOLO 验证标准
 
 | 指标 | 要求 |
 |------|------|
 | door_open mAP@0.5 | ≥ 0.85 |
-| door_open recall | ≥ 0.90（不能漏检开门） |
+| door_open recall | ≥ 0.90（不能漏检可进入的门） |
 | door_closed precision | ≥ 0.80 |
+| opening recall | ≥ 0.75 |
 | 整体 mAP@0.5 | ≥ 0.80 |
 | 推理速度（640px） | ≤ 8ms / 帧 |
 
-### 入口探索流程
+---
 
-Phase 2 在 `house_circling` 阶段执行：
+### 模态 2：Depth 深度分析
+
+YOLO 告诉你"这里有个门"，depth 告诉你"能不能过去"。
+
+#### depth 提供的信息
+
+```python
+import numpy as np
+
+def analyze_entry_depth(depth_frame, entry_bbox, frame_width, frame_height):
+    """
+    对 YOLO 检测到的入口区域做 depth 分析。
+
+    返回入口的距离、尺寸估算、可穿越性。
+    """
+    x1, y1, x2, y2 = [int(v) for v in entry_bbox]
+    entry_region = depth_frame[y1:y2, x1:x2]
+
+    # 1. 入口距离（取 20th percentile 避免噪声）
+    valid_depths = entry_region[(entry_region > 50) & (entry_region < 5000)]
+    if len(valid_depths) == 0:
+        return {"status": "invalid", "reason": "depth 数据无效"}
+
+    distance_cm = float(np.percentile(valid_depths, 20))
+
+    # 2. 入口中心 vs 周围的 depth 差异
+    #    如果门/洞口是开的 → 中心 depth >> 边框 depth（看得更远）
+    #    如果门是关的 → 中心 depth ≈ 边框 depth（都打在门板上）
+    center_h = entry_region.shape[0] // 4
+    center_w = entry_region.shape[1] // 4
+    center_depth = np.median(entry_region[
+        center_h : 3*center_h,
+        center_w : 3*center_w
+    ])
+    edge_depth = np.median(np.concatenate([
+        entry_region[:center_h, :].flatten(),
+        entry_region[3*center_h:, :].flatten(),
+        entry_region[:, :center_w].flatten(),
+        entry_region[:, 3*center_w:].flatten()
+    ]))
+
+    depth_ratio = center_depth / (edge_depth + 1e-6)
+    is_open = depth_ratio > 1.3  # 中心比边缘深 30% 以上 → 开口
+
+    # 3. 可穿越性（门后有没有障碍物）
+    has_obstacle = center_depth < 80  # 门后 80cm 内有东西
+
+    # 4. 开口尺寸估算（粗略）
+    #    像素宽度 × 距离 / 焦距 ≈ 实际宽度
+    pixel_width = x2 - x1
+    pixel_height = y2 - y1
+    focal_length_px = frame_width / (2 * np.tan(np.radians(45)))  # FOV=90°
+    real_width_cm = pixel_width * distance_cm / focal_length_px
+    real_height_cm = pixel_height * distance_cm / focal_length_px
+
+    # UAV 宽度约 60cm，需要至少 80cm 宽的开口
+    size_sufficient = real_width_cm > 80 and real_height_cm > 60
+
+    return {
+        "distance_cm": round(distance_cm, 1),
+        "center_depth_cm": round(center_depth, 1),
+        "depth_ratio": round(depth_ratio, 2),
+        "is_open": is_open,
+        "has_obstacle": has_obstacle,
+        "estimated_width_cm": round(real_width_cm, 1),
+        "estimated_height_cm": round(real_height_cm, 1),
+        "size_sufficient": size_sufficient,
+        "traversable": is_open and not has_obstacle and size_sufficient
+    }
+```
+
+#### depth 分析的决策逻辑
+
+```
+YOLO 检测到入口（door_open / window / opening）
+  │
+  ▼
+depth 分析：
+  ├── distance > 500cm → "too_far"：继续靠近
+  ├── distance 250-500cm → "approaching"：正在接近
+  ├── distance < 250cm → 进入详细分析：
+  │     │
+  │     ├── depth_ratio < 1.3 → "closed"：虽然 YOLO 说是 door_open，但 depth 显示是平面（误检？）
+  │     ├── has_obstacle → "blocked"：开口后面有障碍物
+  │     ├── !size_sufficient → "too_small"：开口太小，UAV 过不去
+  │     └── 全部通过 → "traversable" ✓
+  │
+  ▼
+输出 depth 判断结果 → 传给融合决策模块
+```
+
+---
+
+### 模态 3：VLM 语义确认
+
+VLM（视觉语言模型）是第三道确认——用自然语言理解画面内容，解决 YOLO 和 depth 无法回答的问题。
+
+#### VLM 的使用场景
+
+| 场景 | YOLO + depth 的不足 | VLM 能做什么 |
+|------|---------------------|-------------|
+| YOLO 检测到 door_open，但其实是一幅画 | YOLO 只看纹理，不理解语义 | "这是墙上的装饰画，不是真的门" |
+| 检测到 window，但不确定能否通过 | depth 只知道有深度 | "窗户打开了，没有纱窗，可以尝试通过" |
+| 没检测到任何入口，但墙上有裂缝 | YOLO 没有 "crack" 类别 | "墙壁右侧有一条大裂缝，可能可以通过" |
+| 检测到两个 door_open，选哪个 | 两个都满足条件 | "左边是正门，更宽敞；右边是侧门，较窄" |
+
+#### VLM 调用方式
+
+```python
+VLM_ENTRY_PROMPT = """Look at this image from a UAV camera approaching a building.
+
+Answer these questions concisely:
+1. What potential entry points do you see? (doors, windows, openings, gaps)
+2. For each entry point: is it open or closed? Is it large enough for a small drone (60cm wide) to fly through?
+3. Are there any obstacles near the entry points?
+4. Which entry point would you recommend for a drone to enter, and why?
+
+Be specific about positions (left/center/right of frame).
+"""
+
+def vlm_confirm_entry(rgb_frame_path, vlm_model):
+    """
+    用 VLM 对当前画面做语义入口分析。
+
+    调用时机：YOLO 检测到入口 + depth 确认可穿越 → VLM 做最终确认
+    或者：YOLO 没检测到 → 但 VLM 可能发现非标准入口
+    """
+    response = vlm_model.analyze(rgb_frame_path, VLM_ENTRY_PROMPT)
+
+    return {
+        "vlm_description": response,
+        "has_entry_recommendation": "recommend" in response.lower(),
+        "mentions_obstacle": any(w in response.lower()
+                                 for w in ["obstacle", "blocked", "closed"]),
+        "mentions_open": any(w in response.lower()
+                             for w in ["open", "can fly", "large enough"])
+    }
+```
+
+#### VLM 的调用频率
+
+VLM 推理速度慢（本地 LLaVA ~500ms，API ~1-2s），不能每步都调用：
+
+| 调用时机 | 原因 |
+|---------|------|
+| YOLO 检测到 door_open 且 depth 确认可穿越时 | 最终确认，防止误检 |
+| 绕飞一圈没找到入口时 | VLM 可能发现 YOLO 漏检的非标准入口 |
+| YOLO 检测结果和 depth 矛盾时 | YOLO 说有门但 depth 说是平面 → VLM 仲裁 |
+| 首次到达房屋附近时（1 次） | 获取房屋整体外观描述 |
+
+**不调用 VLM 的情况**：
+- 正常绕飞没检测到入口 → 不需要 VLM
+- YOLO 说 door_closed + depth 确认是平面 → 明确关门，不需要 VLM
+
+---
+
+### 融合决策模块
+
+三个模态的结果汇总到一个决策函数：
+
+```python
+def fuse_entry_decision(yolo_result, depth_result, vlm_result=None, uav_pose=None, houses_config=None, target_house_id=None):
+    """
+    融合三种模态的入口检测结果，做出最终决策。
+
+    决策优先级：
+    1. 坐标验证（一票否决：不在目标房屋范围 → 忽略）
+    2. depth 可穿越性（一票否决：有障碍 → blocked）
+    3. YOLO + VLM 入口确认（综合判断）
+    """
+
+    # === 第 0 层：坐标验证 ===
+    if uav_pose and houses_config and target_house_id:
+        in_target, reason = verify_door_belongs_to_target(
+            uav_pose, houses_config, target_house_id
+        )
+        if not in_target:
+            return {
+                "decision": "ignore",
+                "reason": reason,
+                "confidence": 1.0
+            }
+
+    # === 第 1 层：距离判断 ===
+    if depth_result and depth_result["distance_cm"] > 500:
+        return {
+            "decision": "approach",
+            "reason": f"入口距离 {depth_result['distance_cm']:.0f}cm，继续靠近",
+            "confidence": 0.8
+        }
+
+    # === 第 2 层：depth 可穿越性（一票否决） ===
+    if depth_result and depth_result.get("has_obstacle"):
+        return {
+            "decision": "blocked",
+            "reason": f"入口后方有障碍物 (depth={depth_result['center_depth_cm']:.0f}cm)",
+            "confidence": 0.9
+        }
+
+    if depth_result and not depth_result.get("size_sufficient"):
+        return {
+            "decision": "too_small",
+            "reason": f"开口太小 ({depth_result['estimated_width_cm']:.0f}×{depth_result['estimated_height_cm']:.0f}cm)",
+            "confidence": 0.85
+        }
+
+    # === 第 3 层：YOLO + depth + VLM 综合判断 ===
+    confidence = 0.0
+    reasons = []
+
+    # YOLO 贡献
+    if yolo_result:
+        cls = yolo_result.get("class", "")
+        yolo_conf = yolo_result.get("confidence", 0)
+        if cls == "door_open":
+            confidence += 0.4 * yolo_conf
+            reasons.append(f"YOLO: door_open ({yolo_conf:.2f})")
+        elif cls == "opening":
+            confidence += 0.3 * yolo_conf
+            reasons.append(f"YOLO: opening ({yolo_conf:.2f})")
+        elif cls == "window":
+            confidence += 0.2 * yolo_conf
+            reasons.append(f"YOLO: window ({yolo_conf:.2f})")
+
+    # depth 贡献
+    if depth_result and depth_result.get("traversable"):
+        confidence += 0.35
+        reasons.append(f"depth: 可穿越 (距离{depth_result['distance_cm']:.0f}cm, "
+                      f"宽{depth_result['estimated_width_cm']:.0f}cm)")
+
+    # VLM 贡献
+    if vlm_result:
+        if vlm_result.get("mentions_open"):
+            confidence += 0.25
+            reasons.append("VLM: 确认入口开放")
+        if vlm_result.get("mentions_obstacle"):
+            confidence -= 0.15
+            reasons.append("VLM: 提到障碍物")
+
+    # 最终决策
+    if confidence >= 0.7:
+        decision = "enter"
+    elif confidence >= 0.4:
+        decision = "approach"  # 有可能，再靠近看看
+    else:
+        decision = "skip"  # 置信度太低，继续绕飞
+
+    return {
+        "decision": decision,
+        "confidence": round(min(confidence, 1.0), 3),
+        "reasons": reasons,
+        "yolo": yolo_result,
+        "depth": depth_result,
+        "vlm": vlm_result
+    }
+```
+
+#### 融合决策示例
+
+```
+场景 1：正常进入
+  YOLO: door_open (conf=0.92) → +0.37
+  depth: 可穿越, 距离 180cm, 宽 120cm → +0.35
+  VLM: "正前方有一扇打开的木门，足够宽" → +0.25
+  总分: 0.97 → decision = "enter" ✓
+
+场景 2：看到门但有障碍
+  YOLO: door_open (conf=0.85) → +0.34
+  depth: 门后 50cm 处有障碍物 → 一票否决
+  → decision = "blocked" ✗
+
+场景 3：YOLO 没检测到，但 VLM 发现
+  YOLO: 无检测 → +0
+  depth: 右侧区域有深度变化 → 不确定
+  VLM: "右侧墙壁有一个较大的破洞，看起来可以通过" → +0.25
+  总分: 0.25 → decision = "approach"（靠近确认）
+
+场景 4：看到窗户
+  YOLO: window (conf=0.88) → +0.18
+  depth: 可穿越, 距离 200cm, 宽 90cm → +0.35
+  VLM: "窗户完全打开，无纱窗" → +0.25
+  总分: 0.78 → decision = "enter" ✓
+```
+
+---
+
+### 完整探索流程
 
 ```
 UAV 到达目标房屋的 approach_radius 范围内
   │
   ▼
 切换 stage_label = "house_circling"
-加载 Phase 2 入口检测模型
+加载 Phase 2 入口检测 YOLO 模型
   │
   ▼
 绕房屋飞行，每步：
   │
   ├── ① 拍 RGB + depth
   │
-  ├── ② YOLO 入口检测：
-  │     检测到 door_open → 候选入口
-  │     检测到 door_closed → 记录，但不是入口
-  │     检测到 window → 记录，辅助定位
+  ├── ② YOLO 入口检测（每步都跑，≤ 8ms）
+  │     检测到 door_open / window / opening → 候选入口
+  │     检测到 door_closed → 记录，跳过
   │     什么都没检测到 → 继续绕飞
   │
-  ├── ③ 如果检测到 door_open：
+  ├── ③ 如果有候选入口：
   │     │
-  │     ├── 坐标验证：UAV 当前在 target_house bbox 内？
-  │     │   → 不在 → 忽略（可能看到邻居房屋的门）
-  │     │   → 在 → 继续判断
+  │     ├── 坐标验证：UAV 在 target_house bbox 内？
+  │     │   → 不在 → 忽略（可能是邻居的门）
   │     │
-  │     ├── depth 判断门距：
-  │     │   → depth 中心区域 > 250cm → 继续靠近
-  │     │   → depth 中心区域 ≤ 250cm → 已经够近
+  │     ├── depth 深度分析：
+  │     │   → 距离、开口尺寸、可穿越性
   │     │
-  │     ├── depth 判断可通过性：
-  │     │   → 门框区域 depth 连续（无障碍物）→ 可穿越
-  │     │   → 门框区域有近距障碍 → 不可穿越
+  │     ├── 如果 YOLO 高置信度 + depth 确认可穿越：
+  │     │   → 调用 VLM 做最终确认（仅此时调用，控制频率）
   │     │
-  │     └── 对齐判断：
-  │         → door bbox 中心偏离画面中心 > 15% → 调整偏航
-  │         → door bbox 太小（< 25% 画面宽度）→ 继续靠近
-  │         → 全部满足 → 可以进入 ✓
+  │     └── 融合决策：
+  │         → "enter" (≥0.7) → 进入流程
+  │         → "approach" (0.4-0.7) → 靠近再判断
+  │         → "blocked" → 标记，找下一个
+  │         → "skip" (<0.4) → 继续绕飞
   │
-  └── ④ 进入条件全部满足：
-        → 切换 stage_label = "approaching_entry" → "entering"
-        → 前进穿过门框
+  ├── ④ decision = "enter"：
+  │     → 调整偏航对齐入口中心
+  │     → 切换 stage_label = "entering"
+  │     → 前进穿过入口
+  │
+  └── ⑤ decision = "approach"：
+        → 朝候选入口方向靠近
+        → 下一步重新检测+分析
 
 绕飞一整圈没找到入口：
-  → 标记该房屋暂时无法进入
-  → 尝试下一栋 unexplored 房屋
-```
-
-### 入口条件判断（纯规则，不训练）
-
-```python
-def check_entry_condition(door_det, depth_frame, frame_width, frame_height):
-    """
-    判断检测到的门是否满足进入条件。
-    结合 YOLO 检测结果和 depth 信息。
-
-    返回: ("enter" | "approach" | "reposition" | "blocked", 原因)
-    """
-    bbox = door_det["bbox"]  # [x1, y1, x2, y2]
-    bbox_cx = (bbox[0] + bbox[2]) / 2
-    bbox_cy = (bbox[1] + bbox[3]) / 2
-    bbox_w = bbox[2] - bbox[0]
-
-    # 1. 门距判断（depth）
-    # 取门框区域的 depth 中位值
-    door_region = depth_frame[
-        int(bbox[1]):int(bbox[3]),
-        int(bbox[0]):int(bbox[2])
-    ]
-    door_distance_cm = np.percentile(door_region, 20)
-
-    if door_distance_cm > 250:
-        return "approach", f"门距 {door_distance_cm:.0f}cm，继续靠近"
-
-    # 2. 对齐判断
-    cx_offset = abs(bbox_cx - frame_width / 2) / (frame_width / 2)
-    if cx_offset > 0.15:
-        return "reposition", f"门偏离中心 {cx_offset:.1%}，调整偏航"
-
-    # 3. 门框大小判断
-    bbox_w_ratio = bbox_w / frame_width
-    if bbox_w_ratio < 0.25:
-        return "approach", f"门框太小（{bbox_w_ratio:.1%}），继续靠近"
-
-    # 4. 可穿越性判断（depth 连续性）
-    # 门框中心区域的 depth 应该大于门框周围（说明门后是空间）
-    door_center_depth = np.median(door_region[
-        door_region.shape[0]//4 : 3*door_region.shape[0]//4,
-        door_region.shape[1]//4 : 3*door_region.shape[1]//4
-    ])
-    if door_center_depth < 80:  # 门后 80cm 内有障碍
-        return "blocked", f"门后有障碍物（depth {door_center_depth:.0f}cm）"
-
-    return "enter", "所有条件满足，可以进入"
-```
-
-### 目标房屋门的验证
-
-检测到的门可能属于邻居房屋。验证方法：
-
-```python
-def verify_door_belongs_to_target(uav_pose, houses_config, target_house_id):
-    """
-    坐标判断：UAV 当前是否在目标房屋范围内。
-    Phase 2 只在目标房屋范围内时才响应 door 检测。
-    """
-    x, y = uav_pose["x"], uav_pose["y"]
-    target = next(h for h in houses_config["houses"]
-                  if h["house_id"] == target_house_id)
-    bbox = target["bbox"]
-
-    in_target = (bbox["x_min"] <= x <= bbox["x_max"]
-                 and bbox["y_min"] <= y <= bbox["y_max"])
-
-    if not in_target:
-        return False, "UAV 不在目标房屋范围内，忽略门检测"
-    return True, "确认在目标房屋范围内"
+  → VLM 分析整圈的帧，看是否有遗漏的非标准入口
+  → 如果确实没有 → 标记该房屋暂时无法进入
+  → 选下一栋 unexplored 房屋
 ```
 
 ### 蒸馏特征输出
@@ -1843,22 +1075,45 @@ def verify_door_belongs_to_target(uav_pose, houses_config, target_house_id):
 Phase 2 为 Phase 5 蒸馏提供以下特征：
 
 ```
-门感知特征（5维）：
-  door_detected              ← 检测到 door_open（0/1）
-  door_confidence            ← 检测置信度（0-1）
-  door_distance_norm         ← depth 测量的门距归一化（/500cm）
-  door_alignment_norm        ← 门中心偏移归一化（/0.5）
-  door_traversable           ← 可穿越判断（0/1）
+入口感知特征（8维）：
+  entry_detected              ← 检测到可进入入口（0/1）
+  entry_type                  ← 类型编码：door=1, window=0.7, opening=0.5, none=0
+  entry_confidence            ← YOLO 检测置信度（0-1）
+  entry_distance_norm         ← depth 距离归一化（/500cm）
+  entry_alignment_norm        ← 入口中心偏移归一化（/0.5）
+  entry_traversable           ← depth 可穿越判断（0/1）
+  entry_size_ratio            ← 开口尺寸 / UAV 尺寸（>1 = 够大）
+  fusion_confidence           ← 三模态融合置信度（0-1）
 ```
+
+总计 **8 维**。
+
+---
+
+### 验证流程
+
+| 验证项 | 通过标准 |
+|--------|---------|
+| YOLO door_open mAP@0.5 | ≥ 0.85 |
+| YOLO door_open recall | ≥ 0.90 |
+| YOLO opening recall | ≥ 0.75 |
+| depth 可穿越性判断准确率 | ≥ 90% |
+| 融合决策准确率 | ≥ 85%（对比人工标注的"正确入口"） |
+| VLM 入口确认准确率 | ≥ 80% |
+| 误进入率（blocked/too_small 的入口还是进了） | ≤ 5% |
+| 绕飞一圈找到入口的成功率 | ≥ 90%（有入口的房屋） |
+
+---
 
 ### 交付物
 
-- [ ] Phase 2 入口检测 YOLO 模型训练数据（475 张，3 类：door_open/door_closed/window）
-- [ ] Phase 2 YOLO 模型权重 `entry_detector_v1/best.pt`
-- [ ] 入口条件判断函数 `check_entry_condition()`
-- [ ] 目标房屋门验证函数 `verify_door_belongs_to_target()`
-- [ ] 绕房屋探索入口的策略脚本
-- [ ] 检测效果可视化报告
+- [ ] YOLO 入口检测模型训练数据（~495 张，4 类：door_open/door_closed/window/opening）
+- [ ] YOLO 模型权重 `entry_detector_v1/best.pt`
+- [ ] depth 分析模块 `entry_depth_analyzer.py`
+- [ ] VLM 入口确认模块 `vlm_entry_confirmer.py`
+- [ ] 融合决策模块 `entry_fusion_decision.py`
+- [ ] 绕房屋探索策略脚本 `house_circling_explorer.py`
+- [ ] 检测效果可视化报告（含三模态融合示例）
 
 ---
 
@@ -2130,8 +1385,8 @@ python train_reflex_policy.py \
 ### 与之前各 Phase 的关系
 
 ```
-Phase 1 的输出 → building 检测 + 方向匹配（11维）──┐
-Phase 2 的输出 → door/depth 感知（5维）            ─┤
+Phase 1 的输出 → 坐标定位（6维）                   ─┐
+Phase 2 的输出 → 入口感知：YOLO+depth+VLM（8维）   ─┤
 Phase 3 的轨迹 → outdoor_nav 标签数据              ─┤──► 蒸馏网络输入
 Phase 4 的轨迹 → indoor 标签数据                   ─┤
 server 提供     → pose, depth, risk                ─┘
@@ -2140,7 +1395,7 @@ server 提供     → pose, depth, risk                ─┘
 ### 蒸馏网络架构
 
 ```
-输入层（30维特征向量）
+输入层（28维特征向量）
    │
    ▼
 隐藏层 1 (64 neurons, ReLU)
@@ -2155,7 +1410,7 @@ server 提供     → pose, depth, risk                ─┘
    └──► 安全头 (1维 sigmoid → 碰撞风险 0-1)
 ```
 
-#### 输入特征定义（30维）
+#### 输入特征定义（28维）
 
 ```
 坐标定位特征（6维，确定性，来自 Phase 1）：
@@ -2166,21 +1421,15 @@ server 提供     → pose, depth, risk                ─┘
   is_inside                      ← 是否在室内（0/1）
   target_approach_progress       ← 接近目标的进度（0-1）
 
-YOLO building 特征（3维，概率性，来自 Phase 1）：
-  yolo_building_detected         ← 当前帧检测到 building（0/1）
-  yolo_building_confidence       ← building 最高置信度（0-1）
-  yolo_building_count            ← building 数量（归一化 /5）
-
-方向匹配特征（2维，确定性，来自 Phase 1）：
-  direction_match_confirmed      ← 方向匹配确认看到目标房屋（0/1）
-  nearest_building_bearing_error ← 最近 building 与目标方位角误差（归一化 /180°）
-
-门感知特征（5维，来自 Phase 2）：
-  door_detected                  ← 检测到 door_open（0/1）
-  door_confidence                ← 检测置信度（0-1）
-  door_distance_norm             ← depth 门距归一化（/500cm）
-  door_alignment_norm            ← 门中心偏移归一化（/0.5）
-  door_traversable               ← 可穿越判断（0/1）
+入口感知特征（8维，来自 Phase 2 多模态融合）：
+  entry_detected                 ← 检测到可进入入口（0/1）
+  entry_type                     ← 类型编码：door=1, window=0.7, opening=0.5, none=0
+  entry_confidence               ← YOLO 检测置信度（0-1）
+  entry_distance_norm            ← depth 距离归一化（/500cm）
+  entry_alignment_norm           ← 入口中心偏移归一化（/0.5）
+  entry_traversable              ← depth 可穿越判断（0/1）
+  entry_size_ratio               ← 开口尺寸 / UAV 尺寸
+  fusion_confidence              ← 三模态融合置信度（0-1）
 
 室内搜索特征（6维）：
   front_min_depth_norm           ← 前向最近深度归一化（/300cm）
@@ -3136,7 +2385,7 @@ archive_cell_id         ← archive cell 索引
 | 训练阶段 | 使用的现有文件 | 新建文件 |
 |---------|--------------|---------|
 | Phase 0 数据采集 | `uav_control_server_basic.py`, `uav_control_panel_basic.py` | `collect_training_data.py` |
-| Phase 1 房屋确认 | — | `phase1_scan.py`, `direction_house_matcher.py`, `house_locator.py`, `search_status_manager.py`, `phase1_building_detector.yaml` |
+| Phase 1 地图标记+定位 | — | `house_locator.py`, `search_status_manager.py`, `houses_config.json` |
 | Phase 2 入口探索 | — | `check_entry_condition.py`, `verify_door_belongs_to_target.py`, `phase2_entry_detector.yaml` |
 | Phase 3 跨房屋导航 | — | `rule_based_house_navigator.py` |
 | Phase 4 室内搜索 | `reflex_policy_model.py`, `train_reflex_policy.py`, `reflex_dataset_builder.py` | 扩展 `FEATURE_NAMES` |
