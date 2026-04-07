@@ -20,6 +20,7 @@
 | [`phase1_map_marking.md`](phase1_map_marking.md) | Phase 1 | 地图标定、房屋坐标与定位 |
 | [`phase2_entry_discovery.md`](phase2_entry_discovery.md) | Phase 2 | 多模态入口发现与融合判断 |
 | [`phase2_5_entry_skill_rl.md`](phase2_5_entry_skill_rl.md) | Phase 2.5 | 局部门进入、静态避障、技能学习 |
+| [`phase2_5_training_eval_plan.md`](phase2_5_training_eval_plan.md) | Phase 2.5+ | 训练、验证与 TMM 实验设计 |
 | [`phase3_navigation.md`](phase3_navigation.md) | Phase 3 | 跨房屋导航 |
 | [`phase4_indoor_search.md`](phase4_indoor_search.md) | Phase 4 | 室内搜索与确认 |
 | [`phase5_distillation.md`](phase5_distillation.md) | Phase 5 | 轨迹蒸馏与轻量策略 |
