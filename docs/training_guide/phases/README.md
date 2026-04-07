@@ -1,46 +1,66 @@
-# UAV-Flow 训练流水线文档（分阶段）
+# UAV-Flow 训练阶段文档索引
 
-> 源文件：[`full_training_pipeline.md`](../full_training_pipeline.md)（完整版，未删除）
+> 源文档：[`../full_training_pipeline.md`](../full_training_pipeline.md)
 
-## 文档结构
+## 说明
 
-| 文件 | 内容 | 行数 |
-|------|------|------|
-| [`00_overview.md`](00_overview.md) | 任务定义、训练链路、模块依赖 | 69 |
-| [`phase0_environment.md`](phase0_environment.md) | 环境准备与数据基础设施 | 107 |
-| [`phase1_map_marking.md`](phase1_map_marking.md) | 地图标记与坐标定位（轻量化） | 396 |
-| [`phase2_entry_discovery.md`](phase2_entry_discovery.md) | **入口探索——多模态融合（核心创新）** | 2020 |
-| [`phase3_navigation.md`](phase3_navigation.md) | 跨房屋导航策略训练 | 91 |
-| [`phase4_indoor_search.md`](phase4_indoor_search.md) | 单房屋室内搜索策略训练（BC） | 164 |
-| [`phase5_distillation.md`](phase5_distillation.md) | 多房屋任务调度蒸馏（28维 MLP） | 151 |
-| [`phase6_online_finetune.md`](phase6_online_finetune.md) | 在线微调与数据飞轮 | 45 |
-| [`07_data_spec.md`](07_data_spec.md) | 训练数据规范 | 61 |
-| [`08_metrics.md`](08_metrics.md) | 评价指标体系 | 28 |
-| [`09_hardware.md`](09_hardware.md) | 硬件与时间估算 | 26 |
-| [`10_troubleshooting.md`](10_troubleshooting.md) | 常见问题与调试策略 | 57 |
-| [`11_tmm_experiment.md`](11_tmm_experiment.md) | 论文实验计划（IEEE TMM） | 543 |
-| [`12_planner_executor.md`](12_planner_executor.md) | Planner-Driven 自主探索执行器 | 281 |
-| [`13_upgrade_roadmap.md`](13_upgrade_roadmap.md) | 系统升级路线图 | 118 |
-| [`14_appendix.md`](14_appendix.md) | 附录：关键文件对照 | 12 |
+这个目录将完整训练流水线拆成按阶段阅读和执行的独立文档，便于：
 
-## Phase 2 内部结构（核心文档）
+- 按阶段推进实现
+- 单独维护某一阶段的方法设计
+- 论文写作时引用对应模块
+- 后续继续插入中间阶段而不破坏总流程
 
-Phase 2 是最大的文档（2020 行），内部按 Step A-G 组织：
+## 阶段文档
 
-```
-Step A：YOLO 训练数据采集（手动截图，不需要坐标/depth）
-Step B：YOLO 入口检测训练（Roboflow 标注 + YOLOv8n）
-── YOLO 训练完成分界线 ──
-Step C：Depth 分析模块（在线验证）
-Step D：VLM 部署与 Prompt 调优（LLaVA / GPT-4o）
-Step E：融合决策模块（Rule-based + MLP + Attention）
-Step F：绕飞策略与入口进入
-Step G：集成测试与端到端验证
-```
+| 文件 | 主题 | 说明 |
+|---|---|---|
+| [`00_overview.md`](00_overview.md) | 总览 | 任务定义、模块关系、整体流程 |
+| [`phase0_environment.md`](phase0_environment.md) | Phase 0 | 环境准备与基础数据设施 |
+| [`phase1_map_marking.md`](phase1_map_marking.md) | Phase 1 | 地图标定、房屋坐标与定位 |
+| [`phase2_entry_discovery.md`](phase2_entry_discovery.md) | Phase 2 | 多模态入口发现与融合判断 |
+| [`phase2_5_entry_skill_rl.md`](phase2_5_entry_skill_rl.md) | Phase 2.5 | 局部门进入、静态避障、技能学习 |
+| [`phase3_navigation.md`](phase3_navigation.md) | Phase 3 | 跨房屋导航 |
+| [`phase4_indoor_search.md`](phase4_indoor_search.md) | Phase 4 | 室内搜索与确认 |
+| [`phase5_distillation.md`](phase5_distillation.md) | Phase 5 | 轨迹蒸馏与轻量策略 |
+| [`phase6_online_finetune.md`](phase6_online_finetune.md) | Phase 6 | 在线微调与迭代 |
 
-## 阅读建议
+## 支撑文档
 
-- 快速了解全局 → `00_overview.md`
-- 开始实施 → 按 Phase 0 → 1 → 2 → ... 顺序
-- 写论文 → `11_tmm_experiment.md` + `phase2_entry_discovery.md`
-- 当前重点 → `phase2_entry_discovery.md`（核心创新）
+| 文件 | 主题 |
+|---|---|
+| [`07_data_spec.md`](07_data_spec.md) | 数据格式规范 |
+| [`08_metrics.md`](08_metrics.md) | 评价指标 |
+| [`09_hardware.md`](09_hardware.md) | 硬件与时间估算 |
+| [`10_troubleshooting.md`](10_troubleshooting.md) | 常见问题与调试 |
+| [`11_tmm_experiment.md`](11_tmm_experiment.md) | 论文实验计划 |
+| [`12_planner_executor.md`](12_planner_executor.md) | Planner-Driven 执行器设计 |
+| [`13_upgrade_roadmap.md`](13_upgrade_roadmap.md) | 升级路线图 |
+| [`14_appendix.md`](14_appendix.md) | 附录 |
+
+## 当前推荐阅读顺序
+
+1. [`00_overview.md`](00_overview.md)
+2. [`phase0_environment.md`](phase0_environment.md)
+3. [`phase1_map_marking.md`](phase1_map_marking.md)
+4. [`phase2_entry_discovery.md`](phase2_entry_discovery.md)
+5. [`phase2_5_entry_skill_rl.md`](phase2_5_entry_skill_rl.md)
+6. [`phase3_navigation.md`](phase3_navigation.md)
+7. [`phase4_indoor_search.md`](phase4_indoor_search.md)
+8. [`phase5_distillation.md`](phase5_distillation.md)
+9. [`phase6_online_finetune.md`](phase6_online_finetune.md)
+
+## Phase 2.5 的定位
+
+新增的 Phase 2.5 位于：
+
+- Phase 2 感知融合之后
+- Phase 3 / Phase 4 执行动作之前
+
+它不负责“找哪一栋房子”，也不负责“室内完整寻人”，而是单独学习一个局部技能：
+
+- 发现可进入入口后，如何接近入口
+- 前方有静态障碍时，如何绕行
+- 对齐门洞后，如何稳定进入
+
+它也是后续 Phase 5 蒸馏的重要 teacher 来源。

@@ -50,15 +50,20 @@ UAV-Flow-Eval/captures_manual/
 UAV-Flow-Eval/captures_remote/
 UAV-Flow-Eval/debug.jpg
 UAV-Flow-Eval/results/
+UAV-Flow-Eval/gym_unrealcv/
 UAV-Flow-Eval/__pycache__
 
 # Local Unreal environment binaries and saved data
 UnrealEnv/
 captures_remote
 phase1_yolo26_training
+phase2_modality2_depth_analysis
+phase2_door_or_window_yolo26_training
+phase2_multimodal_fusion_analysis
 phase3_dataset_export
 phase3_online_eval
 phase4_search_logs
 phase4_takeover_logs
 phase6_prompt_logs
 runs
+door_or_window_dataset
