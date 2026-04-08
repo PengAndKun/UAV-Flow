@@ -2,13 +2,21 @@
 
 ## 1. 整体流程
 
-建议训练流程分成 5 步：
+建议把这一条路线拆成 5 步，而不是直接端到端硬训：
 
 1. 训练基础感知模块
 2. 构建融合判断器
-3. 构建 LLM-guided teacher
+3. 构建 `LLM-guided teacher`
 4. 训练局部技能策略
 5. 蒸馏成轻量执行器
+
+这五步里，真正决定“这篇论文是不是成立”的关键点是：
+
+- Step B：融合判断要稳定
+- Step C：LLM teacher 要真的能提供有效 guidance
+- Step D：局部策略要能把 guidance 变成动作能力
+
+---
 
 ## 2. Step A：基础感知模块
 
@@ -41,56 +49,307 @@
 - `best_entry.opening_width_cm`
 - `best_entry.traversable`
 
+### 2.3 你当前完成情况
+
+这一部分你已经基本完成：
+
+- `YOLO26` 训练链已经有了
+- `Phase 2 模态 2 深度分析` 已经有了
+- 单张图的入口距离、开口宽度、可穿越性、前障碍判断都已经能跑
+
+所以 Step A 基本可以认为是：
+
+- **已完成（可继续调优，但不再是主阻塞）**
+
+---
+
 ## 3. Step B：融合判断器
 
-把 YOLO 和 depth 结果融合成高层状态：
+把 YOLO 和 depth 结果融合成高层状态，例如：
 
 - `enterable_open_door`
 - `front_blocked_detour`
 - `window_visible_keep_search`
 - `no_entry_confirmed`
 
-这一阶段建议优先使用：
+### 3.1 推荐实现方式
 
-- rule-based fusion
+当前阶段建议继续优先使用：
+
+- `rule-based fusion`
 
 原因：
 
 - 可解释
 - 易调试
-- 适合作为后续 RL 和 LLM 的基础
+- 很适合作为 RL 和 LLM 的基础 teacher
+
+### 3.2 推荐规则优先级
+
+建议保持：
+
+1. 先看 `front_obstacle`
+2. 再看语义类别
+3. 最后看局部可穿越几何
+
+### 3.3 你当前完成情况
+
+这一部分你也已经基本做出来了：
+
+- `YOLO + depth + fusion` 已经可以输出统一 `fusion_result.json`
+- 你已经发现并修正了一个很关键的问题：
+  - **前障碍应该优先于门洞可穿越性**
+
+所以 Step B 当前状态可以认为是：
+
+- **已完成第一版**
+- 后面主要是继续收规则与统计验证集表现
+
+---
 
 ## 4. Step C：LLM-guided teacher
 
-### 4.1 输入
+这一部分是你现在最需要补细节的地方。
+
+一句话先说清楚：
+
+- 这一步不是“让 LLM 最终在线控飞”
+- 而是“让 LLM 成为高层 guide 和 teacher”
+
+### 4.1 Step C 的目标
+
+给定：
 
 - RGB
 - depth preview
 - YOLO 检测摘要
 - 深度分析摘要
 - 融合判断结果
-- 当前位姿
+- 当前位姿 / 历史
 
-### 4.2 输出
+LLM 需要输出：
 
-- `subgoal`
-- `action_hint`
-- `reason`
+- 当前局部子任务 `subgoal`
+- 当前动作提示 `action_hint`
+- 解释 `reason`
+- 可选：一个短期 waypoint hint
 
 例如：
 
-- `detour_left`
-- `approach_entry`
-- `cross_entry`
 - `keep_search`
+- `approach_entry`
+- `detour_left`
+- `detour_right`
+- `cross_entry`
+- `backoff_and_reobserve`
 
-### 4.3 建议角色
+### 4.2 Step C 不是在学什么
 
-LLM 不直接做最终控飞，而是：
+Step C 不应该直接承担：
 
-- 作为 baseline
-- 作为 teacher
-- 作为 high-level guide
+- 最终低层动作控制
+- 长时间连续闭环控制
+- 高频避障执行
+
+这些属于：
+
+- Step D 局部技能策略
+- 或最终蒸馏后的 student policy
+
+### 4.3 Step C 推荐输入格式
+
+建议 LLM 的输入分成三部分。
+
+#### A. 原始视觉输入
+
+- RGB
+- depth preview
+
+说明：
+
+- RGB 提供语义
+- depth preview 提供人可读的几何轮廓
+
+#### B. 结构化摘要
+
+把融合结果压成文字或 JSON，建议包含：
+
+- `front_obstacle.present`
+- `front_obstacle.front_min_depth_cm`
+- `front_obstacle.severity`
+- `best_entry.entry_distance_cm`
+- `best_entry.opening_width_cm`
+- `best_entry.traversable`
+- `semantic.class_name`
+- `semantic.confidence`
+- `fusion.final_entry_state`
+- `fusion.match_score`
+
+#### C. 控制上下文
+
+- 当前 UAV yaw
+- 过去 2 到 4 步动作
+- 当前 target house id
+- 当前是否已经在目标房屋前
+
+### 4.4 Step C 推荐输出 schema
+
+建议你把 LLM 输出强制收成固定 schema，例如：
+
+```json
+{
+  "subgoal": "approach_entry",
+  "action_hint": "yaw_right_small",
+  "waypoint_hint": "shift_to_entry_center",
+  "risk_level": "low",
+  "reason": "Open door is visible and traversable; no severe front obstacle.",
+  "confidence": 0.82
+}
+```
+
+推荐字段：
+
+- `subgoal`
+- `action_hint`
+- `waypoint_hint`
+- `risk_level`
+- `reason`
+- `confidence`
+
+### 4.5 Step C 实际开发顺序
+
+建议按下面顺序做，不要一步到位：
+
+#### C-1：先做 standalone 验证
+
+先不要接训练环境，先做独立脚本：
+
+- 给一张 RGB
+- 给一张 depth preview
+- 给一段结构化摘要
+- 看 LLM 输出是否稳定
+
+你仓库里这部分已经有基础：
+
+- [vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/vlm_scene_descriptor.py)
+- [anthropic_vlm_scene_descriptor.py](/E:/github/UAV-Flow/UAV-Flow-Eval/anthropic_vlm_scene_descriptor.py)
+
+所以这一步你其实已经有雏形了。
+
+#### C-2：做 prompt 和 schema 固化
+
+你现在最该补的是：
+
+- 固定 Step C 专用 prompt
+- 固定输出 schema
+- 固定日志保存格式
+
+也就是每次 teacher 推理都保存：
+
+- 输入图片路径
+- 输入摘要 JSON
+- prompt
+- raw reply
+- parsed reply
+
+#### C-3：做小规模人工验收集
+
+找一批典型样本，人工标：
+
+- 该不该靠近
+- 该不该绕行
+- 是门还是窗
+- 是不是该继续搜索
+
+然后看 LLM 输出是否符合人工判断。
+
+#### C-4：接入 teacher 数据采集
+
+当 Step C 输出稳定后，把它接到 teacher 轨迹采集里。
+
+每步保存：
+
+- observation
+- fusion state
+- llm guidance
+- final executed action
+
+这样后面 BC 和蒸馏都能直接用。
+
+### 4.6 Step C 的三种角色
+
+建议明确区分：
+
+#### 角色 1：Pure LLM baseline
+
+这是实验组，不是最终部署方案。
+
+作用：
+
+- 证明完全靠 LLM 也能给出一部分合理判断
+- 同时也暴露它的延迟和不稳定
+
+#### 角色 2：LLM guide
+
+这是更实用的形式。
+
+作用：
+
+- 给局部策略提供 `subgoal/action_hint`
+- 不直接控每一步
+
+#### 角色 3：Teacher
+
+这是最重要的角色。
+
+作用：
+
+- 生成高质量轨迹标签
+- 后续蒸馏成 student policy
+
+### 4.7 Step C 的 done 标准
+
+我建议你把 Step C 的完成条件定义成：
+
+1. 对固定样本集，LLM 输出 schema 稳定
+2. `subgoal/action_hint` 与人工判断大体一致
+3. 同一类样本不会频繁反复输出冲突决策
+4. 已经可以把结果写入 teacher 轨迹
+
+只要满足这 4 条，就可以认为：
+
+- Step C 第一版完成
+
+### 4.8 你当前到底做到哪了
+
+按你现在仓库状态，我的判断是：
+
+#### 已完成
+
+- 有 standalone VLM/LLM 推理入口
+- 有 Anthropic 路线
+- 有 prompt log 保存
+- 有多模态 scene descriptor 雏形
+
+#### 部分完成
+
+- 已经能“看图 + depth preview + 输出结构化判断”
+- 但还没有把它真正固化成 **Phase 2.5 teacher schema**
+
+#### 还没完成
+
+- 还没有形成稳定的：
+  - `subgoal`
+  - `action_hint`
+  - `teacher dataset export`
+- 还没有把 LLM guidance 系统性接入 BC / PPO 数据采集
+
+所以结论是：
+
+- **前面的 Step A / B 基本完成了**
+- **Step C 有基础，但还没有完成成“可训练 teacher”形态**
+
+---
 
 ## 5. Step D：局部技能策略训练
 
@@ -132,9 +391,11 @@ LLM 不直接做最终控飞，而是：
 
 推荐：
 
-1. 规则 teacher + LLM hint 采集轨迹
+1. `fusion rule + LLM teacher` 采集轨迹
 2. BC 初始化
 3. PPO 微调
+
+---
 
 ## 6. Step E：蒸馏
 
@@ -159,6 +420,8 @@ teacher 可以是：
 - 最终在线执行器
 - 供高层 agent 调用
 
+---
+
 ## 7. 奖励函数建议
 
 ### 正奖励
@@ -174,6 +437,8 @@ teacher 可以是：
 - 高障碍前继续硬冲
 - 长时间无进展
 
+---
+
 ## 8. 课程学习建议
 
 建议四阶段：
@@ -183,9 +448,11 @@ teacher 可以是：
 3. 门窗混淆
 4. 远距离入口接近
 
+---
+
 ## 9. 最终输出
 
-这一训练流程最终应该产出三类模型：
+这一训练流程最终应该产出三类模型或模块：
 
 1. `fusion model / fusion rules`
 2. `LLM-guided teacher`

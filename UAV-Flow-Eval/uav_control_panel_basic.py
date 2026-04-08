@@ -4,9 +4,11 @@ import argparse
 import json
 import logging
 import os
+import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog
 from typing import Any, Dict, List, Optional
 from urllib import request
@@ -16,6 +18,15 @@ import numpy as np
 from PIL import Image, ImageTk
 
 from map_overhead_widget import OverheadMapWidget
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from phase2_multimodal_fusion_analysis import (
+    find_latest_phase2_weights,
+    run_phase2_fusion_analysis,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,22 +48,31 @@ class Client:
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
 
-    def get_json(self, path: str) -> Dict[str, Any]:
+    def get_json(self, path: str, timeout_s: Optional[float] = None) -> Dict[str, Any]:
         req = request.Request(f"{self.base_url}{path}", method="GET")
-        with request.urlopen(req, timeout=self.timeout_s) as resp:
+        with request.urlopen(req, timeout=self.timeout_s if timeout_s is None else float(timeout_s)) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def post_json(self, path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def post_json(self, path: str, payload: Optional[Dict[str, Any]] = None, timeout_s: Optional[float] = None) -> Dict[str, Any]:
         body = json.dumps(payload or {}).encode("utf-8")
         req = request.Request(f"{self.base_url}{path}", data=body, headers={"Content-Type": "application/json"}, method="POST")
-        with request.urlopen(req, timeout=self.timeout_s) as resp:
+        with request.urlopen(req, timeout=self.timeout_s if timeout_s is None else float(timeout_s)) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def get_image(self, path: str) -> np.ndarray:
+    def get_image(self, path: str, timeout_s: Optional[float] = None) -> np.ndarray:
         req = request.Request(f"{self.base_url}{path}", method="GET")
-        with request.urlopen(req, timeout=self.timeout_s) as resp:
+        with request.urlopen(req, timeout=self.timeout_s if timeout_s is None else float(timeout_s)) as resp:
             body = resp.read()
         image = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if image is None:
+            raise RuntimeError(f"Failed to decode image from {path}")
+        return image
+
+    def get_image_unchanged(self, path: str, timeout_s: Optional[float] = None) -> np.ndarray:
+        req = request.Request(f"{self.base_url}{path}", method="GET")
+        with request.urlopen(req, timeout=self.timeout_s if timeout_s is None else float(timeout_s)) as resp:
+            body = resp.read()
+        image = cv2.imdecode(np.frombuffer(body, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
         if image is None:
             raise RuntimeError(f"Failed to decode image from {path}")
         return image
@@ -66,12 +86,30 @@ class Panel:
         self.root.title("UAV Basic Controller")
         self.root.geometry("1240x920")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+
+        self.main_canvas = tk.Canvas(self.root, highlightthickness=0)
+        self.main_scrollbar = tk.Scrollbar(self.root, orient="vertical", command=self.main_canvas.yview)
+        self.main_canvas.configure(yscrollcommand=self.main_scrollbar.set)
+        self.main_canvas.grid(row=0, column=0, sticky="nsew")
+        self.main_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.content_frame = tk.Frame(self.main_canvas)
+        self.content_window = self.main_canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
+        self.content_frame.bind("<Configure>", self._on_content_frame_configure)
+        self.main_canvas.bind("<Configure>", self._on_main_canvas_configure)
+        self.root.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.root.bind_all("<Button-4>", self._on_mousewheel_linux)
+        self.root.bind_all("<Button-5>", self._on_mousewheel_linux)
 
         self.status_var = tk.StringVar(value="Ready")
         self.pose_var = tk.StringVar(value="Pose: waiting...")
         self.depth_var = tk.StringVar(value="Depth: waiting...")
         self.control_var = tk.StringVar(value="Movement: waiting...")
         self.capture_var = tk.StringVar(value="Capture: waiting...")
+        self.fusion_summary_var = tk.StringVar(value="Fusion: idle")
+        self.fusion_dir_var = tk.StringVar(value="Fusion dir: none")
+        self.fusion_model_var = tk.StringVar(value="Fusion model: waiting...")
         self.mission_var = tk.StringVar(value="Mission: idle")
         self.current_house_var = tk.StringVar(value="Current house: none")
         self.target_house_var = tk.StringVar(value="Target: none")
@@ -81,9 +119,14 @@ class Panel:
         self.calib_var = tk.StringVar(value="Calibration: none")
         self.anchor_world_x_var = tk.StringVar(value="")
         self.anchor_world_y_var = tk.StringVar(value="")
+        self.house_set_var = tk.BooleanVar(value=False)
+        self.house_id_var = tk.StringVar(value="")
+        self.house_name_var = tk.StringVar(value="")
+        self.house_box_var = tk.StringVar(value="House Set: idle")
 
         self.task_label_var = tk.StringVar(value="")
         self.capture_label_var = tk.StringVar(value="")
+        self.phase1_settle_var = tk.StringVar(value="0.20")
         self.sequence_var = tk.StringVar(value="")
         self.sequence_delay_var = tk.StringVar(value="260")
         self.auto_state_var = tk.BooleanVar(value=True)
@@ -98,6 +141,11 @@ class Panel:
         self.depth_window: Optional[tk.Toplevel] = None
         self.depth_label: Optional[tk.Label] = None
         self.depth_photo: Optional[ImageTk.PhotoImage] = None
+        self.fusion_preview_label: Optional[tk.Label] = None
+        self.fusion_preview_photo: Optional[ImageTk.PhotoImage] = None
+        self.fusion_window: Optional[tk.Toplevel] = None
+        self.fusion_result_label: Optional[tk.Label] = None
+        self.fusion_result_photo: Optional[ImageTk.PhotoImage] = None
         self.map_window: Optional[tk.Toplevel] = None
         self.map_widget: Optional[OverheadMapWidget] = None
         self.open_map_window: Optional[tk.Toplevel] = None
@@ -107,8 +155,11 @@ class Panel:
         self.calibration_anchors: List[Dict[str, float]] = []
         self.pending_anchor_world: Optional[Dict[str, float]] = None
         self.pending_image_anchor: Optional[Dict[str, float]] = None
+        self.pending_house_rect: Optional[Dict[str, float]] = None
         self.loaded_map_image_path: str = ""
         self.loaded_map_image: Optional[np.ndarray] = None
+        self.last_fusion_overlay_path: str = ""
+        self.last_fusion_result_dir: str = ""
 
         self.manual_request_inflight = False
         self.move_request_inflight = False
@@ -125,13 +176,15 @@ class Panel:
         self.eval_dir = os.path.dirname(os.path.abspath(__file__))
         self.houses_config_path = os.path.join(self.eval_dir, "houses_config.json")
         self.default_map_path = os.path.join(self.eval_dir, "map", "qq.png")
+        self.phase2_fusion_output_root = os.path.join(PROJECT_ROOT, "phase2_multimodal_fusion_analysis", "results")
 
         self.build_ui()
+        self._refresh_default_fusion_model()
         for delay, fn in ((200, self.schedule_state_refresh), (350, self.schedule_preview_refresh), (500, self.schedule_depth_refresh), (1200, self.schedule_map_refresh)):
             self.root.after(delay, fn)
 
     def build_ui(self) -> None:
-        root = self.root
+        root = self.content_frame
         root.grid_columnconfigure(0, weight=1)
         root.grid_columnconfigure(1, weight=1)
 
@@ -151,13 +204,35 @@ class Panel:
         tk.Label(task, text="Capture Label").grid(row=1, column=0, sticky="w", padx=6, pady=6)
         tk.Entry(task, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=6, pady=6)
         tk.Button(task, text="Capture", command=self.on_capture).grid(row=1, column=2, padx=6, pady=6)
+        tk.Button(task, text="Phase1 Scan x12", command=self.on_capture_phase1_scan).grid(row=1, column=3, padx=6, pady=6)
+        tk.Label(task, text="Settle s").grid(row=1, column=4, sticky="e", padx=(10, 4), pady=6)
+        tk.Entry(task, textvariable=self.phase1_settle_var, width=8).grid(row=1, column=5, sticky="w", padx=(0, 6), pady=6)
         tk.Label(task, text="Init Pose JSON").grid(row=2, column=0, sticky="nw", padx=6, pady=6)
         self.pose_text = tk.Text(task, width=42, height=6)
         self.pose_text.grid(row=2, column=1, sticky="ew", padx=6, pady=6)
         self.pose_text.insert("1.0", json.dumps({"x": 2359.9, "y": 85.3, "z": 225.0, "yaw": -1.7}, indent=2))
         tk.Button(task, text="Set Pose", command=self.on_set_pose).grid(row=2, column=2, padx=6, pady=6, sticky="n")
 
-        move = tk.LabelFrame(left, text="Basic Movement"); move.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        fusion = tk.LabelFrame(left, text="Phase2 Fusion")
+        fusion.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        fusion.grid_columnconfigure(0, weight=1)
+        fusion.grid_columnconfigure(1, weight=1)
+        tk.Button(fusion, text="Run Fusion Analyze", command=self.on_run_phase2_fusion).grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        tk.Button(fusion, text="Open Fusion Result", command=self.open_fusion_result_window).grid(row=0, column=1, padx=6, pady=6, sticky="ew")
+        tk.Label(fusion, textvariable=self.fusion_model_var, anchor="w", justify="left").grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 2))
+        tk.Label(fusion, textvariable=self.fusion_dir_var, anchor="w", justify="left").grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 2))
+        tk.Label(
+            fusion,
+            textvariable=self.fusion_summary_var,
+            anchor="w",
+            justify="left",
+            wraplength=560,
+            font=("Consolas", 10),
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 4))
+        self.fusion_preview_label = tk.Label(fusion, text="No fusion image yet", anchor="center")
+        self.fusion_preview_label.grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+
+        move = tk.LabelFrame(left, text="Basic Movement"); move.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.movement_toggle_button = tk.Button(move, text="Enable Basic Movement", command=self.on_toggle_movement, width=24)
         self.movement_toggle_button.grid(row=0, column=0, columnspan=3, pady=(6, 10))
         for label, symbol, row, col in (
@@ -168,7 +243,7 @@ class Panel:
             tk.Button(move, text=label, command=lambda s=symbol: self.send_move_symbol(s), width=18).grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
         for col in range(3): move.grid_columnconfigure(col, weight=1)
 
-        seq = tk.LabelFrame(left, text="Sequence Control"); seq.grid(row=2, column=0, sticky="ew", pady=(0, 8)); seq.grid_columnconfigure(1, weight=1)
+        seq = tk.LabelFrame(left, text="Sequence Control"); seq.grid(row=3, column=0, sticky="ew", pady=(0, 8)); seq.grid_columnconfigure(1, weight=1)
         tk.Label(seq, text="Symbols").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         tk.Entry(seq, textvariable=self.sequence_var).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
         tk.Button(seq, text="Execute Sequence", command=self.on_execute_sequence).grid(row=0, column=2, padx=6, pady=6)
@@ -177,7 +252,7 @@ class Panel:
         tk.Button(seq, text="Stop Sequence", command=self.on_stop_sequence).grid(row=1, column=2, padx=6, pady=6)
         tk.Label(seq, text="Use w/s/a/d/r/f/q/e/x. Example: wwwqdd", anchor="w").grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
 
-        preview = tk.LabelFrame(left, text="Preview Windows"); preview.grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        preview = tk.LabelFrame(left, text="Preview Windows"); preview.grid(row=4, column=0, sticky="ew", pady=(0, 8))
         tk.Button(preview, text="Toggle RGB", command=self.toggle_preview_window, width=16).grid(row=0, column=0, padx=6, pady=6)
         tk.Button(preview, text="Refresh RGB", command=self.refresh_preview_window, width=16).grid(row=0, column=1, padx=6, pady=6)
         tk.Checkbutton(preview, text="Auto RGB", variable=self.auto_rgb_var).grid(row=0, column=2, padx=6, pady=6)
@@ -199,6 +274,26 @@ class Panel:
         tk.Button(refresh, text="Refresh State", command=self.refresh_state_once).grid(row=0, column=0, padx=6, pady=6)
         tk.Checkbutton(refresh, text="Auto State", variable=self.auto_state_var).grid(row=0, column=1, padx=6, pady=6)
         tk.Label(refresh, text=f"State interval: {self.args.state_interval_ms} ms").grid(row=0, column=2, padx=6, pady=6)
+
+    def _on_content_frame_configure(self, _event: tk.Event) -> None:
+        self.main_canvas.configure(scrollregion=self.main_canvas.bbox("all"))
+
+    def _on_main_canvas_configure(self, event: tk.Event) -> None:
+        self.main_canvas.itemconfigure(self.content_window, width=event.width)
+
+    def _on_mousewheel(self, event: tk.Event) -> None:
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            return
+        units = -int(delta / 120) if delta % 120 == 0 else (-1 if delta > 0 else 1)
+        self.main_canvas.yview_scroll(units, "units")
+
+    def _on_mousewheel_linux(self, event: tk.Event) -> None:
+        num = getattr(event, "num", None)
+        if num == 4:
+            self.main_canvas.yview_scroll(-1, "units")
+        elif num == 5:
+            self.main_canvas.yview_scroll(1, "units")
 
     def safe(self, func, *args, label: str = "Request", **kwargs):
         try:
@@ -228,6 +323,85 @@ class Panel:
         overhead = raw.get("overhead_map", {})
         return overhead if isinstance(overhead, dict) else {}
 
+    def _coerce_anchor_list(self, anchors: Any) -> List[Dict[str, float]]:
+        if not isinstance(anchors, list):
+            return []
+        restored: List[Dict[str, float]] = []
+        for index, anchor in enumerate(anchors[:5], start=1):
+            if not isinstance(anchor, dict):
+                continue
+            try:
+                restored.append(
+                    {
+                        "index": float(anchor.get("index", index)),
+                        "label": str(anchor.get("label", f"P{index}")),
+                        "world_x": float(anchor["world_x"]),
+                        "world_y": float(anchor["world_y"]),
+                        "image_x": float(anchor["image_x"]),
+                        "image_y": float(anchor["image_y"]),
+                    }
+                )
+            except Exception:
+                continue
+        return restored
+
+    def _solve_affine_from_anchors(self, anchors: List[Dict[str, float]]) -> Optional[List[List[float]]]:
+        if len(anchors) < 3:
+            return None
+        try:
+            world = np.asarray(
+                [[float(anchor["world_x"]), float(anchor["world_y"]), 1.0] for anchor in anchors],
+                dtype=np.float64,
+            )
+            image_x = np.asarray([float(anchor["image_x"]) for anchor in anchors], dtype=np.float64)
+            image_y = np.asarray([float(anchor["image_y"]) for anchor in anchors], dtype=np.float64)
+            row_x, *_ = np.linalg.lstsq(world, image_x, rcond=None)
+            row_y, *_ = np.linalg.lstsq(world, image_y, rcond=None)
+            return [
+                [float(row_x[0]), float(row_x[1]), float(row_x[2])],
+                [float(row_y[0]), float(row_y[1]), float(row_y[2])],
+            ]
+        except Exception:
+            return None
+
+    def _normalize_calibration_payload(self, payload: Any) -> Dict[str, Any]:
+        calibration = payload if isinstance(payload, dict) else {}
+        anchors = self._coerce_anchor_list(calibration.get("anchors", []))
+        affine = calibration.get("affine_world_to_image")
+        if not (isinstance(affine, list) and len(affine) == 2):
+            affine = self._solve_affine_from_anchors(anchors)
+        if not (isinstance(affine, list) and len(affine) == 2):
+            return {}
+        normalized: Dict[str, Any] = {
+            "anchors": anchors,
+            "affine_world_to_image": affine,
+        }
+        if calibration.get("image_width") is not None:
+            try:
+                normalized["image_width"] = int(calibration.get("image_width"))
+            except Exception:
+                pass
+        if calibration.get("image_height") is not None:
+            try:
+                normalized["image_height"] = int(calibration.get("image_height"))
+            except Exception:
+                pass
+        if calibration.get("rmse_px") is not None:
+            try:
+                normalized["rmse_px"] = float(calibration.get("rmse_px"))
+            except Exception:
+                pass
+        return normalized
+
+    def _get_saved_calibration(self, registry: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        overhead_cfg = self._get_local_overhead_config()
+        local_calibration = self._normalize_calibration_payload(overhead_cfg.get("calibration", {}))
+        if local_calibration:
+            return local_calibration
+        reg = registry if isinstance(registry, dict) else {}
+        registry_overhead = reg.get("overhead_map", {}) if isinstance(reg.get("overhead_map"), dict) else {}
+        return self._normalize_calibration_payload(registry_overhead.get("calibration", {}))
+
     def _resolve_map_image_path(self, path: str) -> str:
         candidate = str(path or "").strip()
         if not candidate:
@@ -247,6 +421,13 @@ class Panel:
             self.loaded_map_image_path = image_path
             self.map_status_var.set(f"Map: loaded {os.path.basename(image_path)}")
 
+    def _refresh_default_fusion_model(self) -> None:
+        try:
+            weights = find_latest_phase2_weights()
+            self.fusion_model_var.set(f"Fusion model: {weights}")
+        except Exception as exc:
+            self.fusion_model_var.set(f"Fusion model: unavailable ({exc})")
+
     def _world_to_image_point(self, world_x: float, world_y: float, calibration: Dict[str, Any]) -> Optional[tuple[float, float]]:
         affine = calibration.get("affine_world_to_image") if isinstance(calibration, dict) else None
         if not isinstance(affine, list) or len(affine) != 2:
@@ -259,11 +440,77 @@ class Panel:
         except Exception:
             return None
 
+    def _image_to_world_point(self, image_x: float, image_y: float, calibration: Dict[str, Any]) -> Optional[tuple[float, float]]:
+        affine = calibration.get("affine_world_to_image") if isinstance(calibration, dict) else None
+        if not isinstance(affine, list) or len(affine) != 2:
+            return None
+        try:
+            matrix = np.asarray(affine, dtype=np.float64)
+            linear = matrix[:, :2]
+            offset = matrix[:, 2]
+            if abs(np.linalg.det(linear)) < 1e-8:
+                return None
+            inv_linear = np.linalg.inv(linear)
+            image_vec = np.asarray([float(image_x), float(image_y)], dtype=np.float64)
+            world_vec = inv_linear.dot(image_vec - offset)
+            return float(world_vec[0]), float(world_vec[1])
+        except Exception:
+            return None
+
+    def _estimate_radius_cm_from_bbox(self, bbox: Dict[str, float], calibration: Dict[str, Any]) -> float:
+        cx = 0.5 * (float(bbox["x1"]) + float(bbox["x2"]))
+        cy = 0.5 * (float(bbox["y1"]) + float(bbox["y2"]))
+        half_w = abs(float(bbox["x2"]) - float(bbox["x1"])) * 0.5
+        half_h = abs(float(bbox["y2"]) - float(bbox["y1"])) * 0.5
+        center_world = self._image_to_world_point(cx, cy, calibration)
+        right_world = self._image_to_world_point(cx + half_w, cy, calibration)
+        down_world = self._image_to_world_point(cx, cy + half_h, calibration)
+        if center_world is None or right_world is None or down_world is None:
+            return 700.0
+        dx_r = right_world[0] - center_world[0]
+        dy_r = right_world[1] - center_world[1]
+        dx_d = down_world[0] - center_world[0]
+        dy_d = down_world[1] - center_world[1]
+        radius = max(
+            float(np.hypot(dx_r, dy_r)),
+            float(np.hypot(dx_d, dy_d)),
+        )
+        return max(300.0, radius)
+
+    def _load_local_house_boxes(self) -> List[Dict[str, Any]]:
+        raw = self._read_local_houses_config()
+        houses = raw.get("houses", []) if isinstance(raw.get("houses"), list) else []
+        result: List[Dict[str, Any]] = []
+        for house in houses:
+            bbox = house.get("map_bbox_image")
+            if not isinstance(bbox, dict):
+                continue
+            try:
+                result.append(
+                    {
+                        "id": str(house.get("id", "")),
+                        "name": str(house.get("name", house.get("id", ""))),
+                        "status": str(house.get("status", "UNSEARCHED")),
+                        "map_bbox_image": {
+                            "x1": float(bbox["x1"]),
+                            "y1": float(bbox["y1"]),
+                            "x2": float(bbox["x2"]),
+                            "y2": float(bbox["y2"]),
+                        },
+                    }
+                )
+            except Exception:
+                continue
+        return result
+
+    def _save_local_houses_config(self, payload: Dict[str, Any]) -> None:
+        with open(self.houses_config_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+
     def _restore_saved_points_from_registry(self, reg: Dict[str, Any]) -> None:
         if self.calibration_anchors:
             return
-        overhead_cfg = reg.get("overhead_map", {}) if isinstance(reg.get("overhead_map", {}), dict) else {}
-        calibration = overhead_cfg.get("calibration", {}) if isinstance(overhead_cfg.get("calibration", {}), dict) else {}
+        calibration = self._get_saved_calibration(reg)
         saved_anchors = calibration.get("anchors", []) if isinstance(calibration.get("anchors", []), list) else []
         restored: List[Dict[str, float]] = []
         for anchor in saved_anchors[:5]:
@@ -390,8 +637,7 @@ class Panel:
         summary = reg.get("status_summary", {})
         mission = state.get("house_mission", {}) if isinstance(state.get("house_mission"), dict) else {}
         overhead = state.get("overhead_map", {}) if isinstance(state.get("overhead_map"), dict) else {}
-        overhead_cfg = reg.get("overhead_map", {}) if isinstance(reg.get("overhead_map", {}), dict) else {}
-        calibration = reg.get("overhead_map", {}).get("calibration", {}) if isinstance(reg.get("overhead_map", {}), dict) else {}
+        calibration = self._get_saved_calibration(reg)
         self.mission_var.set(f"Mission: unsearched={summary.get('UNSEARCHED',0)} in_progress={summary.get('IN_PROGRESS',0)} explored={summary.get('EXPLORED',0)} found={summary.get('PERSON_FOUND',0)}")
         self.map_status_var.set(
             f"Map: current={mission.get('current_house_name') or 'none'} "
@@ -406,7 +652,7 @@ class Panel:
             )
         elif calibration:
             self.calib_var.set(
-                f"Calibration: anchors={len(calibration.get('anchors', []))} "
+                f"Calibration: saved anchors={len(calibration.get('anchors', []))} "
                 f"rmse={float(calibration.get('rmse_px', 0.0)):.2f}px"
             )
         elif self.pending_anchor_world is not None:
@@ -424,6 +670,8 @@ class Panel:
         image_size = None
         if self.loaded_map_image is not None:
             image_size = (int(self.loaded_map_image.shape[1]), int(self.loaded_map_image.shape[0]))
+        elif calibration.get("image_width") and calibration.get("image_height"):
+            image_size = (int(calibration.get("image_width", 0)), int(calibration.get("image_height", 0)))
         elif overhead.get("image_width") and overhead.get("image_height"):
             image_size = (int(overhead.get("image_width", 0)), int(overhead.get("image_height", 0)))
         affine = calibration.get("affine_world_to_image") if isinstance(calibration, dict) else None
@@ -452,6 +700,7 @@ class Panel:
             if self.loaded_map_image is not None:
                 self.map_widget.set_background_image(self.loaded_map_image)
             self.map_widget.set_calibration(affine, image_size, anchors)
+            self.map_widget.set_house_boxes(self._load_local_house_boxes())
             self.map_widget.update_uav(pose_x, pose_y, pose_yaw)
             self.map_widget.update_houses([])
             self.map_widget.set_route_target(None)
@@ -462,6 +711,7 @@ class Panel:
             # Open view only shows the calibrated map + UAV pose, not the
             # calibration anchors used in the settings workflow.
             self.open_map_widget.set_calibration(affine, image_size, [])
+            self.open_map_widget.set_house_boxes([])
             self.open_map_widget.update_uav(pose_x, pose_y, pose_yaw)
             self.open_map_widget.update_houses([])
             self.open_map_widget.set_route_target(None)
@@ -505,6 +755,38 @@ class Panel:
 
     def on_set_task(self) -> None: self.call_async("Setting task", lambda: self._apply_response(self.safe(self.client.post_json, "/task", {"task_label": self.task_label_var.get().strip()}, label="Set Task")))
     def on_capture(self) -> None: self.call_async("Capturing", lambda: self._apply_response((self.safe(self.client.post_json, "/capture", {"label": self.capture_label_var.get().strip()}, label="Capture") or {}).get("state")))
+    def on_capture_phase1_scan(self) -> None:
+        long_timeout_s = max(float(self.args.timeout_s), 120.0)
+        try:
+            settle_time_s = max(0.0, float(self.phase1_settle_var.get().strip()))
+        except ValueError:
+            self.status_var.set("Invalid Phase1 settle time.")
+            return
+
+        def _run_scan() -> None:
+            response = self.safe(
+                self.client.post_json,
+                "/capture_phase1_spin_scan",
+                {
+                    "label": self.capture_label_var.get().strip(),
+                    "num_steps": 12,
+                    "settle_time_s": settle_time_s,
+                },
+                label="Phase1 Scan x12",
+                timeout_s=long_timeout_s,
+            ) or {}
+            state = response.get("state")
+            if isinstance(state, dict):
+                self._apply_response(state)
+            scan = response.get("scan", {}) if isinstance(response.get("scan"), dict) else {}
+            scan_dir = str(scan.get("scan_dir", "") or response.get("manifest_path", "") or "").strip()
+            if scan_dir:
+                self.root.after(0, lambda: self.status_var.set(f"Phase1 scan saved: {scan_dir}"))
+
+        self.call_async(
+            "Phase1 spin scan",
+            _run_scan,
+        )
     def on_set_pose(self) -> None:
         try: payload = json.loads(self.pose_text.get("1.0", "end").strip()) if self.pose_text else {}
         except json.JSONDecodeError as exc: self.status_var.set(f"Invalid pose JSON: {exc}"); return
@@ -529,6 +811,62 @@ class Panel:
             return False
         finally:
             self.move_request_inflight = False; self.pause(0.4)
+
+    def _load_display_photo(self, image_path: str, *, max_width: int, max_height: int) -> Optional[ImageTk.PhotoImage]:
+        if not image_path or not os.path.exists(image_path):
+            return None
+        image = cv2.imread(image_path)
+        if image is None:
+            return None
+        h, w = image.shape[:2]
+        scale = min(float(max_width) / max(1, w), float(max_height) / max(1, h), 1.0)
+        if scale < 1.0:
+            image = cv2.resize(image, (max(1, int(w * scale)), max(1, int(h * scale))), interpolation=cv2.INTER_AREA)
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        return ImageTk.PhotoImage(Image.fromarray(rgb))
+
+    def apply_fusion_result(self, result: Dict[str, Any]) -> None:
+        self.last_fusion_result_dir = str(result.get("labeling_dir", result.get("run_dir", "")) or "")
+        self.last_fusion_overlay_path = str(result.get("fusion_overlay_path", "") or "")
+        self.fusion_summary_var.set(str(result.get("panel_summary", "Fusion: no summary")))
+        self.fusion_dir_var.set(f"Fusion dir: {self.last_fusion_result_dir or 'none'}")
+        weights_path = str(result.get("weights_path", "") or "")
+        if weights_path:
+            self.fusion_model_var.set(f"Fusion model: {weights_path}")
+        photo = self._load_display_photo(self.last_fusion_overlay_path, max_width=560, max_height=260)
+        if photo is not None and self.fusion_preview_label is not None:
+            self.fusion_preview_photo = photo
+            self.fusion_preview_label.configure(image=photo, text="")
+        elif self.fusion_preview_label is not None:
+            self.fusion_preview_label.configure(image="", text="Fusion image unavailable")
+
+    def on_run_phase2_fusion(self) -> None:
+        def worker() -> None:
+            try:
+                self.safe(self.client.post_json, "/refresh", {}, label="Sync Fusion Observation")
+                rgb = self.safe(self.client.get_image, "/frame", label="Fusion RGB")
+                depth_raw = self.safe(self.client.get_image_unchanged, "/depth_raw", label="Fusion Depth Raw")
+                camera_info_resp = self.safe(self.client.get_json, "/camera_info", label="Fusion Camera Info") or {}
+                state = self.safe(self.client.get_json, "/state", label="Fusion State") or {}
+                if not isinstance(rgb, np.ndarray) or not isinstance(depth_raw, np.ndarray):
+                    return
+                camera_info = camera_info_resp.get("camera_info") if isinstance(camera_info_resp, dict) else {}
+                label = self.capture_label_var.get().strip() or self.task_label_var.get().strip()
+                result = run_phase2_fusion_analysis(
+                    rgb_bgr=rgb,
+                    depth_raw=depth_raw,
+                    output_root=Path(self.phase2_fusion_output_root),
+                    label=label,
+                    camera_info=camera_info if isinstance(camera_info, dict) else {},
+                    state=state if isinstance(state, dict) else {},
+                )
+                self.root.after(0, lambda r=result: self.apply_fusion_result(r))
+                self.root.after(0, lambda r=result: self.status_var.set(f"Phase2 fusion saved: {r.get('run_dir', '')}"))
+            except Exception as exc:
+                logger.warning("Phase2 fusion analysis failed: %s", exc)
+                self.root.after(0, lambda e=exc: self.status_var.set(f"Phase2 fusion failed: {e}"))
+
+        self.call_async("Phase2 fusion analysis", worker)
 
     def send_move_symbol(self, symbol: str) -> None:
         if self.move_request_inflight: self.status_var.set(f"Move {symbol} ignored while another move is in flight."); return
@@ -571,6 +909,27 @@ class Panel:
             self.depth_photo = photo
             if self.depth_label is not None: self.depth_label.configure(image=photo)
 
+    def open_fusion_result_window(self) -> None:
+        if not self.last_fusion_overlay_path or not os.path.exists(self.last_fusion_overlay_path):
+            self.status_var.set("No fusion result image available yet.")
+            return
+        if self.fusion_window and self.fusion_window.winfo_exists():
+            self.fusion_window.destroy()
+            self.fusion_window = None
+            self.fusion_result_label = None
+            self.fusion_result_photo = None
+            return
+        self.fusion_window = tk.Toplevel(self.root)
+        self.fusion_window.title("Phase2 Fusion Result")
+        self.fusion_result_label = tk.Label(self.fusion_window)
+        self.fusion_result_label.pack(fill="both", expand=True)
+        photo = self._load_display_photo(self.last_fusion_overlay_path, max_width=1280, max_height=760)
+        if photo is None:
+            self.fusion_result_label.configure(text="Failed to load fusion result image.")
+            return
+        self.fusion_result_photo = photo
+        self.fusion_result_label.configure(image=photo)
+
     def toggle_open_map_window(self) -> None:
         if self.open_map_window and self.open_map_window.winfo_exists():
             self.open_map_window.destroy()
@@ -610,6 +969,8 @@ class Panel:
         tk.Button(toolbar, text="Add Point", command=self.on_add_anchor_from_inputs).pack(side="left", padx=(6, 0))
         tk.Button(toolbar, text="Save Alignment", command=self.on_solve_calibration).pack(side="left", padx=(6, 0))
         tk.Button(toolbar, text="Clear Calib", command=self.on_clear_calibration).pack(side="left", padx=(6, 0))
+        tk.Checkbutton(toolbar, text="House Set", variable=self.house_set_var, command=self.on_toggle_house_set_mode).pack(side="left", padx=(10, 0))
+        tk.Button(toolbar, text="Save House", command=self.on_save_house_annotation).pack(side="left", padx=(6, 0))
         tk.Label(toolbar, textvariable=self.map_status_var).pack(side="left", padx=10)
         calib = tk.Frame(self.map_window)
         calib.pack(fill="x", padx=8, pady=(6, 0))
@@ -618,6 +979,13 @@ class Panel:
         tk.Label(calib, text="World Y").pack(side="left")
         tk.Entry(calib, textvariable=self.anchor_world_y_var, width=10).pack(side="left", padx=(4, 8))
         tk.Label(calib, textvariable=self.calib_var, anchor="w").pack(side="left", padx=8)
+        house_row = tk.Frame(self.map_window)
+        house_row.pack(fill="x", padx=8, pady=(6, 0))
+        tk.Label(house_row, text="House ID").pack(side="left")
+        tk.Entry(house_row, textvariable=self.house_id_var, width=12).pack(side="left", padx=(4, 8))
+        tk.Label(house_row, text="Name").pack(side="left")
+        tk.Entry(house_row, textvariable=self.house_name_var, width=16).pack(side="left", padx=(4, 8))
+        tk.Label(house_row, textvariable=self.house_box_var, anchor="w").pack(side="left", padx=8)
         reg = self.safe(self.client.get_json, "/house_registry", label="Load map bounds") or {}
         self._restore_saved_points_from_registry(reg.get("registry", {}))
         wb = reg.get("registry", {}).get("world_bounds", {})
@@ -625,6 +993,8 @@ class Panel:
         self.map_widget = OverheadMapWidget(self.map_window, world_bounds=bounds, canvas_w=760, canvas_h=560)
         self.map_widget.canvas.pack(padx=8, pady=8)
         self.map_widget.set_map_click_callback(self.on_map_click)
+        self.map_widget.set_rect_select_callback(self.on_house_rect_selected)
+        self.map_widget.set_rect_select_enabled(bool(self.house_set_var.get()))
         self.refresh_map_async(with_background=False)
 
     def on_auto_select_house(self) -> None: threading.Thread(target=lambda: (self.safe(self.client.post_json, "/select_nearest_unsearched_house", {}, label="Auto-select nearest"), self.refresh_map_async()), daemon=True).start()
@@ -796,8 +1166,107 @@ class Panel:
                 self.refresh_map_async()
         threading.Thread(target=worker, daemon=True).start()
 
+    def on_toggle_house_set_mode(self) -> None:
+        enabled = bool(self.house_set_var.get())
+        if self.map_widget is not None:
+            self.map_widget.set_rect_select_enabled(enabled)
+        if enabled:
+            self.house_box_var.set("House Set: drag a rectangle on the map.")
+        else:
+            self.house_box_var.set("House Set: idle")
+
+    def on_house_rect_selected(self, rect: Dict[str, float]) -> None:
+        self.pending_house_rect = {
+            "x1": float(rect["x1"]),
+            "y1": float(rect["y1"]),
+            "x2": float(rect["x2"]),
+            "y2": float(rect["y2"]),
+        }
+        if not self.house_id_var.get().strip():
+            existing = self._load_local_house_boxes()
+            self.house_id_var.set(f"house_{len(existing) + 1:02d}")
+        if not self.house_name_var.get().strip():
+            self.house_name_var.set(self.house_id_var.get().strip() or "house")
+        self.house_box_var.set(
+            "House Set: rect "
+            f"({self.pending_house_rect['x1']:.1f}, {self.pending_house_rect['y1']:.1f}) -> "
+            f"({self.pending_house_rect['x2']:.1f}, {self.pending_house_rect['y2']:.1f})"
+        )
+        self.refresh_map_async()
+
+    def on_save_house_annotation(self) -> None:
+        if self.pending_house_rect is None:
+            self.house_box_var.set("House Set: draw a rectangle first.")
+            return
+        house_id = self.house_id_var.get().strip()
+        if not house_id:
+            self.house_box_var.set("House Set: house id required.")
+            return
+        house_name = self.house_name_var.get().strip() or house_id
+
+        def worker() -> None:
+            raw = self._read_local_houses_config()
+            overhead_cfg = raw.get("overhead_map", {}) if isinstance(raw.get("overhead_map"), dict) else {}
+            calibration = overhead_cfg.get("calibration", {}) if isinstance(overhead_cfg.get("calibration"), dict) else {}
+            center_image_x = 0.5 * (float(self.pending_house_rect["x1"]) + float(self.pending_house_rect["x2"]))
+            center_image_y = 0.5 * (float(self.pending_house_rect["y1"]) + float(self.pending_house_rect["y2"]))
+            center_world = self._image_to_world_point(center_image_x, center_image_y, calibration)
+            if center_world is None:
+                self.root.after(0, lambda: self.house_box_var.set("House Set: solve calibration first."))
+                return
+
+            radius_cm = self._estimate_radius_cm_from_bbox(self.pending_house_rect, calibration)
+            houses = raw.get("houses", [])
+            if not isinstance(houses, list):
+                houses = []
+            updated = False
+            for house in houses:
+                if str(house.get("id", "")) != house_id:
+                    continue
+                house["name"] = house_name
+                house["center_x"] = float(center_world[0])
+                house["center_y"] = float(center_world[1])
+                house["center_z"] = float(house.get("center_z", 200.0))
+                house["approach_z"] = float(house.get("approach_z", 600.0))
+                house["radius_cm"] = float(radius_cm)
+                house["entry_yaw_hint"] = float(house.get("entry_yaw_hint", 0.0))
+                house["map_bbox_image"] = dict(self.pending_house_rect)
+                house.setdefault("status", "UNSEARCHED")
+                house.setdefault("notes", "")
+                updated = True
+                break
+            if not updated:
+                houses.append(
+                    {
+                        "id": house_id,
+                        "name": house_name,
+                        "center_x": float(center_world[0]),
+                        "center_y": float(center_world[1]),
+                        "center_z": 200.0,
+                        "approach_z": 600.0,
+                        "radius_cm": float(radius_cm),
+                        "entry_yaw_hint": 0.0,
+                        "status": "UNSEARCHED",
+                        "search_start_time": None,
+                        "search_end_time": None,
+                        "person_location": None,
+                        "notes": "",
+                        "map_bbox_image": dict(self.pending_house_rect),
+                    }
+                )
+            raw["houses"] = houses
+            self._save_local_houses_config(raw)
+            self.safe(self.client.post_json, "/reload_house_registry", {}, label="Reload house registry")
+            self.pending_house_rect = None
+            self.root.after(0, lambda: self.house_box_var.set(f"House Set: saved '{house_id}'"))
+            self.root.after(0, lambda: self.house_id_var.set(house_id))
+            self.root.after(0, lambda: self.house_name_var.set(house_name))
+            self.refresh_map_async()
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_close(self) -> None:
-        for window in (self.preview_window, self.depth_window, self.map_window, self.open_map_window):
+        for window in (self.preview_window, self.depth_window, self.fusion_window, self.map_window, self.open_map_window):
             try:
                 if window is not None: window.destroy()
             except Exception:

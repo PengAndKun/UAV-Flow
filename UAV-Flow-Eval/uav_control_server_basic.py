@@ -532,6 +532,18 @@ class BasicUAVControlBackend:
     def get_house_registry(self) -> Dict[str, Any]:
         return {"status": "ok", "registry": self.house_registry.to_dict()}
 
+    def reload_house_registry(self) -> Dict[str, Any]:
+        try:
+            self.house_registry.load_from_file(self.args.houses_config)
+            return {
+                "status": "ok",
+                "message": "House registry reloaded.",
+                "registry": self.house_registry.to_dict(),
+                "house_mission": self.get_house_mission_state(),
+            }
+        except Exception as exc:
+            return {"status": "error", "message": f"Failed to reload house registry: {exc}"}
+
     def select_target_house(self, house_id: str) -> Dict[str, Any]:
         ok = self.house_registry.set_target(house_id)
         if not ok:
@@ -822,6 +834,159 @@ class BasicUAVControlBackend:
             self.last_capture = bundle
             return {"status": "ok", "capture": bundle, "state": self.get_state(message=f"Captured {capture_id}.")}
 
+    def _save_capture_bundle_to_directory(
+        self,
+        output_dir: str,
+        *,
+        capture_id: str,
+        capture_time: str,
+        step_index: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        os.makedirs(output_dir, exist_ok=True)
+        rgb_dir = os.path.join(output_dir, "rgb")
+        depth_dir = os.path.join(output_dir, "depth_cm")
+        depth_preview_dir = os.path.join(output_dir, "depth_preview")
+        meta_dir = os.path.join(output_dir, "meta")
+        for path in (rgb_dir, depth_dir, depth_preview_dir, meta_dir):
+            os.makedirs(path, exist_ok=True)
+
+        step_suffix = f"step_{int(step_index):02d}" if step_index is not None else capture_id
+        rgb_path = os.path.join(rgb_dir, f"{step_suffix}_rgb.png")
+        depth_path = os.path.join(depth_dir, f"{step_suffix}_depth_cm.png")
+        depth_preview_path = os.path.join(depth_preview_dir, f"{step_suffix}_depth_preview.png")
+        camera_info_path = os.path.join(meta_dir, f"{step_suffix}_camera_info.json")
+        bundle_path = os.path.join(meta_dir, f"{step_suffix}_bundle.json")
+
+        cv2.imwrite(rgb_path, self.last_raw_frame)
+        if self.last_depth_frame is not None:
+            depth_to_save = np.clip(np.nan_to_num(self.last_depth_frame, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 65535.0)
+            cv2.imwrite(depth_path, depth_to_save.astype(np.uint16))
+            depth_preview = render_depth_preview(
+                self.last_depth_frame,
+                int(self.last_depth_summary.get("image_width", self.args.depth_preview_width)) or self.args.depth_preview_width,
+                int(self.last_depth_summary.get("image_height", self.args.depth_preview_height)) or self.args.depth_preview_height,
+                min_depth_cm=float(self.args.depth_min_cm),
+                max_depth_cm=float(self.args.depth_max_cm),
+                source_mode=str(self.last_depth_summary.get("source_mode", "lesson4_depth_planar")),
+            )
+            cv2.imwrite(depth_preview_path, depth_preview)
+        camera_info = self.get_camera_info()
+        with open(camera_info_path, "w", encoding="utf-8") as f:
+            json.dump(camera_info, f, indent=2)
+        bundle = {
+            "capture_id": capture_id,
+            "capture_time": capture_time,
+            "step_index": int(step_index) if step_index is not None else None,
+            "env_id": self.args.env_id,
+            "task_label": self.current_task_label,
+            "last_action": self.last_action,
+            "movement_enabled": self.movement_enabled,
+            "pose": self._build_pose_state(),
+            "depth": dict(self.last_depth_summary),
+            "camera_info": camera_info,
+            "rgb_image_path": rgb_path,
+            "depth_image_path": depth_path if self.last_depth_frame is not None else None,
+            "depth_preview_path": depth_preview_path if self.last_depth_frame is not None else None,
+            "camera_info_path": camera_info_path,
+            "bundle_path": bundle_path,
+        }
+        with open(bundle_path, "w", encoding="utf-8") as f:
+            json.dump(bundle, f, indent=2)
+        return bundle
+
+    def capture_phase1_spin_scan(
+        self,
+        *,
+        label: Optional[str] = None,
+        num_steps: int = 12,
+        settle_time_s: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            steps = max(1, int(num_steps))
+            settle_time_s = max(0.0, float(0.20 if settle_time_s is None else settle_time_s))
+            scan_root = os.path.join(self.args.capture_dir, "phase1_spin_scans")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            label_suffix = f"_{str(label).strip()}" if str(label or "").strip() else ""
+            scan_id = f"phase1_spin_scan_{timestamp}{label_suffix}"
+            scan_dir = os.path.join(scan_root, scan_id)
+            os.makedirs(scan_dir, exist_ok=True)
+
+            start_pose = self.get_task_pose()
+            start_yaw = float(start_pose[3])
+            step_angle_deg = 360.0 / float(steps)
+            captures: List[Dict[str, Any]] = []
+
+            logger.info(
+                "Phase1 spin scan started id=%s steps=%d start_pose=(%.1f, %.1f, %.1f, %.1f)",
+                scan_id,
+                steps,
+                float(start_pose[0]),
+                float(start_pose[1]),
+                float(start_pose[2]),
+                start_yaw,
+            )
+
+            for step_index in range(steps):
+                target_yaw = normalize_angle_deg(start_yaw + step_index * step_angle_deg)
+                self.command_task_yaw_deg = float(target_yaw)
+                self.set_task_yaw_absolute(target_yaw, tolerance_deg=1.0, attempts=8)
+                # Let the view settle briefly after rotation so RGB/depth are
+                # captured after the scene finishes updating.
+                time.sleep(settle_time_s)
+                self.refresh_observations()
+                capture_time = datetime.now().isoformat(timespec="milliseconds")
+                capture_id = f"{scan_id}_step_{step_index:02d}"
+                bundle = self._save_capture_bundle_to_directory(
+                    scan_dir,
+                    capture_id=capture_id,
+                    capture_time=capture_time,
+                    step_index=step_index,
+                )
+                captures.append(bundle)
+
+            # Restore the original heading after the scan.
+            self.command_task_yaw_deg = float(start_yaw)
+            self.set_task_yaw_absolute(start_yaw, tolerance_deg=1.0, attempts=8)
+            self.refresh_observations()
+            self.last_action = "phase1_spin_scan"
+
+            manifest = {
+                "scan_id": scan_id,
+                "scan_time": timestamp,
+                "scan_dir": scan_dir,
+                "task_label": self.current_task_label,
+                "num_steps": steps,
+                "step_angle_deg": step_angle_deg,
+                "settle_time_s": settle_time_s,
+                "start_pose": {
+                    "x": float(start_pose[0]),
+                    "y": float(start_pose[1]),
+                    "z": float(start_pose[2]),
+                    "yaw": start_yaw,
+                },
+                "end_pose": self._build_pose_state(),
+                "captures": captures,
+            }
+            manifest_path = os.path.join(scan_dir, "phase1_scan_manifest.json")
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+
+            self.last_capture = {
+                "capture_id": scan_id,
+                "capture_time": timestamp,
+                "bundle_path": manifest_path,
+                "scan_dir": scan_dir,
+                "num_steps": steps,
+            }
+
+            logger.info("Phase1 spin scan completed id=%s dir=%s steps=%d", scan_id, scan_dir, steps)
+            return {
+                "status": "ok",
+                "scan": manifest,
+                "manifest_path": manifest_path,
+                "state": self.get_state(message=f"Phase1 spin scan saved to {scan_dir}."),
+            }
+
     def shutdown_async(self) -> None:
         httpd = self.httpd
         if httpd is None:
@@ -925,6 +1090,14 @@ def make_handler(backend: BasicUAVControlBackend):
                     )
                 elif parsed.path == "/capture":
                     self._send_json(backend.capture_frame(label=data.get("label")))
+                elif parsed.path == "/capture_phase1_spin_scan":
+                    self._send_json(
+                        backend.capture_phase1_spin_scan(
+                            label=data.get("label"),
+                            num_steps=int(data.get("num_steps", 12)),
+                            settle_time_s=float(data.get("settle_time_s", 0.20)),
+                        )
+                    )
                 elif parsed.path == "/task":
                     self._send_json(backend.set_task_label(str(data.get("task_label", ""))))
                 elif parsed.path == "/set_pose":
@@ -954,6 +1127,8 @@ def make_handler(backend: BasicUAVControlBackend):
                     ))
                 elif parsed.path == "/clear_overhead_calibration":
                     self._send_json(backend.clear_overhead_calibration())
+                elif parsed.path == "/reload_house_registry":
+                    self._send_json(backend.reload_house_registry())
                 elif parsed.path == "/select_target_house":
                     house_id = str(data.get("house_id", ""))
                     if not house_id:
