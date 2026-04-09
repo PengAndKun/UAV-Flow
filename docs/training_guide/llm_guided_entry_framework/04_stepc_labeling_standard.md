@@ -86,6 +86,10 @@ Recommended label set:
 - `geometric_opening_needs_confirmation`
 - `no_entry_confirmed`
 
+These 7 labels should also be treated as the **first-round Step C data groups**.
+When building the initial human benchmark or teacher validation set, each sample
+must be assigned to exactly one of these groups.
+
 Definitions:
 
 - `enterable_open_door`
@@ -102,6 +106,24 @@ Definitions:
   - Depth suggests a traversable opening, but semantic evidence is weak or ambiguous.
 - `no_entry_confirmed`
   - No reliable entry candidate is currently confirmed.
+
+Recommended grouping logic for data collection:
+
+- positive-entry group
+  - `enterable_open_door`
+  - `enterable_door`
+
+- blocked-entry group
+  - `visible_but_blocked_entry`
+  - `front_blocked_detour`
+
+- non-entry / continue-search group
+  - `window_visible_keep_search`
+  - `geometric_opening_needs_confirmation`
+  - `no_entry_confirmed`
+
+This grouping is useful when the first-round sample count is small and full
+7-class balancing is difficult.
 
 ---
 

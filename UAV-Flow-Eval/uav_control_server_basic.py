@@ -45,6 +45,8 @@ from gym_unrealcv.envs.wrappers import augmentation, configUE, time_dilation
 from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_camera_info
 
 logger = logging.getLogger(__name__)
+EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_HOUSES_CONFIG = os.path.join(EVAL_DIR, "houses_config.json")
 
 
 def now_timestamp() -> str:
@@ -94,6 +96,8 @@ def render_depth_preview(depth_image: np.ndarray, width: int, height: int, *, mi
 class BasicUAVControlBackend:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
+        if not os.path.isabs(self.args.houses_config):
+            self.args.houses_config = os.path.abspath(os.path.join(EVAL_DIR, self.args.houses_config))
         self.lock = threading.RLock()
         self.unrealcv_lock = threading.RLock()
         self.httpd: Optional[ThreadingHTTPServer] = None
@@ -110,6 +114,15 @@ class BasicUAVControlBackend:
         self.command_task_yaw_deg = 0.0
         # --- House registry ---
         self.house_registry = HouseRegistry(args.houses_config)
+        try:
+            logger.info(
+                "Loaded houses_config=%s houses=%d target=%s",
+                self.args.houses_config,
+                len(self.house_registry.get_all_houses()),
+                self.house_registry.to_dict().get("current_target_id", ""),
+            )
+        except Exception:
+            logger.exception("Failed to summarize house registry after load")
         self.overhead_cam_id = 0
         self.last_overhead_frame: Optional[np.ndarray] = None
         self.last_overhead_refresh_time = ""
@@ -1223,7 +1236,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--default_depth_fov_deg", type=float, default=90.0)
     parser.add_argument("--depth_camera_frame_id", default="uav_depth_camera")
     parser.add_argument("--log_level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
-    parser.add_argument("--houses_config", default="./houses_config.json",
+    parser.add_argument("--houses_config", default=DEFAULT_HOUSES_CONFIG,
                         help="Path to houses_config.json defining house positions and search state.")
     return parser.parse_args()
 

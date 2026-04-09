@@ -19,6 +19,8 @@
 1. [`01_problem_and_method.md`](01_problem_and_method.md)
 2. [`02_training_flow.md`](02_training_flow.md)
 3. [`03_experiment_plan.md`](03_experiment_plan.md)
+4. [`04_stepc_labeling_standard.md`](04_stepc_labeling_standard.md)
+5. [`05_pure_llm_baseline_test.md`](05_pure_llm_baseline_test.md)
 
 ## 这条路线的核心思想
 

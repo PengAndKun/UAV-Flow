@@ -143,6 +143,75 @@ LLM 需要输出：
 - `cross_entry`
 - `backoff_and_reobserve`
 
+### 4.1.1 Step C 第一轮数据先分成哪几类
+
+在 Step C 里，我们不是先采“完整长轨迹”，而是先采和标注一批
+**静态决策样本**。每个样本都是一帧或一个很短窗口，用来回答：
+
+- 这是不是一个可进入入口
+- 现在应该靠近、绕行，还是继续搜索
+- 下一步的粗粒度动作提示是什么
+
+第一轮建议先分成下面 7 类：
+
+1. `enterable_open_door`
+   - 语义上明确是 `open door`
+   - 深度几何支持通过
+   - 没有严重前障碍
+
+2. `enterable_door`
+   - 语义上是 `door`
+   - 几何上可通过
+   - 但不一定能确认门扇已经打开
+
+3. `visible_but_blocked_entry`
+   - 能看到门或入口
+   - 但当前前方障碍、门前柱子、栏杆、墙角或遮挡使得不能直接穿过
+
+4. `front_blocked_detour`
+   - 当前最关键的问题不是“有没有门”，而是“前方太堵”
+   - 应优先绕行、侧移或后退重观察
+
+5. `window_visible_keep_search`
+   - 看到的是窗户或非入口立面元素
+   - 不应接近并尝试进入
+
+6. `geometric_opening_needs_confirmation`
+   - 深度图显示像开口
+   - 但 YOLO/语义信息不足，不能确认这是门而不是窗或其它空洞
+
+7. `no_entry_confirmed`
+   - 当前帧无法确认任何可靠入口
+   - 应继续搜索外立面或换视角
+
+如果第一轮样本不够均衡，可以先用 6 类版本：
+
+- 把 `enterable_open_door` 和 `enterable_door` 合并成 `enterable_entry`
+
+这样第一版更容易采够样本，也更容易先把 LLM teacher 的主决策验证清楚。
+
+### 4.1.2 每一类数据分别解决什么问题
+
+这些类别不是随便分的，它们对应的是 Step C 里最核心的几种错误模式：
+
+- `enterable_open_door` / `enterable_door`
+  - 验证 teacher 是否能识别“可以接近甚至准备穿过”的入口
+
+- `visible_but_blocked_entry`
+  - 验证 teacher 会不会错误地对“看见门”直接给出进入指令
+
+- `front_blocked_detour`
+  - 验证 teacher 是否把深度前障碍优先级放在第一位
+
+- `window_visible_keep_search`
+  - 验证 teacher 是否会把窗户误判成门
+
+- `geometric_opening_needs_confirmation`
+  - 验证 teacher 在语义不确定时是否会保持保守
+
+- `no_entry_confirmed`
+  - 验证 teacher 在缺少证据时是否会继续搜索而不是乱给行动建议
+
 ### 4.2 Step C 不是在学什么
 
 Step C 不应该直接承担：
@@ -262,6 +331,17 @@ Step C 不应该直接承担：
 - 是不是该继续搜索
 
 然后看 LLM 输出是否符合人工判断。
+
+第一轮人工验收集建议：
+
+- 总量：`80-120` 个样本
+- 尽量覆盖上面定义的 7 类
+- 每类目标：`10-20` 个样本
+- 如果样本不够，优先保证这 4 类：
+  - `enterable_open_door`
+  - `front_blocked_detour`
+  - `window_visible_keep_search`
+  - `no_entry_confirmed`
 
 #### C-4：接入 teacher 数据采集
 

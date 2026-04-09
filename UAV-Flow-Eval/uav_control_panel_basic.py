@@ -503,6 +503,102 @@ class Panel:
                 continue
         return result
 
+    def _build_map_display_boxes(
+        self,
+        reg_houses: List[Dict[str, Any]],
+        current_id: str,
+        target_id: str,
+        calibration: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        local_boxes = self._load_local_house_boxes()
+        by_id: Dict[str, Dict[str, Any]] = {
+            str(box.get("id", "") or ""): dict(box)
+            for box in local_boxes
+            if str(box.get("id", "") or "")
+        }
+        display_boxes: List[Dict[str, Any]] = []
+        for house in reg_houses:
+            hid = str(house.get("id", "") or "")
+            if not hid:
+                continue
+            box = dict(by_id.get(hid, {}))
+            if not box:
+                try:
+                    cx = float(house.get("center_x", 0.0))
+                    cy = float(house.get("center_y", 0.0))
+                    radius_cm = float(house.get("radius_cm", 600.0))
+                except Exception:
+                    continue
+                corners_world = [
+                    (cx - radius_cm, cy - radius_cm),
+                    (cx + radius_cm, cy - radius_cm),
+                    (cx + radius_cm, cy + radius_cm),
+                    (cx - radius_cm, cy + radius_cm),
+                ]
+                corners_image = [
+                    self._world_to_image_point(wx, wy, calibration)
+                    for wx, wy in corners_world
+                ]
+                if any(pt is None for pt in corners_image):
+                    continue
+                xs = [float(pt[0]) for pt in corners_image if pt is not None]
+                ys = [float(pt[1]) for pt in corners_image if pt is not None]
+                if not xs or not ys:
+                    continue
+                box = {
+                    "id": hid,
+                    "name": str(house.get("name", hid)),
+                    "status": str(house.get("status", "UNSEARCHED")),
+                    "map_bbox_image": {
+                        "x1": min(xs),
+                        "y1": min(ys),
+                        "x2": max(xs),
+                        "y2": max(ys),
+                    },
+                }
+            box["id"] = hid
+            box["name"] = str(house.get("name", box.get("name", hid)))
+            box["status"] = str(house.get("status", box.get("status", "UNSEARCHED")))
+            box["is_target"] = hid == target_id
+            box["is_current"] = hid == current_id
+            display_boxes.append(box)
+        return display_boxes
+
+    def _load_local_registry_payload(self) -> Dict[str, Any]:
+        raw = self._read_local_houses_config()
+        if not isinstance(raw, dict):
+            return {}
+        houses = raw.get("houses", [])
+        if not isinstance(houses, list):
+            houses = []
+        current_target_id = str(raw.get("current_target_id", "") or "")
+        return {
+            "world_bounds": raw.get("world_bounds", {}),
+            "overhead_map": raw.get("overhead_map", {}),
+            "current_target_id": current_target_id,
+            "houses": houses,
+            "status_summary": self._compute_house_status_summary(houses),
+        }
+
+    def _compute_house_status_summary(self, houses: List[Dict[str, Any]]) -> Dict[str, int]:
+        summary = {"UNSEARCHED": 0, "IN_PROGRESS": 0, "EXPLORED": 0, "PERSON_FOUND": 0}
+        for house in houses:
+            status = str(house.get("status", "UNSEARCHED"))
+            summary[status] = int(summary.get(status, 0)) + 1
+        return summary
+
+    def _find_containing_house_id(self, x: float, y: float, houses: List[Dict[str, Any]]) -> str:
+        for house in houses:
+            try:
+                cx = float(house.get("center_x", 0.0))
+                cy = float(house.get("center_y", 0.0))
+                radius = float(house.get("radius_cm", 0.0))
+            except Exception:
+                continue
+            if radius > 0.0 and float(np.hypot(x - cx, y - cy)) <= radius:
+                return str(house.get("id", "") or "")
+        return ""
+
     def _save_local_houses_config(self, payload: Dict[str, Any]) -> None:
         with open(self.houses_config_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
@@ -601,7 +697,8 @@ class Panel:
             try:
                 state = self.safe(self.client.get_json, "/state", label="Map state")
                 registry = self.safe(self.client.get_json, "/house_registry", label="Map registry")
-                if isinstance(state, dict) and isinstance(registry, dict): self.root.after(0, lambda: self.apply_map_data(state, registry))
+                if isinstance(state, dict) and isinstance(registry, dict):
+                    self.root.after(0, lambda: self.apply_map_data(state, registry))
                 if with_background and self.map_widget is not None: self._refresh_map_background_worker()
             finally:
                 self.map_refresh_inflight = False
@@ -633,17 +730,23 @@ class Panel:
         self.root.after(1500, self.schedule_map_refresh)
 
     def apply_map_data(self, state: Dict[str, Any], registry: Dict[str, Any]) -> None:
+        if not self.root.winfo_exists():
+            return
         reg = registry.get("registry", {})
+        if not isinstance(reg, dict):
+            reg = {}
+        local_reg = self._load_local_registry_payload()
+        if not isinstance(reg.get("houses"), list) or not reg.get("houses"):
+            reg["houses"] = list(local_reg.get("houses", []))
+        if not str(reg.get("current_target_id", "") or "") and str(local_reg.get("current_target_id", "") or ""):
+            reg["current_target_id"] = local_reg.get("current_target_id", "")
+        if not isinstance(reg.get("status_summary"), dict) or not reg.get("status_summary"):
+            reg["status_summary"] = dict(local_reg.get("status_summary", {}))
+
         summary = reg.get("status_summary", {})
         mission = state.get("house_mission", {}) if isinstance(state.get("house_mission"), dict) else {}
         overhead = state.get("overhead_map", {}) if isinstance(state.get("overhead_map"), dict) else {}
         calibration = self._get_saved_calibration(reg)
-        self.mission_var.set(f"Mission: unsearched={summary.get('UNSEARCHED',0)} in_progress={summary.get('IN_PROGRESS',0)} explored={summary.get('EXPLORED',0)} found={summary.get('PERSON_FOUND',0)}")
-        self.map_status_var.set(
-            f"Map: current={mission.get('current_house_name') or 'none'} "
-            f"target={mission.get('target_house_name') or 'none'} "
-            f"bg={overhead.get('refresh_time','-')}"
-        )
         self._restore_saved_points_from_registry(reg)
         if self.pending_image_anchor is not None:
             self.calib_var.set(
@@ -696,52 +799,69 @@ class Panel:
                 f"Map pose: world=({pose_x:.1f}, {pose_y:.1f}) image=({image_point[0]:.1f}, {image_point[1]:.1f}) yaw={pose_yaw:.1f}"
             )
 
-        if self.map_widget is not None:
-            if self.loaded_map_image is not None:
-                self.map_widget.set_background_image(self.loaded_map_image)
-            self.map_widget.set_calibration(affine, image_size, anchors)
-            self.map_widget.set_house_boxes(self._load_local_house_boxes())
-            self.map_widget.update_uav(pose_x, pose_y, pose_yaw)
-            self.map_widget.update_houses([])
-            self.map_widget.set_route_target(None)
+        current_id = str(mission.get("current_house_id", "") or "")
+        target_id = str(reg.get("current_target_id", "") or "")
+        if not current_id:
+            current_id = self._find_containing_house_id(pose_x, pose_y, reg.get("houses", []))
 
-        if self.open_map_widget is not None:
-            if self.loaded_map_image is not None:
-                self.open_map_widget.set_background_image(self.loaded_map_image)
-            # Open view only shows the calibrated map + UAV pose, not the
-            # calibration anchors used in the settings workflow.
-            self.open_map_widget.set_calibration(affine, image_size, [])
-            self.open_map_widget.set_house_boxes([])
-            self.open_map_widget.update_uav(pose_x, pose_y, pose_yaw)
-            self.open_map_widget.update_houses([])
-            self.open_map_widget.set_route_target(None)
-
-        if not self.map_widget or not self.show_houses_var.get():
-            return
-        current_id, target_id = mission.get("current_house_id", ""), reg.get("current_target_id", "")
+        house_name_by_id: Dict[str, str] = {}
         houses = []
         target_xy = None
         for h in reg.get("houses", []):
-            name = str(h.get("name", ""))
-            if h.get("id", "") == current_id: name = f"{name} (UAV)"
-            cx = float(h.get("center_x", 0))
-            cy = float(h.get("center_y", 0))
-            hid = h.get("id", "")
+            hid = str(h.get("id", "") or "")
+            name = str(h.get("name", hid))
+            house_name_by_id[hid] = name
+            if hid == current_id:
+                name = f"{name} (UAV)"
+            cx = float(h.get("center_x", 0.0))
+            cy = float(h.get("center_y", 0.0))
             is_target = hid == target_id
+            is_current = hid == current_id
             if is_target:
                 target_xy = (cx, cy)
-            houses.append({
-                "id": hid,
-                "name": name,
-                "center_x": cx,
-                "center_y": cy,
-                "radius_cm": float(h.get("radius_cm", 600)),
-                "status": h.get("status", "UNSEARCHED"),
-                "is_target": is_target,
-                "is_current": hid == current_id,
-            })
-        self.map_widget.update_houses(houses)
-        self.map_widget.set_route_target(target_xy if self.show_route_var.get() else None)
+            houses.append(
+                {
+                    "id": hid,
+                    "name": name,
+                    "center_x": cx,
+                    "center_y": cy,
+                    "radius_cm": float(h.get("radius_cm", 600.0)),
+                    "status": h.get("status", "UNSEARCHED"),
+                    "is_target": is_target,
+                    "is_current": is_current,
+                }
+            )
+
+        display_house_boxes = self._build_map_display_boxes(reg.get("houses", []), current_id, target_id, calibration)
+
+        current_name = str(mission.get("current_house_name", "") or house_name_by_id.get(current_id, "") or "none")
+        target_name = str(mission.get("target_house_name", "") or house_name_by_id.get(target_id, "") or "none")
+        self.mission_var.set(f"Mission: unsearched={summary.get('UNSEARCHED',0)} in_progress={summary.get('IN_PROGRESS',0)} explored={summary.get('EXPLORED',0)} found={summary.get('PERSON_FOUND',0)}")
+        self.map_status_var.set(
+            f"Map: current={current_name} "
+            f"target={target_name} "
+            f"bg={overhead.get('refresh_time','-')}"
+        )
+
+        if self.map_widget is not None and self.map_window is not None and self.map_window.winfo_exists():
+            if self.loaded_map_image is not None:
+                self.map_widget.set_background_image(self.loaded_map_image)
+            self.map_widget.set_calibration(affine, image_size, anchors)
+            self.map_widget.set_house_boxes(display_house_boxes)
+            self.map_widget.update_uav(pose_x, pose_y, pose_yaw)
+            self.map_widget.update_houses(houses if self.show_houses_var.get() else [])
+            self.map_widget.set_route_target(target_xy if (self.show_houses_var.get() and self.show_route_var.get()) else None)
+
+        if self.open_map_widget is not None and self.open_map_window is not None and self.open_map_window.winfo_exists():
+            if self.loaded_map_image is not None:
+                self.open_map_widget.set_background_image(self.loaded_map_image)
+            # Open view mirrors the calibrated map display without the
+            # editable calibration anchors or interactive house-setting tools.
+            self.open_map_widget.set_calibration(affine, image_size, [])
+            self.open_map_widget.set_house_boxes(display_house_boxes)
+            self.open_map_widget.update_uav(pose_x, pose_y, pose_yaw)
+            self.open_map_widget.update_houses([])
+            self.open_map_widget.set_route_target(None)
 
     def call_async(self, desc: str, fn) -> None:
         if self.manual_request_inflight:
@@ -949,6 +1069,7 @@ class Panel:
         self.open_map_window = tk.Toplevel(self.root)
         self.open_map_window.title("Overhead Map - UAV Pose")
         self.open_map_window.resizable(False, False)
+        self.open_map_window.protocol("WM_DELETE_WINDOW", self._close_open_map_window)
         toolbar = tk.Frame(self.open_map_window)
         toolbar.pack(fill="x", padx=8, pady=(8, 0))
         tk.Label(toolbar, textvariable=self.map_pose_var, anchor="w").pack(side="left", padx=(0, 8))
@@ -959,9 +1080,10 @@ class Panel:
 
     def toggle_map_window(self) -> None:
         if self.map_window and self.map_window.winfo_exists():
-            self.map_window.destroy(); self.map_window = None; self.map_widget = None; self.map_status_var.set("Map: closed"); return
+            self._close_map_window(); return
         self._ensure_default_map_loaded(force=True)
         self.map_window = tk.Toplevel(self.root); self.map_window.title("Setting Map - Alignment"); self.map_window.resizable(False, False)
+        self.map_window.protocol("WM_DELETE_WINDOW", self._close_map_window)
         toolbar = tk.Frame(self.map_window); toolbar.pack(fill="x", padx=8, pady=(8, 0))
         tk.Button(toolbar, text="Capture Fixed Map", command=self.refresh_map_background_async).pack(side="left")
         tk.Button(toolbar, text="Load Local Image", command=self.on_load_map_image).pack(side="left", padx=(6, 0))
@@ -996,6 +1118,26 @@ class Panel:
         self.map_widget.set_rect_select_callback(self.on_house_rect_selected)
         self.map_widget.set_rect_select_enabled(bool(self.house_set_var.get()))
         self.refresh_map_async(with_background=False)
+
+    def _close_open_map_window(self) -> None:
+        try:
+            if self.open_map_window is not None and self.open_map_window.winfo_exists():
+                self.open_map_window.destroy()
+        except Exception:
+            pass
+        self.open_map_window = None
+        self.open_map_widget = None
+        self.map_status_var.set("Map: closed")
+
+    def _close_map_window(self) -> None:
+        try:
+            if self.map_window is not None and self.map_window.winfo_exists():
+                self.map_window.destroy()
+        except Exception:
+            pass
+        self.map_window = None
+        self.map_widget = None
+        self.map_status_var.set("Map: closed")
 
     def on_auto_select_house(self) -> None: threading.Thread(target=lambda: (self.safe(self.client.post_json, "/select_nearest_unsearched_house", {}, label="Auto-select nearest"), self.refresh_map_async()), daemon=True).start()
     def on_navigate_step_to_house(self) -> None: self.call_async("Nav step to house", lambda: self._apply_response(self.safe(self.client.post_json, "/navigate_step_to_house", {}, label="Nav step to house")))
