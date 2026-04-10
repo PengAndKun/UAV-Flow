@@ -1,0 +1,82 @@
+{
+  "status": "ok",
+  "summary": "front_obstacle=1 front_min=61.0cm candidates=2 best_traversable=1",
+  "front_obstacle": {
+    "present": true,
+    "front_min_depth_cm": 61.0,
+    "front_mean_depth_cm": 373.68,
+    "severity": "high"
+  },
+  "entry_assessment": {
+    "candidate_count": 2,
+    "best_candidate": {
+      "candidate_id": "depth_entry_01",
+      "bbox": {
+        "x": 249,
+        "y": 165,
+        "width": 169,
+        "height": 163
+      },
+      "center_x_norm": 0.52109375,
+      "center_y_norm": 0.5135416666666667,
+      "width_ratio": 0.2640625,
+      "height_ratio": 0.33958333333333335,
+      "entry_distance_cm": 602.606201171875,
+      "surrounding_depth_cm": 272.1572265625,
+      "clearance_depth_cm": 594.3328857421875,
+      "depth_gain_cm": 330.448974609375,
+      "opening_width_cm": 318.25139999389637,
+      "traversable": true,
+      "confidence": 0.9957812500000002,
+      "rationale": "distance=603cm, width=318cm, clearance=594cm, gain=330cm"
+    },
+    "candidates": [
+      {
+        "candidate_id": "depth_entry_01",
+        "bbox": {
+          "x": 249,
+          "y": 165,
+          "width": 169,
+          "height": 163
+        },
+        "center_x_norm": 0.52109375,
+        "center_y_norm": 0.5135416666666667,
+        "width_ratio": 0.2640625,
+        "height_ratio": 0.33958333333333335,
+        "entry_distance_cm": 602.606201171875,
+        "surrounding_depth_cm": 272.1572265625,
+        "clearance_depth_cm": 594.3328857421875,
+        "depth_gain_cm": 330.448974609375,
+        "opening_width_cm": 318.25139999389637,
+        "traversable": true,
+        "confidence": 0.9957812500000002,
+        "rationale": "distance=603cm, width=318cm, clearance=594cm, gain=330cm"
+      },
+      {
+        "candidate_id": "depth_entry_02",
+        "bbox": {
+          "x": 450,
+          "y": 165,
+          "width": 116,
+          "height": 139
+        },
+        "center_x_norm": 0.79375,
+        "center_y_norm": 0.48854166666666665,
+        "width_ratio": 0.18125,
+        "height_ratio": 0.28958333333333336,
+        "entry_distance_cm": 793.9991455078125,
+        "surrounding_depth_cm": 267.29913330078125,
+        "clearance_depth_cm": 844.1851196289062,
+        "depth_gain_cm": 526.7000122070312,
+        "opening_width_cm": 287.824690246582,
+        "traversable": true,
+        "confidence": 0.9412500000000001,
+        "rationale": "distance=794cm, width=288cm, clearance=844cm, gain=527cm"
+      }
+    ]
+  },
+  "depth_path": "E:\\github\\UAV-Flow\\captures_remote\\capture_20260403_133952_house_1_depth_cm.png",
+  "hfov_deg": 90.0,
+  "max_valid_depth_cm": 1200.0,
+  "run_dir": "E:\\github\\UAV-Flow\\phase2_modality2_depth_analysis\\outputs\\depth_analysis_20260403_161756_capture_20260403_133952_house_1_depth_cm"
+}

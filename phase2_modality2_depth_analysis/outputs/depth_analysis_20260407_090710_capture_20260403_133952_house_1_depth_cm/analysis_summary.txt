@@ -1,0 +1,15 @@
+status=ok
+summary=front_obstacle=1 front_min=61.0cm candidates=2 best_traversable=1
+
+front_obstacle.present=True
+front_obstacle.front_min_depth_cm=61.0
+front_obstacle.front_mean_depth_cm=373.68
+front_obstacle.severity=high
+
+entry_assessment.candidate_count=2
+entry_assessment.best_candidate.entry_distance_cm=602.606201171875
+entry_assessment.best_candidate.opening_width_cm=318.25139999389637
+entry_assessment.best_candidate.clearance_depth_cm=594.3328857421875
+entry_assessment.best_candidate.depth_gain_cm=330.448974609375
+entry_assessment.best_candidate.traversable=True
+entry_assessment.best_candidate.confidence=0.9957812500000002

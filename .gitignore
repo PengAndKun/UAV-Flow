@@ -57,7 +57,8 @@ UAV-Flow-Eval/__pycache__
 UnrealEnv/
 captures_remote
 phase1_yolo26_training
-phase2_modality2_depth_analysis
+phase2_modality2_depth_analysis/results
+phase2_multimodal_fusion_analysis/exports
 phase2_door_or_window_yolo26_training
 phase2_multimodal_fusion_analysis
 phase3_dataset_export
