@@ -21,6 +21,13 @@
 3. [`03_experiment_plan.md`](03_experiment_plan.md)
 4. [`04_stepc_labeling_standard.md`](04_stepc_labeling_standard.md)
 5. [`05_pure_llm_baseline_test.md`](05_pure_llm_baseline_test.md)
+6. [`06_agent_state_schema.md`](06_agent_state_schema.md)
+7. [`07_teacher_schema_spec.md`](07_teacher_schema_spec.md)
+8. [`08_entry_state_builder_spec.md`](08_entry_state_builder_spec.md)
+9. [`09_distillation_dataset_export_spec.md`](09_distillation_dataset_export_spec.md)
+10. [`10_implementation_sequence.md`](10_implementation_sequence.md)
+11. [`11_teacher_validator_spec.md`](11_teacher_validator_spec.md)
+12. [`12_pilot_dataset_plan.md`](12_pilot_dataset_plan.md)
 
 ## 这条路线的核心思想
 

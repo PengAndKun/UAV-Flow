@@ -387,6 +387,100 @@ Step C 不应该直接承担：
 - 生成高质量轨迹标签
 - 后续蒸馏成 student policy
 
+### 4.6.1 Step C 的表示蒸馏应该蒸什么
+
+这里建议明确一点：
+
+- 不是蒸馏“整张图的通用大模型特征”
+- 而是蒸馏**与候选入口直接相关的局部语义表示**
+
+因为你当前已经有：
+
+- `YOLO26`
+  - 可以稳定检测 `open door / door / close door / window`
+- 深度模块
+  - 可以给出距离、宽度、前障碍、可穿越性
+- 融合模块
+  - 可以输出入口状态
+
+所以后面的 student 没必要再从整张图重新学“哪里是门”，更合理的是：
+
+1. 先用 `YOLO` 找到 top-K 候选框
+2. 再对这些候选框提取 RGB 区域和 depth 区域的局部特征
+3. 再把 `LLM teacher` 的高层判断蒸馏到这些候选级表示中
+
+### 4.6.2 Teacher 端应输出哪些可蒸馏信号
+
+建议把 Step C teacher 的输出拆成两类：
+
+#### A. 结构化 teacher 标签
+
+这些直接用于监督 student：
+
+- `entry_state`
+  - `enterable_open_door`
+  - `enterable_door`
+  - `visible_but_blocked_entry`
+  - `front_blocked_detour`
+  - `window_visible_keep_search`
+  - `geometric_opening_needs_confirmation`
+  - `no_entry_confirmed`
+- `subgoal`
+  - `keep_search`
+  - `approach_entry`
+  - `align_entry`
+  - `detour_left`
+  - `detour_right`
+  - `cross_entry`
+  - `backoff_and_reobserve`
+- `action_hint`
+  - `forward`
+  - `yaw_left`
+  - `yaw_right`
+  - `left`
+  - `right`
+  - `backward`
+  - `hold`
+- `target_candidate_id`
+  - 当前 top-K 候选里，teacher 认为最该关注的是哪一个
+- `risk_level`
+  - `low / medium / high`
+
+#### B. 语义解释特征
+
+建议保留 LLM 的短解释，例如：
+
+- `open door is visible but still far, approach first`
+- `front obstacle is too close, detour left before re-checking the entry`
+
+然后把这一句短解释编码成一个固定维度向量，作为：
+
+- `teacher_reason_embedding`
+
+这里不要求一定拿到 LLM 内部隐藏层。
+更推荐的做法是：
+
+- 让 LLM 先生成短解释文本
+- 再用一个稳定的文本编码器把它变成 embedding
+
+这样更容易复现，也更适合工程部署。
+
+### 4.6.3 为什么这里要做“候选级蒸馏”
+
+这一步的目标不是立即穿门，而是：
+
+- 识别当前最相关的候选入口
+- 粗判断这个目标应不应该靠近
+- 判断现在该接近、绕行，还是继续搜索
+
+也就是说，这里的 student 首先学的是：
+
+- `目标识别`
+- `目标粗定位`
+- `局部子任务选择`
+
+而不是一步到位学完整低层飞行控制。
+
 ### 4.7 Step C 的 done 标准
 
 我建议你把 Step C 的完成条件定义成：
@@ -435,24 +529,103 @@ Step C 不应该直接承担：
 
 ### 5.1 输入状态
 
-推荐三部分：
+这里建议把输入状态改成“候选级融合状态”，而不是整图重新做一遍大视觉 backbone。
 
-#### 深度图分支
+推荐四部分：
 
-- 下采样深度图，如 `64x64`
+#### A. 全局状态分支
 
-#### 结构化分支
+- 当前 `pose / yaw`
+- `front_obstacle.present`
+- `front_obstacle.front_min_depth_cm`
+- `target_house_id`
+- `current_house_id`
+- `target_distance / target_bearing`
+- 最近 2 到 4 步动作
 
-- YOLO 标量
-- depth 标量
-- fusion 状态
-- LLM hint 编码
+#### B. YOLO 候选分支
 
-#### 控制分支
+对每一帧保留前 `K=3` 个候选框，每个候选提取：
 
-- 当前 yaw
-- 最近动作
-- 当前步数比例
+- `class_onehot`
+  - `open door / door / close door / window`
+- `confidence`
+- `cx, cy, w, h`
+- `bbox_area_ratio`
+- `aspect_ratio`
+- `candidate_rank`
+
+#### C. Depth ROI 几何分支
+
+对每个 YOLO 候选框，在 depth 图上对齐对应区域，再提取：
+
+- `entry_distance_cm`
+- `surrounding_depth_cm`
+- `clearance_depth_cm`
+- `depth_gain_cm`
+- `opening_width_cm`
+- `traversable`
+- `crossing_ready`
+
+也就是说：
+
+- 先由 RGB/YOLO 决定“看哪个候选”
+- 再由 depth 判断“这个候选在几何上是否可接近/可穿越”
+
+#### D. Teacher 蒸馏分支
+
+来自 Step C teacher：
+
+- `entry_state`
+- `subgoal`
+- `action_hint`
+- `risk_level`
+- `target_candidate_id`
+- `teacher_reason_embedding`
+
+### 5.1.1 如果要加视觉 ROI encoder，建议怎么做
+
+第一版建议先不用复杂的整图 backbone，而是只对候选框做局部编码：
+
+- `RGB ROI encoder`
+  - 对 top-K 候选框的 RGB crop 做轻量 CNN 编码
+- `Depth ROI encoder`
+  - 对对应 depth crop 做轻量 CNN 编码
+
+然后：
+
+- `candidate_structured_feature`
+- `candidate_rgb_roi_feature`
+- `candidate_depth_roi_feature`
+
+一起拼成每个候选的表示。
+
+如果第一版结构化特征就已经够强，可以先不加 ROI encoder。
+也就是说，建议顺序是：
+
+1. 先做结构化候选状态
+2. 再视效果决定是否加 ROI encoder
+
+### 5.1.2 当前最推荐的 student 表示
+
+推荐把 student 中间表示记成：
+
+- `z_entry = f(global_state, topK_candidate_features, teacher_signals)`
+
+其中：
+
+- `global_state`
+  负责当前 UAV 处境
+- `topK_candidate_features`
+  负责门/窗候选和几何可通行性
+- `teacher_signals`
+  负责 LLM 的高层语义引导
+
+这一版最适合作为：
+
+- BC 初始化的输入
+- PPO 微调的状态
+- 后续蒸馏 student 的统一表示
 
 ### 5.2 动作空间
 
@@ -494,6 +667,44 @@ teacher 可以是：
 - 小 CNN + MLP
 - 可部署
 - 推理快
+
+### 6.2.1 蒸馏目标怎么定义
+
+建议 student 同时学习 4 类目标：
+
+1. `entry_state` 分类
+2. `subgoal` 分类
+3. `action_hint` 分类
+4. `teacher_reason_embedding` 回归
+
+也就是说，student 不是只学最终动作，
+而是同时学：
+
+- 当前是什么情况
+- 下一步大任务该做什么
+- 粗粒度动作该往哪边走
+- teacher 的高层语义表示
+
+### 6.2.2 推荐损失函数
+
+建议最终损失写成：
+
+`L = λ1 L_state + λ2 L_subgoal + λ3 L_action + λ4 L_semantic + λ5 L_policy`
+
+其中：
+
+- `L_state`
+  - 入口状态分类损失
+- `L_subgoal`
+  - 子任务分类损失
+- `L_action`
+  - 动作提示分类损失
+- `L_semantic`
+  - `teacher_reason_embedding` 的蒸馏损失
+- `L_policy`
+  - BC 或 RL 的策略损失
+
+这会比只蒸馏动作更稳定，也更能保留 LLM 的高层语义知识。
 
 ### 6.3 蒸馏输出
 
