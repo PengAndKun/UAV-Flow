@@ -28,6 +28,15 @@
 10. [`10_implementation_sequence.md`](10_implementation_sequence.md)
 11. [`11_teacher_validator_spec.md`](11_teacher_validator_spec.md)
 12. [`12_pilot_dataset_plan.md`](12_pilot_dataset_plan.md)
+13. [`13_representation_distillation_plan.md`](13_representation_distillation_plan.md)
+14. [`14_target_conditioned_entry_fusion.md`](14_target_conditioned_entry_fusion.md)
+15. [`15_target_conditioned_fusion_schema.md`](15_target_conditioned_fusion_schema.md)
+16. [`16_target_match_score_design.md`](16_target_match_score_design.md)
+17. [`17_target_conditioned_teacher_spec.md`](17_target_conditioned_teacher_spec.md)
+18. [`18_target_conditioned_entry_state_builder_spec.md`](18_target_conditioned_entry_state_builder_spec.md)
+19. [`19_target_conditioned_dataset_export_spec.md`](19_target_conditioned_dataset_export_spec.md)
+20. [`20_representation_distillation_trainer_spec.md`](20_representation_distillation_trainer_spec.md)
+21. [`21_representation_distillation_implementation_plan.md`](21_representation_distillation_implementation_plan.md)
 
 ## 这条路线的核心思想
 
