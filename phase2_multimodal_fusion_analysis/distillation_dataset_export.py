@@ -128,6 +128,35 @@ def _class_counts(items: List[Dict[str, Any]], field: str) -> Dict[str, int]:
     return dict(sorted(counter.items(), key=lambda pair: pair[0]))
 
 
+def _teacher_field_counts(items: List[Dict[str, Any]], field: str) -> Dict[str, int]:
+    counter: Counter[str] = Counter()
+    for item in items:
+        teacher_targets = item.get("teacher_targets", {})
+        value = str(teacher_targets.get(field) or "").strip()
+        if value:
+            counter[value] += 1
+    return dict(sorted(counter.items(), key=lambda pair: pair[0]))
+
+
+def _teacher_available_count(items: List[Dict[str, Any]], field: str) -> int:
+    total = 0
+    for item in items:
+        teacher_targets = item.get("teacher_targets", {})
+        if _safe_int(teacher_targets.get(field), 0) == 1:
+            total += 1
+    return total
+
+
+def _missing_teacher_field_count(items: List[Dict[str, Any]], field: str) -> int:
+    total = 0
+    for item in items:
+        teacher_targets = item.get("teacher_targets", {})
+        value = str(teacher_targets.get(field) or "").strip()
+        if not value:
+            total += 1
+    return total
+
+
 def _group_key(sample: Dict[str, Any]) -> str:
     teacher_targets = sample.get("teacher_targets", {})
     entry_state = str(teacher_targets.get("entry_state") or "").strip()
@@ -160,6 +189,7 @@ def _split_samples(samples: List[Dict[str, Any]], val_ratio: float) -> Tuple[Lis
 def _make_export_record(sample: Dict[str, Any], sample_dir: Path, split: str) -> Dict[str, Any]:
     teacher_targets = sample.get("teacher_targets", {})
     metadata = sample.get("metadata", {})
+    global_state = sample.get("global_state", {})
     return {
         "sample_id": sample["sample_id"],
         "split": split,
@@ -173,6 +203,25 @@ def _make_export_record(sample: Dict[str, Any], sample_dir: Path, split: str) ->
         "subgoal": str(teacher_targets.get("subgoal") or ""),
         "action_hint": str(teacher_targets.get("action_hint") or ""),
         "risk_level": str(teacher_targets.get("risk_level") or ""),
+        "target_conditioned_teacher_available": _safe_int(
+            teacher_targets.get("target_conditioned_teacher_available"), 0
+        ),
+        "target_conditioned_target_candidate_id": _safe_int(
+            teacher_targets.get("target_conditioned_target_candidate_id"), -1
+        ),
+        "target_conditioned_state": str(teacher_targets.get("target_conditioned_state") or ""),
+        "target_conditioned_subgoal": str(teacher_targets.get("target_conditioned_subgoal") or ""),
+        "target_conditioned_action_hint": str(
+            teacher_targets.get("target_conditioned_action_hint") or ""
+        ),
+        "target_conditioned_confidence": _safe_float(
+            teacher_targets.get("target_conditioned_confidence"), 0.0
+        ),
+        "target_house_id": _safe_int(global_state.get("target_house_id"), -1),
+        "target_house_in_fov": _safe_int(global_state.get("target_house_in_fov"), 0),
+        "target_conditioning_enabled": _safe_int(
+            sample.get("metadata", {}).get("target_conditioning_enabled"), 0
+        ),
         "task_label": str(metadata.get("task_label") or ""),
         "source_run_dir": str(metadata.get("source_run_dir") or sample["run_dir"]),
     }
@@ -238,10 +287,30 @@ def export_distillation_dataset(
     train_records: List[Dict[str, Any]] = []
     val_records: List[Dict[str, Any]] = []
     export_class_counts = {
-        "entry_state": _class_counts(loaded_samples, "entry_state"),
-        "subgoal": _class_counts(loaded_samples, "subgoal"),
-        "action_hint": _class_counts(loaded_samples, "action_hint"),
+        "entry_state": _teacher_field_counts(loaded_samples, "entry_state"),
+        "subgoal": _teacher_field_counts(loaded_samples, "subgoal"),
+        "action_hint": _teacher_field_counts(loaded_samples, "action_hint"),
+        "target_conditioned_state": _teacher_field_counts(loaded_samples, "target_conditioned_state"),
+        "target_conditioned_subgoal": _teacher_field_counts(loaded_samples, "target_conditioned_subgoal"),
+        "target_conditioned_action_hint": _teacher_field_counts(
+            loaded_samples, "target_conditioned_action_hint"
+        ),
     }
+    target_conditioned_teacher_available_count = _teacher_available_count(
+        loaded_samples, "target_conditioned_teacher_available"
+    )
+    missing_target_conditioned_fields = {
+        "target_conditioned_state": _missing_teacher_field_count(
+            loaded_samples, "target_conditioned_state"
+        ),
+        "target_conditioned_subgoal": _missing_teacher_field_count(
+            loaded_samples, "target_conditioned_subgoal"
+        ),
+        "target_conditioned_action_hint": _missing_teacher_field_count(
+            loaded_samples, "target_conditioned_action_hint"
+        ),
+    }
+    val_sample_ids = {item["sample_id"] for item in val_samples}
 
     for sample_index, sample in enumerate(loaded_samples, start=1):
         sample_dir = samples_dir / f"sample_{sample_index:06d}"
@@ -260,9 +329,13 @@ def export_distillation_dataset(
                 "rgb_path": sample["metadata"].get("rgb_path"),
                 "depth_cm_path": sample["metadata"].get("depth_cm_path"),
                 "depth_preview_path": sample["metadata"].get("depth_preview_path"),
+                "target_house_id": sample["global_state"].get("target_house_id"),
+                "current_house_id": sample["global_state"].get("current_house_id"),
+                "target_house_in_fov": sample["global_state"].get("target_house_in_fov"),
+                "target_conditioning_enabled": sample["metadata"].get("target_conditioning_enabled", 1),
             },
         )
-        split = "val" if any(item["sample_id"] == sample["sample_id"] for item in val_samples) else "train"
+        split = "val" if sample["sample_id"] in val_sample_ids else "train"
         record = _make_export_record(sample, sample_dir, split)
         if split == "train":
             train_records.append(record)
@@ -283,6 +356,9 @@ def export_distillation_dataset(
         "skipped_counts": dict(sorted(skipped_counter.items(), key=lambda pair: pair[0])),
         "allow_weak_valid": bool(allow_weak_valid),
         "min_teacher_confidence": float(min_teacher_confidence),
+        "target_conditioned_enabled": True,
+        "target_conditioned_teacher_available_count": target_conditioned_teacher_available_count,
+        "missing_target_conditioned_fields_count": missing_target_conditioned_fields,
     }
     _write_json(export_dir / "quality_report.json", quality_report)
 
@@ -295,8 +371,12 @@ def export_distillation_dataset(
         "entry_state_counts": export_class_counts["entry_state"],
         "subgoal_counts": export_class_counts["subgoal"],
         "action_hint_counts": export_class_counts["action_hint"],
+        "target_conditioned_state_counts": export_class_counts["target_conditioned_state"],
+        "target_conditioned_subgoal_counts": export_class_counts["target_conditioned_subgoal"],
+        "target_conditioned_action_hint_counts": export_class_counts["target_conditioned_action_hint"],
         "allow_weak_valid": bool(allow_weak_valid),
         "min_teacher_confidence": float(min_teacher_confidence),
+        "target_conditioned_enabled": True,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     _write_json(export_dir / "manifest.json", manifest)
@@ -311,6 +391,9 @@ def export_distillation_dataset(
         "entry_state_counts": export_class_counts["entry_state"],
         "subgoal_counts": export_class_counts["subgoal"],
         "action_hint_counts": export_class_counts["action_hint"],
+        "target_conditioned_state_counts": export_class_counts["target_conditioned_state"],
+        "target_conditioned_subgoal_counts": export_class_counts["target_conditioned_subgoal"],
+        "target_conditioned_action_hint_counts": export_class_counts["target_conditioned_action_hint"],
         "skipped_counts": quality_report["skipped_counts"],
     }
 

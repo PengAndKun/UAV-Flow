@@ -45,6 +45,9 @@ DOORLIKE_CLASSES = {
 OPEN_DOOR_CLASSES = {"open door", "open_door"}
 WINDOW_CLASSES = {"window"}
 CROSSING_READY_MAX_DISTANCE_CM = 320.0
+DEFAULT_HOUSES_CONFIG_PATH = ROOT / "UAV-Flow-Eval" / "houses_config.json"
+TARGET_MATCH_MIN_SCORE = 0.55
+TARGET_MATCH_MIN_TARGET_SCORE = 0.45
 
 
 def ensure_dir(path: Path) -> None:
@@ -72,6 +75,276 @@ def find_latest_phase2_weights(project_root: Optional[Path] = None) -> Path:
 
 def normalize_class_name(name: Any) -> str:
     return str(name or "").strip().lower().replace("_", " ")
+
+
+def normalize_angle_deg(angle_deg: float) -> float:
+    value = float(angle_deg)
+    while value > 180.0:
+        value -= 360.0
+    while value <= -180.0:
+        value += 360.0
+    return value
+
+
+def side_from_x_norm(x_norm: Optional[float]) -> str:
+    if x_norm is None:
+        return "unknown"
+    value = float(x_norm)
+    if value < 0.44:
+        return "left"
+    if value > 0.56:
+        return "right"
+    return "center"
+
+
+def side_from_bearing_deg(relative_bearing_deg: Optional[float], hfov_deg: float) -> str:
+    if relative_bearing_deg is None:
+        return "unknown"
+    bearing = float(relative_bearing_deg)
+    if abs(bearing) > float(hfov_deg) * 0.5:
+        return "out_of_view"
+    if bearing > 12.0:
+        return "left"
+    if bearing < -12.0:
+        return "right"
+    return "center"
+
+
+def detection_center_x_norm(detection: Dict[str, Any], image_width: int) -> Optional[float]:
+    det_box = detection.get("xyxy", [])
+    if not isinstance(det_box, list) or len(det_box) != 4 or image_width <= 0:
+        return None
+    return clamp(((float(det_box[0]) + float(det_box[2])) * 0.5) / float(image_width), 0.0, 1.0)
+
+
+def house_lookup_from_config(houses_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    houses = houses_config.get("houses", []) if isinstance(houses_config, dict) else []
+    lookup: Dict[str, Dict[str, Any]] = {}
+    for house in houses:
+        if not isinstance(house, dict):
+            continue
+        house_id = str(house.get("id") or "").strip()
+        if house_id:
+            lookup[house_id] = house
+    return lookup
+
+
+def load_houses_config(path: Optional[Path] = None) -> Dict[str, Any]:
+    config_path = (path or DEFAULT_HOUSES_CONFIG_PATH).resolve()
+    if not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def build_target_context(
+    *,
+    state: Optional[Dict[str, Any]],
+    houses_config: Dict[str, Any],
+    image_shape: Tuple[int, int],
+    hfov_deg: float,
+) -> Dict[str, Any]:
+    state = state if isinstance(state, dict) else {}
+    pose = state.get("pose", {}) if isinstance(state.get("pose"), dict) else {}
+    house_mission = state.get("house_mission", {}) if isinstance(state.get("house_mission"), dict) else {}
+    house_registry = state.get("house_registry", {}) if isinstance(state.get("house_registry"), dict) else {}
+    houses_by_id = house_lookup_from_config(houses_config)
+
+    target_house_id = str(
+        house_mission.get("target_house_id")
+        or state.get("target_house_id")
+        or house_registry.get("target_house_id")
+        or houses_config.get("current_target_id")
+        or ""
+    ).strip()
+    current_house_id = str(
+        house_mission.get("current_house_id")
+        or state.get("current_house_id")
+        or state.get("current_house")
+        or ""
+    ).strip()
+    target_house = houses_by_id.get(target_house_id, {})
+
+    pose_x = pose.get("x", house_mission.get("uav_x"))
+    pose_y = pose.get("y", house_mission.get("uav_y"))
+    pose_yaw = pose.get("uav_yaw", pose.get("task_yaw", house_mission.get("uav_yaw")))
+    try:
+        pose_x = float(pose_x) if pose_x is not None else None
+        pose_y = float(pose_y) if pose_y is not None else None
+        pose_yaw = float(pose_yaw) if pose_yaw is not None else None
+    except Exception:
+        pose_x = pose_y = pose_yaw = None
+
+    target_x = target_house.get("center_x")
+    target_y = target_house.get("center_y")
+    try:
+        target_x = float(target_x) if target_x is not None else None
+        target_y = float(target_y) if target_y is not None else None
+    except Exception:
+        target_x = target_y = None
+
+    target_distance_cm = house_mission.get("distance_to_target_cm", state.get("target_distance_cm"))
+    try:
+        target_distance_cm = float(target_distance_cm) if target_distance_cm is not None else None
+    except Exception:
+        target_distance_cm = None
+    if target_distance_cm is None and None not in (pose_x, pose_y, target_x, target_y):
+        target_distance_cm = float(math.hypot(target_x - pose_x, target_y - pose_y))
+
+    target_bearing_deg: Optional[float] = None
+    if None not in (pose_x, pose_y, pose_yaw, target_x, target_y):
+        absolute_bearing = math.degrees(math.atan2(float(target_y - pose_y), float(target_x - pose_x)))
+        target_bearing_deg = normalize_angle_deg(absolute_bearing - float(pose_yaw))
+
+    expected_side = side_from_bearing_deg(target_bearing_deg, hfov_deg)
+    target_in_fov = expected_side != "out_of_view" if target_bearing_deg is not None else False
+    expected_image_x: Optional[float] = None
+    if target_bearing_deg is not None and target_in_fov:
+        expected_image_x = clamp(0.5 - (float(target_bearing_deg) / max(1.0, float(hfov_deg))), 0.0, 1.0)
+
+    image_bbox = target_house.get("map_bbox_image", {}) if isinstance(target_house.get("map_bbox_image"), dict) else {}
+    return {
+        "target_house_id": target_house_id or None,
+        "target_house_name": target_house.get("name"),
+        "current_house_id": current_house_id or None,
+        "current_house_name": house_mission.get("current_house_name"),
+        "target_house_distance_cm": target_distance_cm,
+        "target_house_bearing_deg": target_bearing_deg,
+        "target_house_in_fov": bool(target_in_fov),
+        "target_house_expected_side": expected_side,
+        "target_house_expected_image_x": expected_image_x,
+        "target_house_center_world": {
+            "x": target_x,
+            "y": target_y,
+        },
+        "target_house_map_bbox_image": image_bbox or None,
+        "uav_pose_world": {
+            "x": pose_x,
+            "y": pose_y,
+            "yaw": pose_yaw,
+        },
+        "image_width": int(image_shape[1]) if len(image_shape) >= 2 else None,
+        "image_height": int(image_shape[0]) if len(image_shape) >= 1 else None,
+    }
+
+
+def score_candidate_for_target_house(
+    *,
+    detection: Dict[str, Any],
+    semantic_depth_assessment: Optional[Dict[str, Any]],
+    target_context: Dict[str, Any],
+    image_shape: Tuple[int, int],
+) -> Dict[str, Any]:
+    image_width = int(image_shape[1]) if len(image_shape) >= 2 else 0
+    center_x_norm = detection_center_x_norm(detection, image_width)
+    image_side = side_from_x_norm(center_x_norm)
+    expected_x = target_context.get("target_house_expected_image_x")
+    expected_side = str(target_context.get("target_house_expected_side") or "unknown")
+    target_in_fov = bool(target_context.get("target_house_in_fov", False))
+    target_distance_cm = target_context.get("target_house_distance_cm")
+
+    bearing_score = 0.0
+    if expected_x is not None and center_x_norm is not None and target_in_fov:
+        bearing_score = clamp(1.0 - abs(float(center_x_norm) - float(expected_x)) / 0.5, 0.0, 1.0)
+
+    image_side_score = 0.0
+    if expected_side == "center":
+        image_side_score = clamp(1.0 - abs(float(center_x_norm or 0.5) - 0.5) / 0.25, 0.0, 1.0)
+    elif expected_side in {"left", "right"}:
+        image_side_score = 1.0 if image_side == expected_side else 0.0
+    elif expected_side == "out_of_view":
+        image_side_score = 0.0
+
+    range_score = 0.5
+    if semantic_depth_assessment and target_distance_cm is not None:
+        try:
+            entry_distance_cm = float(semantic_depth_assessment.get("entry_distance_cm"))
+            target_distance_val = float(target_distance_cm)
+            tolerance_cm = max(1200.0, target_distance_val * 0.75)
+            range_score = clamp(1.0 - abs(entry_distance_cm - target_distance_val) / tolerance_cm, 0.0, 1.0)
+        except Exception:
+            range_score = 0.5
+
+    normalized_name = normalize_class_name(detection.get("class_name"))
+    class_prior_norm = clamp(class_priority(normalized_name) / 3.0, 0.0, 1.0)
+    semantic_score = clamp(
+        0.65 * class_prior_norm + 0.35 * float(detection.get("confidence", 0.0)),
+        0.0,
+        1.0,
+    )
+
+    geometry_score = 0.0
+    entry_distance_cm = None
+    opening_width_cm = None
+    traversable = False
+    crossing_ready = False
+    depth_confidence = 0.0
+    if semantic_depth_assessment:
+        entry_distance_cm = float(semantic_depth_assessment.get("entry_distance_cm", 0.0))
+        opening_width_cm = float(semantic_depth_assessment.get("opening_width_cm", 0.0))
+        traversable = bool(semantic_depth_assessment.get("traversable", False))
+        crossing_ready = bool(semantic_depth_assessment.get("crossing_ready", False))
+        depth_confidence = float(semantic_depth_assessment.get("confidence", 0.0))
+        geometry_score = clamp(
+            0.55 * depth_confidence
+            + 0.30 * (1.0 if traversable else 0.0)
+            + 0.15 * (1.0 if crossing_ready else 0.0),
+            0.0,
+            1.0,
+        )
+
+    target_match_score = 0.0
+    if target_in_fov:
+        target_match_score = clamp(
+            0.45 * bearing_score
+            + 0.20 * image_side_score
+            + 0.35 * range_score,
+            0.0,
+            1.0,
+        )
+
+    candidate_total_score = clamp(
+        0.50 * target_match_score
+        + 0.25 * semantic_score
+        + 0.25 * geometry_score,
+        0.0,
+        1.0,
+    )
+    candidate_is_target_house_entry = bool(
+        normalized_name in DOORLIKE_CLASSES
+        and target_match_score >= TARGET_MATCH_MIN_TARGET_SCORE
+        and candidate_total_score >= TARGET_MATCH_MIN_SCORE
+    )
+
+    return {
+        "candidate_id": int(detection.get("candidate_id", -1)),
+        "class_name": detection.get("class_name"),
+        "class_name_normalized": normalized_name,
+        "confidence": float(detection.get("confidence", 0.0)),
+        "xyxy": [float(v) for v in detection.get("xyxy", [])] if isinstance(detection.get("xyxy"), list) else [],
+        "center_x_norm": center_x_norm,
+        "candidate_image_side": image_side,
+        "candidate_target_match_score": target_match_score,
+        "candidate_semantic_score": semantic_score,
+        "candidate_geometry_score": geometry_score,
+        "candidate_total_score": candidate_total_score,
+        "candidate_target_score_components": {
+            "bearing_score": bearing_score,
+            "image_side_score": image_side_score,
+            "range_score": range_score,
+            "expected_image_x": expected_x,
+            "expected_side": expected_side,
+        },
+        "candidate_house_id": target_context.get("target_house_id") if candidate_is_target_house_entry else None,
+        "candidate_is_target_house_entry": candidate_is_target_house_entry,
+        "entry_distance_cm": entry_distance_cm,
+        "opening_width_cm": opening_width_cm,
+        "traversable": traversable,
+        "crossing_ready": crossing_ready,
+        "semantic_depth_assessment": semantic_depth_assessment,
+    }
 
 
 def box_iou_xyxy(box_a: List[float], box_b: List[float]) -> float:
@@ -494,6 +767,48 @@ def recommend_subgoal_and_action(
     return "keep_search", "hold"
 
 
+def recommend_target_conditioned_action(
+    *,
+    target_state: str,
+    target_bearing_deg: Optional[float],
+    candidate_center_x_norm: Optional[float],
+    crossing_ready: bool,
+) -> Tuple[str, str]:
+    bearing = float(target_bearing_deg) if target_bearing_deg is not None else None
+    center = 0.5 if candidate_center_x_norm is None else float(candidate_center_x_norm)
+    if target_state == "target_house_not_in_view":
+        if bearing is None:
+            return "keep_search_target_house", "hold"
+        return ("reorient_to_target_house", "yaw_left") if bearing > 0.0 else ("reorient_to_target_house", "yaw_right")
+    if target_state == "non_target_house_entry_visible":
+        if bearing is None or abs(bearing) < 8.0:
+            return "ignore_non_target_entry", "hold"
+        return ("ignore_non_target_entry", "yaw_left") if bearing > 0.0 else ("ignore_non_target_entry", "yaw_right")
+    if target_state == "target_house_entry_blocked":
+        if center < 0.48:
+            return "detour_left_to_target_entry", "left"
+        return "detour_right_to_target_entry", "right"
+    if target_state == "target_house_entry_approachable":
+        if crossing_ready and 0.45 <= center <= 0.55:
+            return "cross_target_entry", "forward"
+        if center < 0.44:
+            return "approach_target_entry", "yaw_left"
+        if center > 0.56:
+            return "approach_target_entry", "yaw_right"
+        return "approach_target_entry", "forward"
+    if target_state == "target_house_entry_visible":
+        if candidate_center_x_norm is None:
+            if bearing is not None and abs(bearing) > 8.0:
+                return ("keep_search_target_house", "yaw_left") if bearing > 0.0 else ("keep_search_target_house", "yaw_right")
+            return "keep_search_target_house", "hold"
+        if center < 0.44:
+            return "keep_search_target_house", "yaw_left"
+        if center > 0.56:
+            return "keep_search_target_house", "yaw_right"
+        return "keep_search_target_house", "hold"
+    return "keep_search_target_house", "hold"
+
+
 def match_detection_to_candidate(
     detection: Dict[str, Any],
     candidates: List[Dict[str, Any]],
@@ -526,13 +841,29 @@ def build_fusion_decision(
     yolo_result: Dict[str, Any],
     depth_result: Dict[str, Any],
     image_shape: Tuple[int, int],
+    state: Optional[Dict[str, Any]] = None,
+    houses_config: Optional[Dict[str, Any]] = None,
     crossing_ready_max_distance_cm: float = CROSSING_READY_MAX_DISTANCE_CM,
 ) -> Dict[str, Any]:
     detections = list(yolo_result.get("detections", []))
+    detections = [
+        {
+            **det,
+            "candidate_id": idx,
+        }
+        for idx, det in enumerate(detections)
+    ]
     depth_analysis = dict(depth_result.get("analysis", {}))
     candidates = list(depth_analysis.get("entry_assessment", {}).get("candidates", []))
     best_depth_candidate = depth_analysis.get("entry_assessment", {}).get("best_candidate", {}) or {}
     front_obstacle = depth_analysis.get("front_obstacle", {}) or {}
+    houses_cfg = houses_config if isinstance(houses_config, dict) else {}
+    target_context = build_target_context(
+        state=state,
+        houses_config=houses_cfg,
+        image_shape=image_shape,
+        hfov_deg=float(depth_result.get("hfov_deg", 90.0)),
+    )
 
     semantic_detection = choose_best_semantic_detection(detections)
     matched_candidate: Optional[Dict[str, Any]] = None
@@ -548,10 +879,12 @@ def build_fusion_decision(
 
     thresholds = depth_result.get("thresholds", {}) if isinstance(depth_result.get("thresholds"), dict) else {}
     semantic_depth_assessment: Optional[Dict[str, Any]] = None
-    if semantic_detection is not None:
-        semantic_depth_assessment = summarize_semantic_region_depth(
+    semantic_depth_by_candidate_id: Dict[int, Dict[str, Any]] = {}
+    semantic_detections = [det for det in detections if class_priority(str(det.get("class_name_normalized", ""))) > 0]
+    for det in semantic_detections:
+        assessment = summarize_semantic_region_depth(
             depth_cm=depth_result.get("depth_cm_array"),
-            detection=semantic_detection,
+            detection=det,
             rgb_shape=image_shape,
             hfov_deg=float(depth_result.get("hfov_deg", 90.0)),
             traversable_min_width_cm=float(thresholds.get("traversable_min_width_cm", 90.0)),
@@ -559,6 +892,10 @@ def build_fusion_decision(
             traversable_min_depth_gain_cm=float(thresholds.get("traversable_min_depth_gain_cm", 80.0)),
             crossing_ready_max_distance_cm=float(crossing_ready_max_distance_cm),
         )
+        if assessment:
+            semantic_depth_by_candidate_id[int(det.get("candidate_id", -1))] = assessment
+    if semantic_detection is not None:
+        semantic_depth_assessment = semantic_depth_by_candidate_id.get(int(semantic_detection.get("candidate_id", -1)))
 
     normalized_name = normalize_class_name((semantic_detection or {}).get("class_name"))
     chosen_candidate: Dict[str, Any] = {}
@@ -636,6 +973,55 @@ def build_fusion_decision(
         crossing_ready=crossing_ready,
         front_blocked=front_blocked,
     )
+
+    candidate_target_scores: List[Dict[str, Any]] = []
+    for det in semantic_detections:
+        candidate_target_scores.append(
+            score_candidate_for_target_house(
+                detection=det,
+                semantic_depth_assessment=semantic_depth_by_candidate_id.get(int(det.get("candidate_id", -1))),
+                target_context=target_context,
+                image_shape=image_shape,
+            )
+        )
+    candidate_target_scores.sort(key=lambda item: float(item.get("candidate_total_score", 0.0)), reverse=True)
+    best_target_candidate = candidate_target_scores[0] if candidate_target_scores else {}
+    best_target_candidate_is_target_house_entry = bool(best_target_candidate.get("candidate_is_target_house_entry", False))
+    target_conditioned_state = "target_house_not_in_view"
+    target_conditioned_reason = "target house is not visible in the current field of view"
+    if not target_context.get("target_house_id"):
+        target_conditioned_state = "target_house_not_in_view"
+        target_conditioned_reason = "target house context is unavailable"
+    elif not bool(target_context.get("target_house_in_fov", False)):
+        target_conditioned_state = "target_house_not_in_view"
+        target_conditioned_reason = "target house is outside the current field of view"
+    elif best_target_candidate_is_target_house_entry:
+        if front_blocked or not bool(best_target_candidate.get("traversable", False)):
+            target_conditioned_state = "target_house_entry_blocked"
+            target_conditioned_reason = "target-house entry candidate exists but the path is blocked or not safely traversable"
+        elif bool(best_target_candidate.get("crossing_ready", False)):
+            target_conditioned_state = "target_house_entry_approachable"
+            target_conditioned_reason = "target-house entry candidate is aligned, traversable, and close enough to approach/cross"
+        else:
+            target_conditioned_state = "target_house_entry_approachable"
+            target_conditioned_reason = "target-house entry candidate is visible and traversable, but it should be approached first"
+    elif candidate_target_scores:
+        if any(normalize_class_name(item.get("class_name")) in DOORLIKE_CLASSES for item in candidate_target_scores):
+            target_conditioned_state = "non_target_house_entry_visible"
+            target_conditioned_reason = "visible door-like candidate is more likely to belong to a non-target house"
+        else:
+            target_conditioned_state = "target_house_entry_visible"
+            target_conditioned_reason = "target house is in view, but only weak or non-door entry evidence is available"
+    else:
+        target_conditioned_state = "target_house_entry_visible"
+        target_conditioned_reason = "target house is in view, but no reliable entry candidate has been detected yet"
+
+    target_conditioned_subgoal, target_conditioned_action_hint = recommend_target_conditioned_action(
+        target_state=target_conditioned_state,
+        target_bearing_deg=target_context.get("target_house_bearing_deg"),
+        candidate_center_x_norm=best_target_candidate.get("center_x_norm"),
+        crossing_ready=bool(best_target_candidate.get("crossing_ready", False)),
+    )
     decision_text = (
         f"{final_state}; "
         f"class={semantic_detection.get('class_name') if semantic_detection else 'none'}; "
@@ -671,6 +1057,14 @@ def build_fusion_decision(
         "crossing_ready_max_distance_cm": float(crossing_ready_max_distance_cm),
         "recommended_subgoal": recommended_subgoal,
         "recommended_action_hint": recommended_action_hint,
+        "target_context": target_context,
+        "candidate_target_scores": candidate_target_scores,
+        "best_target_candidate": best_target_candidate,
+        "best_target_candidate_is_target_house_entry": best_target_candidate_is_target_house_entry,
+        "target_conditioned_state": target_conditioned_state,
+        "target_conditioned_subgoal": target_conditioned_subgoal,
+        "target_conditioned_action_hint": target_conditioned_action_hint,
+        "target_conditioned_reason": target_conditioned_reason,
     }
 
 
@@ -771,6 +1165,11 @@ def build_panel_summary(result: Dict[str, Any]) -> str:
             (
                 f"Decision: subgoal={fusion.get('recommended_subgoal') or 'n/a'} "
                 f"action={fusion.get('recommended_action_hint') or 'n/a'}"
+            ),
+            (
+                f"Target: state={fusion.get('target_conditioned_state') or 'n/a'} "
+                f"subgoal={fusion.get('target_conditioned_subgoal') or 'n/a'} "
+                f"action={fusion.get('target_conditioned_action_hint') or 'n/a'}"
             ),
             f"Reason: {fusion.get('decision_reason', 'n/a')}",
         ]
@@ -927,6 +1326,12 @@ def build_labeling_manifest(
             "crossing_ready": fusion_section.get("crossing_ready"),
             "recommended_subgoal": fusion_section.get("recommended_subgoal"),
             "recommended_action_hint": fusion_section.get("recommended_action_hint"),
+            "target_house_id": (fusion_section.get("target_context") or {}).get("target_house_id"),
+            "target_house_in_fov": (fusion_section.get("target_context") or {}).get("target_house_in_fov"),
+            "target_conditioned_state": fusion_section.get("target_conditioned_state"),
+            "target_conditioned_subgoal": fusion_section.get("target_conditioned_subgoal"),
+            "target_conditioned_action_hint": fusion_section.get("target_conditioned_action_hint"),
+            "target_conditioned_reason": fusion_section.get("target_conditioned_reason"),
         },
         "annotation_template": {
             "gt_entry_state": "",
@@ -977,6 +1382,12 @@ def build_labeling_summary_text(manifest: Dict[str, Any]) -> str:
             f"fusion_decision: subgoal={fusion.get('recommended_subgoal', 'n/a')} "
             f"action={fusion.get('recommended_action_hint', 'n/a')}"
         ),
+        (
+            f"target_fusion: state={fusion.get('target_conditioned_state', 'n/a')} "
+            f"subgoal={fusion.get('target_conditioned_subgoal', 'n/a')} "
+            f"action={fusion.get('target_conditioned_action_hint', 'n/a')}"
+        ),
+        f"target_reason: {fusion.get('target_conditioned_reason', 'n/a')}",
         f"fusion_reason: {fusion.get('decision_reason', 'n/a')}",
     ]
     return "\n".join(lines) + "\n"
@@ -992,6 +1403,7 @@ def run_phase2_fusion_analysis(
     label: str = "",
     camera_info: Optional[Dict[str, Any]] = None,
     state: Optional[Dict[str, Any]] = None,
+    houses_config: Optional[Dict[str, Any]] = None,
     conf: float = 0.25,
     imgsz: int = 640,
     device: str = "0",
@@ -1000,6 +1412,7 @@ def run_phase2_fusion_analysis(
         raise RuntimeError("rgb_bgr is required for fusion analysis.")
     if depth_raw is None or not isinstance(depth_raw, np.ndarray):
         raise RuntimeError("depth_raw is required for fusion analysis.")
+    houses_cfg = houses_config if isinstance(houses_config, dict) else load_houses_config()
 
     run_root = (output_root or (ROOT / "phase2_multimodal_fusion_analysis" / "results")).resolve()
     ensure_dir(run_root)
@@ -1041,6 +1454,8 @@ def run_phase2_fusion_analysis(
         yolo_result=yolo_result,
         depth_result=depth_result,
         image_shape=rgb_bgr.shape[:2],
+        state=state,
+        houses_config=houses_cfg,
     )
     fusion_overlay = draw_fusion_overlay(
         rgb_bgr=rgb_bgr,
@@ -1058,6 +1473,7 @@ def run_phase2_fusion_analysis(
         "run_dir": str(run_dir),
         "labeling_dir": str(labeling_dir),
         "weights_path": str(selected_weights),
+        "houses_config_path": str(DEFAULT_HOUSES_CONFIG_PATH.resolve()),
         "inputs": {
             "rgb_path": str(rgb_path),
             "depth_cm_path": str(depth_cm_path),
@@ -1175,6 +1591,7 @@ def reprocess_phase2_fusion_run(
         camera_info = json.loads(camera_info_path.read_text(encoding="utf-8"))
     if state_path.exists():
         state = json.loads(state_path.read_text(encoding="utf-8"))
+    houses_config = load_houses_config()
 
     return run_phase2_fusion_analysis(
         rgb_bgr=rgb_bgr,
@@ -1184,6 +1601,7 @@ def reprocess_phase2_fusion_run(
         label="",
         camera_info=camera_info,
         state=state,
+        houses_config=houses_config,
         conf=float(conf),
         imgsz=int(imgsz),
         device=str(device),

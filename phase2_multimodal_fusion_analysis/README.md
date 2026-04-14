@@ -110,6 +110,15 @@ then:
 - normalizes it into `teacher_output.json`
 - validates it against `fusion_result.json`, `yolo_result.json`, `depth_result.json`
 - writes `teacher_validation.json`
+- preserves the original generic teacher fields:
+  - `entry_state`
+  - `subgoal`
+  - `action_hint`
+- and now also writes target-conditioned teacher targets:
+  - `target_conditioned_state`
+  - `target_conditioned_subgoal`
+  - `target_conditioned_action_hint`
+  - `target_conditioned_reason`
 
 Batch usage example:
 
@@ -138,6 +147,12 @@ The file contains:
 - `candidates` (fixed top-K, current implementation uses `K=3`)
 - `teacher_targets`
 - `metadata`
+
+The current builder now preserves target-conditioned signals as well:
+
+- `global_state.target_house_id / target_house_in_fov / target_house_expected_side`
+- `candidates[*].candidate_target_match_score / candidate_total_score / candidate_is_target_house_entry`
+- `teacher_targets.target_conditioned_state / target_conditioned_subgoal / target_conditioned_action_hint`
 
 Batch usage example:
 
@@ -176,8 +191,66 @@ Each export package contains:
 - `val_ids.txt`
 - `samples/`
 
+The exported JSONL records and manifest now include both:
+
+- the original teacher supervision
+  - `entry_state`
+  - `subgoal`
+  - `action_hint`
+- and the target-conditioned supervision
+  - `target_conditioned_state`
+  - `target_conditioned_subgoal`
+  - `target_conditioned_action_hint`
+  - `target_conditioned_target_candidate_id`
+
 Batch usage example:
 
 ```powershell
 python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_distillation_dataset_export.py
 ```
+
+Refresh existing `results/` folders with a newly trained YOLO model:
+
+- `refresh_results_with_new_yolo.py`
+
+This script is for the case where you retrain the Phase 2 YOLO model and want to
+replace the old semantic analysis inside existing:
+
+- `phase2_multimodal_fusion_analysis/results/fusion_*/`
+
+It will, by default:
+
+1. Re-run YOLO + fusion on each run directory using the new weights
+2. Overwrite old `yolo/`, `fusion/`, and `labeling/` semantic/fusion result files
+3. Refresh existing `anthropic*_vs_labeling_compare.json` files using the new `labeling_summary.txt`
+4. Refresh `teacher_output.json` / `teacher_validation.json`
+5. Refresh `entry_state.json`
+
+Batch usage example:
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\refresh_results_with_new_yolo.py
+```
+
+Reprocess only one run directory:
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\refresh_results_with_new_yolo.py --only_dir fusion_20260408_145511
+```
+
+Use a specific YOLO checkpoint:
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\refresh_results_with_new_yolo.py `
+  --weights E:\github\UAV-Flow\phase2_door_or_window_yolo26_training\models\phase2_entry_detector\your_run\weights\best.pt
+```
+
+Optional skip flags:
+
+- `--skip_compare_refresh`
+- `--skip_teacher_refresh`
+- `--skip_entry_state_refresh`
+
+The script writes a batch summary JSON under:
+
+- `phase2_multimodal_fusion_analysis/results/refresh_results_with_new_yolo_summary_*.json`

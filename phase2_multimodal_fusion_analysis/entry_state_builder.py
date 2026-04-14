@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,6 +22,13 @@ CLASS_PRIORITY = {
     "door": 1,
     "close door": 2,
     "window": 3,
+}
+EXPECTED_SIDE_TO_ID = {
+    "left": 0,
+    "center": 1,
+    "right": 2,
+    "out_of_view": 3,
+    "unknown": 4,
 }
 
 
@@ -108,9 +116,15 @@ def _class_onehot(name: str) -> List[int]:
     return [1 if normalized == cls else 0 for cls in CLASS_ORDER]
 
 
+def _expected_side_to_id(value: Any) -> int:
+    token = str(value or "").strip().lower()
+    return EXPECTED_SIDE_TO_ID.get(token, EXPECTED_SIDE_TO_ID["unknown"])
+
+
 def _zero_candidate(slot_id: int) -> Dict[str, Any]:
     return {
         "candidate_id": -1,
+        "raw_candidate_id": -1,
         "valid_mask": 0,
         "class_name": "",
         "class_onehot": [0, 0, 0, 0],
@@ -137,6 +151,18 @@ def _zero_candidate(slot_id: int) -> Dict[str, Any]:
         "source": "",
         "source_slot": slot_id,
         "match_iou": 0.0,
+        "candidate_target_match_score": 0.0,
+        "candidate_semantic_score": 0.0,
+        "candidate_geometry_score": 0.0,
+        "candidate_total_score": 0.0,
+        "candidate_house_id": -1,
+        "candidate_is_target_house_entry": 0,
+        "candidate_target_side_match": 0.0,
+        "candidate_center_in_target_bbox": 0,
+        "candidate_near_target_bbox": 0,
+        "candidate_image_side": "",
+        "target_expected_side": "",
+        "target_expected_image_x": 0.5,
     }
 
 
@@ -166,6 +192,38 @@ def _extract_depth_candidates(fusion: Dict[str, Any], depth_result: Dict[str, An
     for candidate in entry_assessment.get("candidates", []) if isinstance(entry_assessment.get("candidates"), list) else []:
         _append_candidate(candidate, "depth_candidate")
     return output
+
+
+def _extract_target_score_candidates(fusion: Dict[str, Any]) -> List[Dict[str, Any]]:
+    value = fusion.get("candidate_target_scores")
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _match_target_score_for_detection(detection: Dict[str, Any], fusion: Dict[str, Any]) -> Dict[str, Any]:
+    detection_box = detection.get("xyxy", [])
+    if not isinstance(detection_box, list) or len(detection_box) != 4:
+        return {}
+
+    det_class = _normalize_class_name(detection.get("class_name_normalized") or detection.get("class_name"))
+    best_item: Dict[str, Any] = {}
+    best_iou = 0.0
+    for candidate in _extract_target_score_candidates(fusion):
+        candidate_box = candidate.get("xyxy", [])
+        if not isinstance(candidate_box, list) or len(candidate_box) != 4:
+            continue
+        candidate_class = _normalize_class_name(candidate.get("class_name_normalized") or candidate.get("class_name"))
+        if candidate_class and det_class and candidate_class != det_class:
+            continue
+        iou = _box_iou([float(v) for v in detection_box], [float(v) for v in candidate_box])
+        if iou > best_iou:
+            best_iou = iou
+            best_item = dict(candidate)
+    if best_iou >= 0.10:
+        best_item["match_iou"] = best_iou
+        return best_item
+    return {}
 
 
 def _match_depth_features_for_detection(
@@ -212,11 +270,12 @@ def _build_global_state(
 ) -> Dict[str, Any]:
     pose = state_excerpt.get("pose", {}) if isinstance(state_excerpt.get("pose"), dict) else {}
     front_obstacle = depth_result.get("front_obstacle", {}) if isinstance(depth_result.get("front_obstacle"), dict) else {}
+    target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
     yaw_deg = _safe_float(pose.get("uav_yaw", pose.get("yaw", pose.get("task_yaw", 0.0))), 0.0)
     yaw_sin, yaw_cos = _yaw_to_sincos(yaw_deg)
-    target_distance_cm = state_excerpt.get("target_distance_cm")
+    target_distance_cm = target_context.get("target_house_distance_cm", state_excerpt.get("target_distance_cm"))
     target_distance_cm = None if target_distance_cm is None else _safe_float(target_distance_cm, 0.0)
-    target_bearing_deg = state_excerpt.get("target_bearing_deg")
+    target_bearing_deg = target_context.get("target_house_bearing_deg", state_excerpt.get("target_bearing_deg"))
     target_bearing_deg = None if target_bearing_deg is None else _safe_float(target_bearing_deg, 0.0)
     target_bearing_sin, target_bearing_cos = (0.0, 0.0)
     if target_bearing_deg is not None:
@@ -245,8 +304,16 @@ def _build_global_state(
         "front_obstacle_present": int(bool(front_obstacle.get("present", False))),
         "front_min_depth_cm": _safe_float(front_obstacle.get("front_min_depth_cm"), 0.0),
         "front_obstacle_severity": str(front_obstacle.get("severity") or "").strip().lower(),
-        "target_house_id": _house_id_to_int(state_excerpt.get("target_house") or state_excerpt.get("target_house_id")),
-        "current_house_id": _house_id_to_int(state_excerpt.get("current_house") or state_excerpt.get("current_house_id")),
+        "target_house_id": _house_id_to_int(target_context.get("target_house_id") or state_excerpt.get("target_house") or state_excerpt.get("target_house_id")),
+        "current_house_id": _house_id_to_int(target_context.get("current_house_id") or state_excerpt.get("current_house") or state_excerpt.get("current_house_id")),
+        "target_house_known_mask": int(bool(target_context.get("target_house_id"))),
+        "target_house_in_fov": int(bool(target_context.get("target_house_in_fov", False))),
+        "target_house_expected_side": _expected_side_to_id(target_context.get("target_house_expected_side")),
+        "target_house_expected_side_text": str(target_context.get("target_house_expected_side") or ""),
+        "target_house_expected_image_x": round(
+            _clamp(_safe_float(target_context.get("target_house_expected_image_x"), 0.5), 0.0, 1.0), 6
+        ),
+        "target_house_bbox_available_mask": int(bool(target_context.get("target_house_map_bbox_image"))),
         "target_distance_cm": target_distance_cm if target_distance_cm is not None else 0.0,
         "target_bearing_deg": target_bearing_deg if target_bearing_deg is not None else 0.0,
         "target_bearing_sin": round(target_bearing_sin, 6),
@@ -267,20 +334,40 @@ def _build_candidate(detection: Dict[str, Any], fusion: Dict[str, Any], depth_re
     bbox_h = max(0.0, y2 - y1)
     class_name = _normalize_class_name(detection.get("class_name_normalized") or detection.get("class_name"))
     depth_features = _match_depth_features_for_detection(detection, fusion, depth_result)
+    target_features = _match_target_score_for_detection(detection, fusion)
+    target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
 
     entry_distance_cm = _safe_float(depth_features.get("entry_distance_cm"), 0.0)
     surrounding_depth_cm = _safe_float(depth_features.get("surrounding_depth_cm"), 0.0)
     clearance_depth_cm = _safe_float(depth_features.get("clearance_depth_cm"), 0.0)
     depth_gain_cm = _safe_float(depth_features.get("depth_gain_cm"), 0.0)
     opening_width_cm = _safe_float(depth_features.get("opening_width_cm"), 0.0)
+    expected_x = target_features.get("candidate_target_score_components", {}).get("expected_image_x")
+    expected_x = None if expected_x is None else _safe_float(expected_x, 0.5)
+    bbox_cx_norm = ((x1 + x2) * 0.5) / 640.0
+    if expected_x is not None:
+        delta = abs(float(bbox_cx_norm) - float(expected_x))
+        center_in_target_bbox = int(delta <= 0.08)
+        near_target_bbox = int(delta <= 0.16)
+    else:
+        center_in_target_bbox = 0
+        near_target_bbox = 0
+    target_side_match = _safe_float(
+        target_features.get("candidate_target_score_components", {}).get("image_side_score"),
+        0.0,
+    )
+    candidate_house_id = _house_id_to_int(target_features.get("candidate_house_id") or target_context.get("target_house_id"))
+    if not bool(target_features.get("candidate_is_target_house_entry", False)):
+        candidate_house_id = -1
 
     return {
         "candidate_id": rank,
+        "raw_candidate_id": _safe_int(target_features.get("candidate_id"), rank),
         "valid_mask": 1,
         "class_name": class_name,
         "class_onehot": _class_onehot(class_name),
         "confidence": round(_clamp(_safe_float(detection.get("confidence"), 0.0), 0.0, 1.0), 6),
-        "bbox_cx": round(((x1 + x2) * 0.5) / 640.0, 6),
+        "bbox_cx": round(bbox_cx_norm, 6),
         "bbox_cy": round(((y1 + y2) * 0.5) / 480.0, 6),
         "bbox_w": round(bbox_w / 640.0, 6),
         "bbox_h": round(bbox_h / 480.0, 6),
@@ -302,6 +389,18 @@ def _build_candidate(detection: Dict[str, Any], fusion: Dict[str, Any], depth_re
         "source": str(depth_features.get("source") or ""),
         "source_slot": rank,
         "match_iou": round(_safe_float(depth_features.get("match_iou"), 0.0), 6),
+        "candidate_target_match_score": round(_clamp(_safe_float(target_features.get("candidate_target_match_score"), 0.0), 0.0, 1.0), 6),
+        "candidate_semantic_score": round(_clamp(_safe_float(target_features.get("candidate_semantic_score"), 0.0), 0.0, 1.0), 6),
+        "candidate_geometry_score": round(_clamp(_safe_float(target_features.get("candidate_geometry_score"), 0.0), 0.0, 1.0), 6),
+        "candidate_total_score": round(_clamp(_safe_float(target_features.get("candidate_total_score"), 0.0), 0.0, 1.0), 6),
+        "candidate_house_id": candidate_house_id,
+        "candidate_is_target_house_entry": int(bool(target_features.get("candidate_is_target_house_entry", False))),
+        "candidate_target_side_match": round(_clamp(target_side_match, 0.0, 1.0), 6),
+        "candidate_center_in_target_bbox": center_in_target_bbox,
+        "candidate_near_target_bbox": near_target_bbox,
+        "candidate_image_side": str(target_features.get("candidate_image_side") or ""),
+        "target_expected_side": str(target_features.get("candidate_target_score_components", {}).get("expected_side") or ""),
+        "target_expected_image_x": round(_clamp(_safe_float(expected_x, 0.5), 0.0, 1.0), 6),
     }
 
 
@@ -318,6 +417,14 @@ def _build_teacher_targets(labeling_dir: Path) -> Dict[str, Any]:
             "teacher_reason_text": "",
             "teacher_reason_embedding": [],
             "confidence": 0.0,
+            "target_conditioned_teacher_available": 0,
+            "target_conditioned_state": "",
+            "target_conditioned_subgoal": "",
+            "target_conditioned_action_hint": "",
+            "target_conditioned_target_candidate_id": -1,
+            "target_conditioned_reason_text": "",
+            "target_conditioned_reason_embedding": [],
+            "target_conditioned_confidence": 0.0,
         }
 
     teacher_payload = _read_json(teacher_output_path)
@@ -332,6 +439,16 @@ def _build_teacher_targets(labeling_dir: Path) -> Dict[str, Any]:
         "teacher_reason_text": str(teacher_output.get("reason") or ""),
         "teacher_reason_embedding": [],
         "confidence": round(_clamp(_safe_float(teacher_output.get("confidence"), 0.0), 0.0, 1.0), 6),
+        "target_conditioned_teacher_available": int(bool(teacher_output.get("target_conditioned_state"))),
+        "target_conditioned_state": str(teacher_output.get("target_conditioned_state") or ""),
+        "target_conditioned_subgoal": str(teacher_output.get("target_conditioned_subgoal") or ""),
+        "target_conditioned_action_hint": str(teacher_output.get("target_conditioned_action_hint") or ""),
+        "target_conditioned_target_candidate_id": _safe_int(teacher_output.get("target_conditioned_candidate_id"), -1),
+        "target_conditioned_reason_text": str(teacher_output.get("target_conditioned_reason") or ""),
+        "target_conditioned_reason_embedding": [],
+        "target_conditioned_confidence": round(
+            _clamp(_safe_float(teacher_output.get("target_confidence"), 0.0), 0.0, 1.0), 6
+        ),
     }
 
 
@@ -368,6 +485,8 @@ def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
         "teacher_source": str((labeling_dir / "teacher_output.json").name) if (labeling_dir / "teacher_output.json").exists() else "",
         "fusion_source": "fusion_result.json",
         "top_k": TOP_K_CANDIDATES,
+        "target_conditioning_enabled": int(bool(fusion.get("target_context"))),
+        "target_house_id": str((fusion.get("target_context") or {}).get("target_house_id") or ""),
     }
 
     entry_state = {
@@ -382,9 +501,11 @@ def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
         "sample_id": sample_id,
         "entry_state_path": str(labeling_dir / "entry_state.json"),
         "teacher_available": teacher_targets.get("teacher_available", 0),
+        "target_conditioned_teacher_available": teacher_targets.get("target_conditioned_teacher_available", 0),
         "top_candidate_class": candidates[0]["class_name"] if candidates and candidates[0]["valid_mask"] else "",
         "top_candidate_traversable": candidates[0]["traversable"] if candidates else 0,
         "target_candidate_id": teacher_targets.get("target_candidate_id", -1),
+        "target_conditioned_state": teacher_targets.get("target_conditioned_state", ""),
     }
 
 
@@ -416,7 +537,9 @@ def main() -> None:
         print(
             f"[entry-state] done -> {summary['sample_id']} "
             f"(teacher={summary['teacher_available']}; top={summary['top_candidate_class']}; "
-            f"trav={summary['top_candidate_traversable']})"
+            f"trav={summary['top_candidate_traversable']}; "
+            f"target_teacher={summary['target_conditioned_teacher_available']}; "
+            f"target_state={summary['target_conditioned_state']})"
         )
         print(f"[entry-state] entry_state -> {summary['entry_state_path']}")
         return
@@ -436,6 +559,8 @@ def main() -> None:
     summary_items: List[Dict[str, Any]] = []
     ok_count = 0
     error_count = 0
+    top_candidate_class_counts: Counter[str] = Counter()
+    target_conditioned_state_counts: Counter[str] = Counter()
     for idx, labeling_dir in enumerate(labeling_dirs, start=1):
         sample_name = labeling_dir.parent.name
         print(f"[{idx}/{total}] start -> {sample_name}")
@@ -444,10 +569,14 @@ def main() -> None:
             print(
                 f"[{idx}/{total}] done -> {sample_name} "
                 f"(teacher={summary['teacher_available']}; top={summary['top_candidate_class']}; "
-                f"trav={summary['top_candidate_traversable']})"
+                f"trav={summary['top_candidate_traversable']}; "
+                f"target_teacher={summary['target_conditioned_teacher_available']}; "
+                f"target_state={summary['target_conditioned_state']})"
             )
             summary_items.append({"run_dir": str(labeling_dir.parent), "status": "ok", **summary})
             ok_count += 1
+            top_candidate_class_counts[str(summary.get("top_candidate_class") or "")] += 1
+            target_conditioned_state_counts[str(summary.get("target_conditioned_state") or "")] += 1
         except Exception as exc:
             print(f"[{idx}/{total}] error -> {sample_name}: {exc}")
             summary_items.append(
@@ -467,6 +596,8 @@ def main() -> None:
             "results_root": str(results_root),
             "ok_count": ok_count,
             "error_count": error_count,
+            "top_candidate_class_counts": dict(top_candidate_class_counts),
+            "target_conditioned_state_counts": dict(target_conditioned_state_counts),
             "items": summary_items,
         },
     )

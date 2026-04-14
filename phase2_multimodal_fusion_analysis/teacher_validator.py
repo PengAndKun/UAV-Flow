@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,6 +59,28 @@ ENTERABLE_STATES = {"enterable_open_door", "enterable_door"}
 SEARCH_STATES = {"window_visible_keep_search", "geometric_opening_needs_confirmation", "no_entry_confirmed"}
 
 RESULTS_ROOT = Path(__file__).resolve().parent / "results"
+
+TARGET_CONDITIONED_STATES = {
+    "target_house_not_in_view",
+    "target_house_visible_keep_search",
+    "target_house_entry_visible",
+    "target_house_entry_approachable",
+    "target_house_entry_blocked",
+    "non_target_house_entry_visible",
+    "target_house_geometric_opening_needs_confirmation",
+}
+
+TARGET_CONDITIONED_SUBGOALS = {
+    "reorient_to_target_house",
+    "keep_search_target_house",
+    "approach_target_entry",
+    "align_target_entry",
+    "detour_left_to_target_entry",
+    "detour_right_to_target_entry",
+    "cross_target_entry",
+    "ignore_non_target_entry",
+    "backoff_and_reobserve",
+}
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -129,6 +152,36 @@ def _canonical_risk_level(value: Any) -> str:
         "medium": "medium",
         "mid": "medium",
         "high": "high",
+    }
+    return mapping.get(token, token)
+
+
+def _canonical_target_conditioned_state(value: Any) -> str:
+    token = _normalize_token(value)
+    mapping = {
+        "target_house_not_in_view": "target_house_not_in_view",
+        "target_house_visible_keep_search": "target_house_visible_keep_search",
+        "target_house_entry_visible": "target_house_entry_visible",
+        "target_house_entry_approachable": "target_house_entry_approachable",
+        "target_house_entry_blocked": "target_house_entry_blocked",
+        "non_target_house_entry_visible": "non_target_house_entry_visible",
+        "target_house_geometric_opening_needs_confirmation": "target_house_geometric_opening_needs_confirmation",
+    }
+    return mapping.get(token, token)
+
+
+def _canonical_target_conditioned_subgoal(value: Any) -> str:
+    token = _normalize_token(value)
+    mapping = {
+        "reorient_to_target_house": "reorient_to_target_house",
+        "keep_search_target_house": "keep_search_target_house",
+        "approach_target_entry": "approach_target_entry",
+        "align_target_entry": "align_target_entry",
+        "detour_left_to_target_entry": "detour_left_to_target_entry",
+        "detour_right_to_target_entry": "detour_right_to_target_entry",
+        "cross_target_entry": "cross_target_entry",
+        "ignore_non_target_entry": "ignore_non_target_entry",
+        "backoff_and_reobserve": "backoff_and_reobserve",
     }
     return mapping.get(token, token)
 
@@ -211,6 +264,57 @@ def _subgoal_to_action(subgoal: str, entry_state: str, target_candidate_id: int,
     if subgoal in mapping:
         return mapping[subgoal]
     return _choose_search_action(entry_state, target_candidate_id, detections)
+
+
+def _target_conditioned_subgoal_to_action(
+    subgoal: str,
+    target_state: str,
+    fusion_result: Dict[str, Any],
+) -> str:
+    mapping = {
+        "approach_target_entry": "forward",
+        "align_target_entry": "hold",
+        "detour_left_to_target_entry": "left",
+        "detour_right_to_target_entry": "right",
+        "cross_target_entry": "forward",
+        "backoff_and_reobserve": "backward",
+        "ignore_non_target_entry": "hold",
+    }
+    if subgoal in mapping:
+        return mapping[subgoal]
+
+    if subgoal == "reorient_to_target_house":
+        action_hint = _canonical_action_hint(fusion_result.get("target_conditioned_action_hint"))
+        if action_hint in ACTION_HINTS:
+            return action_hint
+        expected_side = str(
+            ((fusion_result.get("target_context") or {}) if isinstance(fusion_result.get("target_context"), dict) else {}).get(
+                "target_house_expected_side"
+            )
+            or ""
+        ).strip().lower()
+        if expected_side == "left":
+            return "yaw_left"
+        if expected_side == "right":
+            return "yaw_right"
+        return "hold"
+
+    if subgoal == "keep_search_target_house":
+        action_hint = _canonical_action_hint(fusion_result.get("target_conditioned_action_hint"))
+        if action_hint in ACTION_HINTS:
+            return action_hint
+        return "hold"
+
+    if target_state == "target_house_entry_visible":
+        return _canonical_action_hint(fusion_result.get("target_conditioned_action_hint")) or "hold"
+    return "hold"
+
+
+def _target_conditioned_reason_from_fusion(fusion_result: Dict[str, Any], fallback_reason: str) -> str:
+    reason = str(fusion_result.get("target_conditioned_reason") or "").strip()
+    if reason:
+        return _truncate_reason(reason)
+    return _truncate_reason(fallback_reason)
 
 
 def _infer_entry_state(
@@ -304,6 +408,13 @@ def normalize_teacher_output(
     front_obstacle = depth_result.get("front_obstacle", {}) if isinstance(depth_result.get("front_obstacle"), dict) else {}
     front_severity = str(front_obstacle.get("severity") or "").strip().lower()
     crossing_ready = bool(fusion_result.get("crossing_ready", False))
+    target_context = fusion_result.get("target_context", {}) if isinstance(fusion_result.get("target_context"), dict) else {}
+    fusion_target_state = _canonical_target_conditioned_state(fusion_result.get("target_conditioned_state"))
+    fusion_target_subgoal = _canonical_target_conditioned_subgoal(fusion_result.get("target_conditioned_subgoal"))
+    fusion_target_action = _canonical_action_hint(fusion_result.get("target_conditioned_action_hint"))
+    best_target_candidate = (
+        fusion_result.get("best_target_candidate", {}) if isinstance(fusion_result.get("best_target_candidate"), dict) else {}
+    )
 
     entry_state = _infer_entry_state(
         parsed=parsed,
@@ -330,6 +441,52 @@ def normalize_teacher_output(
         current_house_id = str(state_excerpt.get("current_house_id") or state_excerpt.get("current_house") or "").strip()
         target_house_id = str(state_excerpt.get("target_house_id") or state_excerpt.get("target_house") or "").strip()
         task_label = str(state_excerpt.get("task_label") or "").strip()
+    if not current_house_id:
+        current_house_id = str(target_context.get("current_house_id") or "").strip()
+    if not target_house_id:
+        target_house_id = str(target_context.get("target_house_id") or "").strip()
+
+    target_house_in_fov = bool(target_context.get("target_house_in_fov", False))
+    target_house_expected_side = str(target_context.get("target_house_expected_side") or "").strip().lower()
+    target_conditioned_state = fusion_target_state if fusion_target_state in TARGET_CONDITIONED_STATES else ""
+    if not target_conditioned_state:
+        target_conditioned_state = "target_house_not_in_view" if not target_house_in_fov else "target_house_entry_visible"
+
+    target_conditioned_subgoal = (
+        fusion_target_subgoal if fusion_target_subgoal in TARGET_CONDITIONED_SUBGOALS else ""
+    )
+    if not target_conditioned_subgoal:
+        fallback_mapping = {
+            "target_house_not_in_view": "reorient_to_target_house",
+            "target_house_visible_keep_search": "keep_search_target_house",
+            "target_house_entry_visible": "keep_search_target_house",
+            "target_house_entry_approachable": "approach_target_entry",
+            "target_house_entry_blocked": "backoff_and_reobserve",
+            "non_target_house_entry_visible": "ignore_non_target_entry",
+            "target_house_geometric_opening_needs_confirmation": "keep_search_target_house",
+        }
+        target_conditioned_subgoal = fallback_mapping.get(target_conditioned_state, "keep_search_target_house")
+
+    target_conditioned_candidate_id = best_target_candidate.get("candidate_id", -1)
+    if not isinstance(target_conditioned_candidate_id, int):
+        try:
+            target_conditioned_candidate_id = int(target_conditioned_candidate_id)
+        except (TypeError, ValueError):
+            target_conditioned_candidate_id = -1
+
+    target_conditioned_action_hint = fusion_target_action if fusion_target_action in ACTION_HINTS else ""
+    if not target_conditioned_action_hint:
+        target_conditioned_action_hint = _target_conditioned_subgoal_to_action(
+            target_conditioned_subgoal,
+            target_conditioned_state,
+            fusion_result,
+        )
+
+    target_conditioned_reason = _target_conditioned_reason_from_fusion(fusion_result, reason)
+    best_target_score = _safe_float(best_target_candidate.get("candidate_total_score"), confidence)
+    target_confidence = _clamp(max(confidence, best_target_score), 0.0, 1.0)
+    if target_conditioned_state in {"target_house_not_in_view", "target_house_entry_visible"}:
+        target_confidence = _clamp(min(target_confidence, 0.85), 0.0, 1.0)
 
     normalized = {
         "entry_state": entry_state,
@@ -345,6 +502,14 @@ def normalize_teacher_output(
         "task_label": task_label,
         "current_house_id": current_house_id,
         "target_house_id": target_house_id,
+        "target_house_in_fov": target_house_in_fov,
+        "target_house_expected_side": target_house_expected_side,
+        "target_conditioned_state": target_conditioned_state,
+        "target_conditioned_subgoal": target_conditioned_subgoal,
+        "target_conditioned_action_hint": target_conditioned_action_hint,
+        "target_conditioned_candidate_id": int(target_conditioned_candidate_id),
+        "target_conditioned_reason": target_conditioned_reason,
+        "target_confidence": round(float(target_confidence), 4),
     }
     return normalized
 
@@ -384,6 +549,12 @@ def validate_teacher_output(
     confidence = _safe_float(teacher_output.get("confidence"), -1.0)
     target_candidate_id = teacher_output.get("target_candidate_id")
     reason = str(teacher_output.get("reason") or "").strip()
+    target_conditioned_state = _canonical_target_conditioned_state(teacher_output.get("target_conditioned_state"))
+    target_conditioned_subgoal = _canonical_target_conditioned_subgoal(teacher_output.get("target_conditioned_subgoal"))
+    target_conditioned_action_hint = _canonical_action_hint(teacher_output.get("target_conditioned_action_hint"))
+    target_conditioned_candidate_id = teacher_output.get("target_conditioned_candidate_id")
+    target_conditioned_reason = str(teacher_output.get("target_conditioned_reason") or "").strip()
+    target_confidence = _safe_float(teacher_output.get("target_confidence"), -1.0)
 
     if entry_state not in ENTRY_STATES:
         _add_issue(errors, "invalid_entry_state", f"Unsupported entry_state: {teacher_output.get('entry_state')}")
@@ -397,15 +568,55 @@ def validate_teacher_output(
         _add_issue(errors, "invalid_confidence", f"Confidence must be in [0,1], got {confidence}")
     if not isinstance(target_candidate_id, int) or int(target_candidate_id) < -1:
         _add_issue(errors, "invalid_target_candidate_id", f"Invalid target_candidate_id: {target_candidate_id}")
+    if target_conditioned_state and target_conditioned_state not in TARGET_CONDITIONED_STATES:
+        _add_issue(
+            errors,
+            "invalid_target_conditioned_state",
+            f"Unsupported target_conditioned_state: {teacher_output.get('target_conditioned_state')}",
+        )
+    if target_conditioned_subgoal and target_conditioned_subgoal not in TARGET_CONDITIONED_SUBGOALS:
+        _add_issue(
+            errors,
+            "invalid_target_conditioned_subgoal",
+            f"Unsupported target_conditioned_subgoal: {teacher_output.get('target_conditioned_subgoal')}",
+        )
+    if target_conditioned_action_hint and target_conditioned_action_hint not in ACTION_HINTS:
+        _add_issue(
+            errors,
+            "invalid_target_conditioned_action_hint",
+            f"Unsupported target_conditioned_action_hint: {teacher_output.get('target_conditioned_action_hint')}",
+        )
+    if target_conditioned_candidate_id is not None and (
+        not isinstance(target_conditioned_candidate_id, int) or int(target_conditioned_candidate_id) < -1
+    ):
+        _add_issue(
+            errors,
+            "invalid_target_conditioned_candidate_id",
+            f"Invalid target_conditioned_candidate_id: {target_conditioned_candidate_id}",
+        )
+    if target_confidence != -1.0 and not (0.0 <= target_confidence <= 1.0):
+        _add_issue(errors, "invalid_target_confidence", f"target_confidence must be in [0,1], got {target_confidence}")
 
     detections = yolo_result.get("detections", []) if isinstance(yolo_result.get("detections"), list) else []
     if isinstance(target_candidate_id, int) and target_candidate_id >= len(detections) and detections:
         _add_issue(errors, "candidate_index_out_of_range", f"target_candidate_id {target_candidate_id} exceeds detections")
+    if isinstance(target_conditioned_candidate_id, int) and target_conditioned_candidate_id >= len(detections) and detections:
+        _add_issue(
+            errors,
+            "target_conditioned_candidate_index_out_of_range",
+            f"target_conditioned_candidate_id {target_conditioned_candidate_id} exceeds detections",
+        )
 
     front_obstacle = depth_result.get("front_obstacle", {}) if isinstance(depth_result.get("front_obstacle"), dict) else {}
     front_severity = str(front_obstacle.get("severity") or "").strip().lower()
     top_yolo_class = _extract_top_yolo_class(yolo_result)
     fusion_state = _canonical_entry_state(fusion_result.get("final_entry_state"))
+    fusion_target_state = _canonical_target_conditioned_state(fusion_result.get("target_conditioned_state"))
+    fusion_target_subgoal = _canonical_target_conditioned_subgoal(fusion_result.get("target_conditioned_subgoal"))
+    fusion_target_action_hint = _canonical_action_hint(fusion_result.get("target_conditioned_action_hint"))
+    target_context = fusion_result.get("target_context", {}) if isinstance(fusion_result.get("target_context"), dict) else {}
+    target_house_in_fov = bool(target_context.get("target_house_in_fov", False))
+    best_target_candidate_is_target = bool(fusion_result.get("best_target_candidate_is_target_house_entry", False))
 
     if entry_state == "window_visible_keep_search" and subgoal == "cross_entry":
         _add_issue(errors, "window_cross_conflict", "Window state cannot directly request cross_entry.")
@@ -421,6 +632,50 @@ def validate_teacher_output(
         _add_issue(errors, "window_marked_enterable", "Top semantic class is window, but teacher marked it as enterable.")
     if entry_state == "no_entry_confirmed" and subgoal == "cross_entry":
         _add_issue(errors, "no_entry_cross_conflict", "No-entry state cannot request cross_entry.")
+    if target_conditioned_state == "target_house_not_in_view" and target_house_in_fov:
+        _add_issue(
+            errors,
+            "target_in_view_state_conflict",
+            "target_house_in_fov is true, but target_conditioned_state is target_house_not_in_view.",
+        )
+    if target_conditioned_state == "non_target_house_entry_visible" and best_target_candidate_is_target:
+        _add_issue(
+            errors,
+            "non_target_state_conflict",
+            "best_target_candidate is marked as target-house entry, but target_conditioned_state says non-target.",
+        )
+    if target_conditioned_state == "target_house_entry_approachable" and target_conditioned_action_hint != "forward":
+        _add_issue(
+            warnings,
+            "approachable_without_forward",
+            "Approachable target entry usually should bias toward forward.",
+        )
+        score -= 0.05
+    if target_conditioned_state == "target_house_entry_blocked" and target_conditioned_action_hint not in {"left", "right", "backward"}:
+        _add_issue(
+            errors,
+            "blocked_target_wrong_action",
+            "Blocked target entry should detour or back off, not keep a neutral/forward action.",
+        )
+    if target_conditioned_state == "non_target_house_entry_visible" and target_conditioned_action_hint == "forward":
+        _add_issue(
+            errors,
+            "non_target_forward_conflict",
+            "Non-target entry should not directly request forward approach.",
+        )
+    if target_conditioned_subgoal == "reorient_to_target_house" and target_conditioned_action_hint not in {"yaw_left", "yaw_right", "hold"}:
+        _add_issue(
+            errors,
+            "reorient_wrong_action",
+            "reorient_to_target_house should use yaw_left, yaw_right, or hold.",
+        )
+    if target_conditioned_subgoal == "approach_target_entry" and target_conditioned_action_hint not in {"forward", "hold"}:
+        _add_issue(
+            warnings,
+            "approach_target_nonforward",
+            "approach_target_entry usually maps to forward or short hold.",
+        )
+        score -= 0.05
 
     if confidence < 0.55:
         _add_issue(warnings, "low_confidence", f"Teacher confidence is low: {confidence:.2f}")
@@ -444,6 +699,20 @@ def validate_teacher_output(
             f"Teacher entry_state ({entry_state}) differs from fusion final_entry_state ({fusion_state}).",
         )
         score -= 0.08
+    if fusion_target_state and target_conditioned_state and fusion_target_state != target_conditioned_state and not errors:
+        _add_issue(
+            warnings,
+            "fusion_target_state_mismatch",
+            f"Teacher target_conditioned_state ({target_conditioned_state}) differs from fusion target_conditioned_state ({fusion_target_state}).",
+        )
+        score -= 0.08
+    if fusion_target_subgoal and target_conditioned_subgoal and fusion_target_subgoal != target_conditioned_subgoal and not errors:
+        _add_issue(
+            warnings,
+            "fusion_target_subgoal_mismatch",
+            f"Teacher target_conditioned_subgoal ({target_conditioned_subgoal}) differs from fusion target_conditioned_subgoal ({fusion_target_subgoal}).",
+        )
+        score -= 0.06
 
     normalized = dict(teacher_output)
     normalized["entry_state"] = entry_state
@@ -452,6 +721,14 @@ def validate_teacher_output(
     normalized["risk_level"] = risk_level
     normalized["confidence"] = _clamp(confidence, 0.0, 1.0)
     normalized["reason"] = _truncate_reason(reason or "")
+    normalized["target_conditioned_state"] = target_conditioned_state
+    normalized["target_conditioned_subgoal"] = target_conditioned_subgoal
+    normalized["target_conditioned_action_hint"] = target_conditioned_action_hint
+    normalized["target_conditioned_candidate_id"] = (
+        int(target_conditioned_candidate_id) if isinstance(target_conditioned_candidate_id, int) else -1
+    )
+    normalized["target_conditioned_reason"] = _truncate_reason(target_conditioned_reason or "")
+    normalized["target_confidence"] = _clamp(target_confidence if target_confidence != -1.0 else confidence, 0.0, 1.0)
 
     if errors:
         status = "invalid"
@@ -473,9 +750,14 @@ def validate_teacher_output(
         "normalized_teacher_output": normalized,
         "evidence": {
             "fusion_final_entry_state": fusion_state,
+            "fusion_target_conditioned_state": fusion_target_state,
+            "fusion_target_conditioned_subgoal": fusion_target_subgoal,
+            "fusion_target_conditioned_action_hint": fusion_target_action_hint,
             "top_yolo_class": top_yolo_class,
             "front_obstacle_severity": front_severity,
             "front_min_depth_cm": front_obstacle.get("front_min_depth_cm"),
+            "target_house_in_fov": target_house_in_fov,
+            "best_target_candidate_is_target_house_entry": best_target_candidate_is_target,
         },
     }
 
@@ -562,6 +844,9 @@ def validate_labeling_dir(labeling_dir: Path, teacher_filename: str = "") -> Dic
         "entry_state": validation["normalized_teacher_output"]["entry_state"],
         "subgoal": validation["normalized_teacher_output"]["subgoal"],
         "action_hint": validation["normalized_teacher_output"]["action_hint"],
+        "target_conditioned_state": validation["normalized_teacher_output"].get("target_conditioned_state", ""),
+        "target_conditioned_subgoal": validation["normalized_teacher_output"].get("target_conditioned_subgoal", ""),
+        "target_conditioned_action_hint": validation["normalized_teacher_output"].get("target_conditioned_action_hint", ""),
         "error_count": len(validation["errors"]),
         "warning_count": len(validation["warnings"]),
     }
@@ -596,7 +881,8 @@ def main() -> None:
         print(
             f"[teacher-validator] done -> {summary['sample_id']} "
             f"({summary['status']}; score={summary['score']}; "
-            f"entry={summary['entry_state']}; subgoal={summary['subgoal']})"
+            f"entry={summary['entry_state']}; subgoal={summary['subgoal']}; "
+            f"target={summary['target_conditioned_state']}; target_subgoal={summary['target_conditioned_subgoal']})"
         )
         print(f"[teacher-validator] teacher_output -> {summary['teacher_output_path']}")
         print(f"[teacher-validator] teacher_validation -> {summary['teacher_validation_path']}")
@@ -617,6 +903,11 @@ def main() -> None:
     summary_items: List[Dict[str, Any]] = []
     ok_count = 0
     error_count = 0
+    entry_state_counts: Counter[str] = Counter()
+    subgoal_counts: Counter[str] = Counter()
+    target_conditioned_state_counts: Counter[str] = Counter()
+    target_conditioned_subgoal_counts: Counter[str] = Counter()
+    target_conditioned_action_hint_counts: Counter[str] = Counter()
     for idx, labeling_dir in enumerate(labeling_dirs, start=1):
         sample_name = labeling_dir.parent.name
         print(f"[{idx}/{total}] start -> {sample_name}")
@@ -626,10 +917,17 @@ def main() -> None:
                 f"[{idx}/{total}] done -> {sample_name} "
                 f"({summary['status']}; score={summary['score']}; "
                 f"entry={summary['entry_state']}; subgoal={summary['subgoal']}; "
+                f"target={summary['target_conditioned_state']}; "
+                f"target_subgoal={summary['target_conditioned_subgoal']}; "
                 f"warnings={summary['warning_count']})"
             )
             summary_items.append({"run_dir": str(labeling_dir.parent), "status": "ok", **summary})
             ok_count += 1
+            entry_state_counts[summary["entry_state"]] += 1
+            subgoal_counts[summary["subgoal"]] += 1
+            target_conditioned_state_counts[summary["target_conditioned_state"]] += 1
+            target_conditioned_subgoal_counts[summary["target_conditioned_subgoal"]] += 1
+            target_conditioned_action_hint_counts[summary["target_conditioned_action_hint"]] += 1
         except Exception as exc:
             print(f"[{idx}/{total}] error -> {sample_name}: {exc}")
             summary_items.append(
@@ -649,6 +947,11 @@ def main() -> None:
             "results_root": str(results_root),
             "ok_count": ok_count,
             "error_count": error_count,
+            "entry_state_counts": dict(entry_state_counts),
+            "subgoal_counts": dict(subgoal_counts),
+            "target_conditioned_state_counts": dict(target_conditioned_state_counts),
+            "target_conditioned_subgoal_counts": dict(target_conditioned_subgoal_counts),
+            "target_conditioned_action_hint_counts": dict(target_conditioned_action_hint_counts),
             "items": summary_items,
         },
     )
