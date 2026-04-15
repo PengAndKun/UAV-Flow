@@ -61,6 +61,8 @@ phase2_modality2_depth_analysis/results
 phase2_multimodal_fusion_analysis/exports
 phase2_multimodal_fusion_analysis/results
 phase2_door_or_window_yolo26_training
+phase2_5_representation_distillation/evals
+phase2_5_representation_distillation/runs
 phase3_dataset_export
 phase3_online_eval
 phase4_search_logs

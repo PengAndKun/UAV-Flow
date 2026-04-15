@@ -1,0 +1,20 @@
+{
+  "export_dir": "E:\\github\\UAV-Flow\\phase2_multimodal_fusion_analysis\\exports\\phase2_5_distillation_dataset_20260414_163838",
+  "output_root": "E:\\github\\UAV-Flow\\phase2_5_representation_distillation\\runs",
+  "top_k": 3,
+  "batch_size": 16,
+  "epochs": 80,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "patience": 12,
+  "device": "cpu",
+  "num_workers": 0,
+  "dropout": 0.1,
+  "global_hidden_dim": 64,
+  "candidate_hidden_dim": 64,
+  "fused_hidden_dim": 256,
+  "representation_dim": 128,
+  "stage1_epochs": 5,
+  "stage2_epochs": 12,
+  "save_every_epoch": false
+}

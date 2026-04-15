@@ -9,7 +9,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 from typing import Any, Dict, List, Optional
 from urllib import request
 
@@ -117,6 +117,7 @@ class Panel:
         self.map_status_var = tk.StringVar(value="Map: closed")
         self.map_pose_var = tk.StringVar(value="Map pose: n/a")
         self.calib_var = tk.StringVar(value="Calibration: none")
+        self.selected_target_house_var = tk.StringVar(value="")
         self.anchor_world_x_var = tk.StringVar(value="")
         self.anchor_world_y_var = tk.StringVar(value="")
         self.house_set_var = tk.BooleanVar(value=False)
@@ -152,6 +153,18 @@ class Panel:
         self.open_map_widget: Optional[OverheadMapWidget] = None
         self.pose_text: Optional[tk.Text] = None
         self.movement_toggle_button: Optional[tk.Button] = None
+        self.target_house_combo: Optional[ttk.Combobox] = None
+        self.target_house_choice_map: Dict[str, str] = {}
+        self.target_house_display_by_id: Dict[str, str] = {}
+        self.target_house_selection_dirty = False
+        self.review_window: Optional[tk.Toplevel] = None
+        self.review_image_label: Optional[tk.Label] = None
+        self.review_image_photo: Optional[ImageTk.PhotoImage] = None
+        self.review_house_var = tk.StringVar(value="")
+        self.review_status_var = tk.StringVar(value="Reviewer: idle")
+        self.review_info_var = tk.StringVar(value="No sample loaded.")
+        self.review_queue: List[Dict[str, Any]] = []
+        self.review_current_item: Optional[Dict[str, Any]] = None
         self.calibration_anchors: List[Dict[str, float]] = []
         self.pending_anchor_world: Optional[Dict[str, float]] = None
         self.pending_image_anchor: Optional[Dict[str, float]] = None
@@ -179,6 +192,7 @@ class Panel:
         self.phase2_fusion_output_root = os.path.join(PROJECT_ROOT, "phase2_multimodal_fusion_analysis", "results")
 
         self.build_ui()
+        self._refresh_target_house_choices()
         self._refresh_default_fusion_model()
         for delay, fn in ((200, self.schedule_state_refresh), (350, self.schedule_preview_refresh), (500, self.schedule_depth_refresh), (1200, self.schedule_map_refresh)):
             self.root.after(delay, fn)
@@ -201,6 +215,15 @@ class Panel:
         tk.Label(task, text="Task Label").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         tk.Entry(task, textvariable=self.task_label_var).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
         tk.Button(task, text="Set Task", command=self.on_set_task).grid(row=0, column=2, padx=6, pady=6)
+        tk.Label(task, text="House ID").grid(row=0, column=3, sticky="e", padx=(10, 4), pady=6)
+        self.target_house_combo = ttk.Combobox(
+            task,
+            textvariable=self.selected_target_house_var,
+            state="readonly",
+            width=22,
+        )
+        self.target_house_combo.grid(row=0, column=4, columnspan=2, sticky="w", padx=(0, 6), pady=6)
+        self.target_house_combo.bind("<<ComboboxSelected>>", self.on_target_house_combo_selected)
         tk.Label(task, text="Capture Label").grid(row=1, column=0, sticky="w", padx=6, pady=6)
         tk.Entry(task, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=6, pady=6)
         tk.Button(task, text="Capture", command=self.on_capture).grid(row=1, column=2, padx=6, pady=6)
@@ -229,8 +252,9 @@ class Panel:
             wraplength=560,
             font=("Consolas", 10),
         ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 4))
+        tk.Button(fusion, text="Result Reviewer", command=self.toggle_result_reviewer_window).grid(row=4, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
         self.fusion_preview_label = tk.Label(fusion, text="No fusion image yet", anchor="center")
-        self.fusion_preview_label.grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
+        self.fusion_preview_label.grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
 
         move = tk.LabelFrame(left, text="Basic Movement"); move.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         self.movement_toggle_button = tk.Button(move, text="Enable Basic Movement", command=self.on_toggle_movement, width=24)
@@ -317,6 +341,246 @@ class Panel:
         except Exception as exc:
             logger.warning("Failed to read local houses_config.json: %s", exc)
             return {}
+
+    def _refresh_target_house_choices(self, *, preferred_house_id: str = "") -> None:
+        raw = self._read_local_houses_config()
+        houses = raw.get("houses", []) if isinstance(raw.get("houses"), list) else []
+        current_target_id = str(raw.get("current_target_id", "") or "")
+        choice_map: Dict[str, str] = {}
+        display_by_id: Dict[str, str] = {}
+        for house in houses:
+            house_id = str(house.get("id", "") or "").strip()
+            if not house_id:
+                continue
+            house_name = str(house.get("name", house_id) or house_id).strip()
+            display = f"{house_id} | {house_name}"
+            choice_map[display] = house_id
+            display_by_id[house_id] = display
+        self.target_house_choice_map = choice_map
+        self.target_house_display_by_id = display_by_id
+        values = list(choice_map.keys())
+        if self.target_house_combo is not None:
+            self.target_house_combo["values"] = values
+        target_id = preferred_house_id.strip() or current_target_id.strip()
+        current_display = self.selected_target_house_var.get().strip()
+        if self.target_house_selection_dirty and current_display in choice_map and not preferred_house_id.strip():
+            return
+        if target_id and target_id in display_by_id:
+            self.selected_target_house_var.set(display_by_id[target_id])
+            self.target_house_selection_dirty = False
+        elif values and current_display not in choice_map:
+            self.selected_target_house_var.set(values[0])
+            self.target_house_selection_dirty = False
+        elif not values:
+            self.selected_target_house_var.set("")
+            self.target_house_selection_dirty = False
+
+    def _get_selected_target_house_id(self) -> str:
+        display = self.selected_target_house_var.get().strip()
+        if not display:
+            return ""
+        house_id = self.target_house_choice_map.get(display, "")
+        if house_id:
+            return house_id
+        if "|" in display:
+            return display.split("|", 1)[0].strip()
+        return display
+
+    def _set_selected_target_house(self, house_id: str, *, mark_clean: bool = True) -> None:
+        hid = str(house_id or "").strip()
+        if not hid:
+            return
+        display = self.target_house_display_by_id.get(hid, "")
+        if display:
+            self.selected_target_house_var.set(display)
+            if mark_clean:
+                self.target_house_selection_dirty = False
+        else:
+            self._refresh_target_house_choices(preferred_house_id=hid)
+            if mark_clean:
+                self.target_house_selection_dirty = False
+
+    def on_target_house_combo_selected(self, _event=None) -> None:
+        selected_house_id = self._get_selected_target_house_id()
+        if selected_house_id:
+            self.target_house_selection_dirty = True
+            self.status_var.set(f"Selected target house pending apply: {selected_house_id}")
+
+    def _update_local_current_target_id(self, house_id: str) -> None:
+        hid = str(house_id or "").strip()
+        if not hid:
+            return
+        raw = self._read_local_houses_config()
+        if not raw:
+            return
+        raw["current_target_id"] = hid
+        self._save_local_houses_config(raw)
+        self._refresh_target_house_choices(preferred_house_id=hid)
+
+    def _review_json_path(self, labeling_dir: str) -> str:
+        return os.path.join(labeling_dir, "target_house_review.json")
+
+    def _list_pending_review_items(self) -> List[Dict[str, Any]]:
+        results_root = Path(self.phase2_fusion_output_root)
+        if not results_root.exists():
+            return []
+        items: List[Dict[str, Any]] = []
+        for run_dir in sorted(results_root.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            labeling_dir = run_dir / "labeling"
+            overlay_path = labeling_dir / "fusion_overlay.png"
+            manifest_path = labeling_dir / "labeling_manifest.json"
+            fusion_result_path = labeling_dir / "fusion_result.json"
+            review_path = Path(self._review_json_path(str(labeling_dir)))
+            if not labeling_dir.exists() or not overlay_path.exists() or review_path.exists():
+                continue
+            manifest: Dict[str, Any] = {}
+            fusion_result: Dict[str, Any] = {}
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+            except Exception:
+                manifest = {}
+            try:
+                fusion_result = json.loads(fusion_result_path.read_text(encoding="utf-8")) if fusion_result_path.exists() else {}
+            except Exception:
+                fusion_result = {}
+            fusion_summary = fusion_result.get("fusion_summary", {}) if isinstance(fusion_result.get("fusion_summary"), dict) else {}
+            target_context = fusion_result.get("target_context", {}) if isinstance(fusion_result.get("target_context"), dict) else {}
+            target_house_id = str(
+                fusion_summary.get("target_house_id", "") or
+                target_context.get("target_house_id", "") or
+                ""
+            ).strip()
+            target_house_name = str(target_context.get("target_house_name", "") or "").strip()
+            items.append(
+                {
+                    "sample_id": str(manifest.get("sample_id", run_dir.name) or run_dir.name),
+                    "run_dir": str(run_dir),
+                    "labeling_dir": str(labeling_dir),
+                    "overlay_path": str(overlay_path),
+                    "task_label": str(manifest.get("task_label", "") or ""),
+                    "target_house_id": target_house_id,
+                    "target_house_name": target_house_name,
+                    "review_json_path": str(review_path),
+                }
+            )
+        return items
+
+    def _build_house_display(self, house_id: str, house_name: str = "") -> str:
+        hid = str(house_id or "").strip()
+        if not hid:
+            return "none"
+        display = self.target_house_display_by_id.get(hid, "")
+        if display:
+            return display
+        name = str(house_name or "").strip()
+        return f"{hid} | {name}" if name else hid
+
+    def _refresh_review_queue(self) -> None:
+        self._refresh_target_house_choices()
+        self.review_queue = self._list_pending_review_items()
+        if not self.review_queue:
+            self.review_current_item = None
+            self.review_status_var.set("Reviewer: no pending samples")
+            self.review_info_var.set("All fusion_overlay samples already reviewed.")
+            if self.review_image_label is not None:
+                self.review_image_label.configure(image="", text="No pending review sample")
+            return
+        self._show_review_item(0)
+
+    def _advance_review_item(self) -> None:
+        if not self.review_queue:
+            self._refresh_review_queue()
+            return
+        if len(self.review_queue) <= 1:
+            self.review_status_var.set("Reviewer: skipped current sample, no later pending sample")
+            return
+        current_sample = str((self.review_current_item or {}).get("sample_id", "") or "")
+        if current_sample:
+            current_index = next(
+                (idx for idx, queued in enumerate(self.review_queue) if str(queued.get("sample_id", "") or "") == current_sample),
+                0,
+            )
+            next_index = (current_index + 1) % len(self.review_queue)
+        else:
+            next_index = 1
+        self._show_review_item(next_index)
+
+    def _show_review_item(self, index: int) -> None:
+        if index < 0 or index >= len(self.review_queue):
+            return
+        item = self.review_queue[index]
+        self.review_current_item = item
+        display_target = self._build_house_display(item.get("target_house_id", ""), item.get("target_house_name", ""))
+        self.review_house_var.set(display_target if display_target != "none" else "")
+        self.review_status_var.set(
+            f"Reviewer: {index + 1}/{len(self.review_queue)}  sample={item.get('sample_id', '')}"
+        )
+        self.review_info_var.set(
+            f"Task: {item.get('task_label', '') or 'n/a'}\n"
+            f"Pred target house: {display_target}\n"
+            f"Run: {os.path.basename(str(item.get('run_dir', '')))}"
+        )
+        image_path = str(item.get("overlay_path", "") or "")
+        photo = self._load_display_photo(image_path, max_width=880, max_height=620)
+        if self.review_image_label is not None:
+            if photo is not None:
+                self.review_image_photo = photo
+                self.review_image_label.configure(image=photo, text="")
+            else:
+                self.review_image_photo = None
+                self.review_image_label.configure(image="", text=f"Failed to load image:\n{image_path}")
+
+    def _save_review_result(self, *, is_correct: bool, corrected_house_id: str = "") -> None:
+        item = self.review_current_item
+        if not item:
+            return
+        original_house_id = str(item.get("target_house_id", "") or "").strip()
+        selected_house_id = str(corrected_house_id or "").strip()
+        final_house_id = original_house_id if is_correct else selected_house_id
+        if not final_house_id:
+            self.review_status_var.set("Reviewer: corrected house id required.")
+            return
+        payload = {
+            "sample_id": str(item.get("sample_id", "") or ""),
+            "run_dir": str(item.get("run_dir", "") or ""),
+            "labeling_dir": str(item.get("labeling_dir", "") or ""),
+            "task_label": str(item.get("task_label", "") or ""),
+            "original_target_house_id": original_house_id,
+            "original_target_house_name": str(item.get("target_house_name", "") or ""),
+            "review_result": "correct" if is_correct else "corrected",
+            "reviewed_house_id": final_house_id,
+            "reviewed_house_name": self._build_house_display(final_house_id),
+            "reviewed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        review_json_path = str(item.get("review_json_path", "") or "")
+        with open(review_json_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        current_sample = str(item.get("sample_id", "") or "")
+        self.review_queue = [queued for queued in self.review_queue if str(queued.get("sample_id", "") or "") != current_sample]
+        if self.review_queue:
+            self._show_review_item(0)
+            self.review_status_var.set(f"Reviewer: saved {current_sample}, moving to next")
+        else:
+            self.review_current_item = None
+            self.review_status_var.set(f"Reviewer: saved {current_sample}, all pending complete")
+            self.review_info_var.set("All fusion_overlay samples already reviewed.")
+            if self.review_image_label is not None:
+                self.review_image_label.configure(image="", text="No pending review sample")
+
+    def on_review_mark_correct(self) -> None:
+        self._save_review_result(is_correct=True)
+
+    def on_review_mark_corrected(self) -> None:
+        selected_house_id = self.target_house_choice_map.get(self.review_house_var.get().strip(), "")
+        if not selected_house_id:
+            display = self.review_house_var.get().strip()
+            if "|" in display:
+                selected_house_id = display.split("|", 1)[0].strip()
+            else:
+                selected_house_id = display
+        self._save_review_result(is_correct=False, corrected_house_id=selected_house_id)
 
     def _get_local_overhead_config(self) -> Dict[str, Any]:
         raw = self._read_local_houses_config()
@@ -635,6 +899,12 @@ class Panel:
         self.mission_var.set(f"Mission: current={mission.get('current_house_name') or 'none'} target={mission.get('target_house_name') or 'none'}")
         self.current_house_var.set(f"Current house: {mission.get('current_house_name') or 'none'} [{mission.get('current_house_status') or '-'}]")
         self.target_house_var.set(f"Target: {mission.get('target_house_name') or 'none'} [{mission.get('target_house_status') or '-'}]  next={mission.get('nearest_unsearched_house_name') or 'none'}")
+        mission_target_house_id = str(mission.get("target_house_id", "") or "").strip()
+        current_selected_house_id = self._get_selected_target_house_id()
+        if mission_target_house_id and current_selected_house_id == mission_target_house_id:
+            self._set_selected_target_house(mission_target_house_id, mark_clean=True)
+        elif not self.target_house_selection_dirty:
+            self._set_selected_target_house(mission_target_house_id, mark_clean=True)
         dist = mission.get("distance_to_target_cm")
         self.target_dist_var.set("Target distance: n/a" if dist is None else f"Target distance: {float(dist):.1f} cm")
         if self.movement_toggle_button is not None:
@@ -873,7 +1143,30 @@ class Panel:
             finally: self.manual_request_inflight = False; self.pause(0.4)
         threading.Thread(target=worker, daemon=True).start()
 
-    def on_set_task(self) -> None: self.call_async("Setting task", lambda: self._apply_response(self.safe(self.client.post_json, "/task", {"task_label": self.task_label_var.get().strip()}, label="Set Task")))
+    def on_set_task(self) -> None:
+        task_label = self.task_label_var.get().strip()
+        selected_house_id = self._get_selected_target_house_id()
+
+        def worker() -> None:
+            if selected_house_id:
+                select_resp = self.safe(
+                    self.client.post_json,
+                    "/select_target_house",
+                    {"house_id": selected_house_id},
+                    label=f"Select Target House {selected_house_id}",
+                )
+                if isinstance(select_resp, dict) and select_resp.get("status") == "ok":
+                    self._update_local_current_target_id(selected_house_id)
+                    self.root.after(0, lambda hid=selected_house_id: self._set_selected_target_house(hid, mark_clean=True))
+            task_resp = self.safe(
+                self.client.post_json,
+                "/task",
+                {"task_label": task_label},
+                label="Set Task",
+            )
+            self._apply_response(task_resp)
+
+        self.call_async("Setting task", worker)
     def on_capture(self) -> None: self.call_async("Capturing", lambda: self._apply_response((self.safe(self.client.post_json, "/capture", {"label": self.capture_label_var.get().strip()}, label="Capture") or {}).get("state")))
     def on_capture_phase1_scan(self) -> None:
         long_timeout_s = max(float(self.args.timeout_s), 120.0)
@@ -1049,6 +1342,56 @@ class Panel:
             return
         self.fusion_result_photo = photo
         self.fusion_result_label.configure(image=photo)
+
+    def toggle_result_reviewer_window(self) -> None:
+        if self.review_window and self.review_window.winfo_exists():
+            self._close_result_reviewer_window()
+            return
+        self._refresh_target_house_choices()
+        self.review_window = tk.Toplevel(self.root)
+        self.review_window.title("Fusion Result Reviewer")
+        self.review_window.geometry("1180x900")
+        self.review_window.protocol("WM_DELETE_WINDOW", self._close_result_reviewer_window)
+
+        top_bar = tk.Frame(self.review_window)
+        top_bar.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Label(top_bar, textvariable=self.review_status_var, anchor="w", font=("Consolas", 11, "bold")).pack(side="left")
+        tk.Button(top_bar, text="Refresh Queue", command=self._refresh_review_queue).pack(side="right", padx=(6, 0))
+
+        info_bar = tk.Frame(self.review_window)
+        info_bar.pack(fill="x", padx=8, pady=(0, 4))
+        tk.Label(info_bar, textvariable=self.review_info_var, anchor="w", justify="left", wraplength=1140).pack(fill="x")
+
+        choice_bar = tk.Frame(self.review_window)
+        choice_bar.pack(fill="x", padx=8, pady=(0, 6))
+        tk.Label(choice_bar, text="Correct House ID").pack(side="left")
+        review_combo = ttk.Combobox(
+            choice_bar,
+            textvariable=self.review_house_var,
+            state="readonly",
+            width=28,
+            values=list(self.target_house_choice_map.keys()),
+        )
+        review_combo.pack(side="left", padx=(6, 12))
+        tk.Button(choice_bar, text="Correct", command=self.on_review_mark_correct, width=14).pack(side="left", padx=(0, 6))
+        tk.Button(choice_bar, text="Save Corrected", command=self.on_review_mark_corrected, width=16).pack(side="left", padx=(0, 6))
+        tk.Button(choice_bar, text="Skip", command=self._advance_review_item).pack(side="left")
+
+        self.review_image_label = tk.Label(self.review_window, text="Loading review sample...", anchor="center")
+        self.review_image_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self._refresh_review_queue()
+
+    def _close_result_reviewer_window(self) -> None:
+        try:
+            if self.review_window is not None and self.review_window.winfo_exists():
+                self.review_window.destroy()
+        except Exception:
+            pass
+        self.review_window = None
+        self.review_image_label = None
+        self.review_image_photo = None
+        self.review_current_item = None
 
     def toggle_open_map_window(self) -> None:
         if self.open_map_window and self.open_map_window.winfo_exists():
@@ -1274,7 +1617,7 @@ class Panel:
                 "image_height": image_height,
                 "image_path": image_path,
             }, label="Solve calibration")
-            if isinstance(resp, dict) and resp.get("status") == "ok":
+        if isinstance(resp, dict) and resp.get("status") == "ok":
                 calibration = resp.get("calibration", {}) if isinstance(resp.get("calibration", {}), dict) else {}
                 saved = calibration.get("anchors", []) if isinstance(calibration.get("anchors", []), list) else []
                 restored: List[Dict[str, float]] = []
@@ -1403,12 +1746,13 @@ class Panel:
             self.root.after(0, lambda: self.house_box_var.set(f"House Set: saved '{house_id}'"))
             self.root.after(0, lambda: self.house_id_var.set(house_id))
             self.root.after(0, lambda: self.house_name_var.set(house_name))
+            self.root.after(0, self._refresh_target_house_choices)
             self.refresh_map_async()
 
         threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self) -> None:
-        for window in (self.preview_window, self.depth_window, self.fusion_window, self.map_window, self.open_map_window):
+        for window in (self.preview_window, self.depth_window, self.fusion_window, self.review_window, self.map_window, self.open_map_window):
             try:
                 if window is not None: window.destroy()
             except Exception:
