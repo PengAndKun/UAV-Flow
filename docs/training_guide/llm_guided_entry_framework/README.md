@@ -37,6 +37,13 @@
 19. [`19_target_conditioned_dataset_export_spec.md`](19_target_conditioned_dataset_export_spec.md)
 20. [`20_representation_distillation_trainer_spec.md`](20_representation_distillation_trainer_spec.md)
 21. [`21_representation_distillation_implementation_plan.md`](21_representation_distillation_implementation_plan.md)
+22. [`22_v3_followup_data_collection_plan.md`](22_v3_followup_data_collection_plan.md)
+23. [`22_v3_followup_data_collection_plan_zh.md`](22_v3_followup_data_collection_plan_zh.md)
+24. [`23_entry_search_memory_design_zh.md`](23_entry_search_memory_design_zh.md)
+25. [`24_entry_search_memory_schema.md`](24_entry_search_memory_schema.md)
+26. [`25_entry_search_memory_implementation_plan.md`](25_entry_search_memory_implementation_plan.md)
+27. [`26_memory_aware_data_collection_spec_zh.md`](26_memory_aware_data_collection_spec_zh.md)
+28. [`27_memory_snapshot_export_spec.md`](27_memory_snapshot_export_spec.md)
 
 ## 这条路线的核心思想
 
