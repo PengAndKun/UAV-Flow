@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -31,6 +32,10 @@ from run_phase2_depth_entry_analysis import (
     load_depth_image,
     write_text_summary,
 )
+try:
+    from .entry_search_memory import DEFAULT_SECTOR_IDS, EntrySearchMemoryStore
+except ImportError:
+    from entry_search_memory import DEFAULT_SECTOR_IDS, EntrySearchMemoryStore
 
 
 DOORLIKE_CLASSES = {
@@ -48,6 +53,9 @@ CROSSING_READY_MAX_DISTANCE_CM = 320.0
 DEFAULT_HOUSES_CONFIG_PATH = ROOT / "UAV-Flow-Eval" / "houses_config.json"
 TARGET_MATCH_MIN_SCORE = 0.55
 TARGET_MATCH_MIN_TARGET_SCORE = 0.45
+MEMORY_REJECTED_CANDIDATE_STATUSES = {"non_target", "window_rejected", "blocked_confirmed"}
+MEMORY_REVISIT_CANDIDATE_STATUSES = {"approachable", "blocked_temporary", "unverified"}
+MEMORY_LOW_YIELD_ENTRY_STATES = {"no_entry", "weak_entry", "non_target_entry_visible"}
 
 
 def ensure_dir(path: Path) -> None:
@@ -230,6 +238,185 @@ def build_target_context(
     }
 
 
+def infer_target_sector_id(target_context: Dict[str, Any]) -> str:
+    bearing = target_context.get("target_house_bearing_deg")
+    in_fov = bool(target_context.get("target_house_in_fov", False))
+    try:
+        bearing_value = float(bearing) if bearing is not None else None
+    except Exception:
+        bearing_value = None
+    if bearing_value is None:
+        return "front_center"
+    if not in_fov:
+        if bearing_value > 0.0:
+            return "left_side"
+        if bearing_value < 0.0:
+            return "right_side"
+        return "front_center"
+    if bearing_value > 12.0:
+        return "front_left"
+    if bearing_value < -12.0:
+        return "front_right"
+    return "front_center"
+
+
+def infer_entry_search_status(
+    *,
+    target_house_id: Optional[str],
+    target_conditioned_state: str,
+    target_conditioned_subgoal: str,
+) -> str:
+    if not str(target_house_id or "").strip():
+        return "not_started"
+    state_value = str(target_conditioned_state or "").strip()
+    subgoal_value = str(target_conditioned_subgoal or "").strip()
+    if subgoal_value == "cross_target_entry":
+        return "entry_found"
+    if state_value == "target_house_entry_approachable":
+        return "entry_found"
+    if state_value in {
+        "target_house_entry_visible",
+        "target_house_entry_blocked",
+        "non_target_house_entry_visible",
+        "target_house_not_in_view",
+        "target_house_geometric_opening_needs_confirmation",
+    }:
+        return "searching_entry"
+    return "searching_entry"
+
+
+def infer_observation_result(target_conditioned_state: str) -> str:
+    state_value = str(target_conditioned_state or "").strip()
+    if state_value == "target_house_entry_blocked":
+        return "blocked_entry"
+    if state_value == "target_house_entry_approachable":
+        return "approachable_entry"
+    if state_value == "non_target_house_entry_visible":
+        return "non_target_entry_visible"
+    if state_value == "target_house_entry_visible":
+        return "weak_entry"
+    return "no_entry"
+
+
+def infer_candidate_entry_status(
+    *,
+    candidate: Dict[str, Any],
+    target_conditioned_state: str,
+) -> str:
+    normalized_name = normalize_class_name(candidate.get("class_name"))
+    if bool(candidate.get("candidate_is_target_house_entry", False)):
+        if target_conditioned_state == "target_house_entry_blocked":
+            return "blocked_temporary"
+        if target_conditioned_state == "target_house_entry_approachable":
+            return "approachable"
+        return "unverified"
+    if normalized_name in WINDOW_CLASSES:
+        return "window_rejected"
+    if target_conditioned_state == "non_target_house_entry_visible":
+        return "non_target"
+    return "unverified"
+
+
+def update_entry_search_memory_from_fusion(
+    *,
+    houses_config: Dict[str, Any],
+    fusion_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    store = EntrySearchMemoryStore()
+    store.load()
+    store.ensure_from_houses_config()
+
+    target_context = fusion_result.get("target_context", {}) if isinstance(fusion_result.get("target_context"), dict) else {}
+    target_house_id = str(target_context.get("target_house_id") or "").strip()
+    if target_house_id:
+        store.set_current_target_house(target_house_id)
+    else:
+        store.save()
+        return {
+            "status": "ok",
+            "memory_path": store.path,
+            "house_id": None,
+            "sector_id": None,
+            "semantic_memory": None,
+        }
+
+    houses_by_id = house_lookup_from_config(houses_config)
+    house_meta = houses_by_id.get(target_house_id, {})
+    store.ensure_house(
+        target_house_id,
+        house_name=str(house_meta.get("name", "") or target_house_id),
+        house_status=str(house_meta.get("status", "UNSEARCHED") or "UNSEARCHED"),
+    )
+
+    target_conditioned_state = str(fusion_result.get("target_conditioned_state", "") or "")
+    target_conditioned_subgoal = str(fusion_result.get("target_conditioned_subgoal", "") or "")
+    sector_id = infer_target_sector_id(target_context)
+    entry_search_status = infer_entry_search_status(
+        target_house_id=target_house_id,
+        target_conditioned_state=target_conditioned_state,
+        target_conditioned_subgoal=target_conditioned_subgoal,
+    )
+    store.set_entry_search_status(target_house_id, entry_search_status)
+
+    if bool(target_context.get("target_house_in_fov", False)):
+        store.update_sector(
+            target_house_id,
+            sector_id,
+            observed=True,
+            best_entry_state=infer_observation_result(target_conditioned_state),
+            best_target_conditioned_subgoal=target_conditioned_subgoal,
+            best_target_match_score=float((fusion_result.get("best_target_candidate") or {}).get("candidate_target_match_score") or 0.0),
+        )
+
+    best_target_candidate = fusion_result.get("best_target_candidate", {}) if isinstance(fusion_result.get("best_target_candidate"), dict) else {}
+    candidate_id_value = best_target_candidate.get("candidate_id", "")
+    candidate_id = ""
+    if candidate_id_value is not None:
+        candidate_id = str(candidate_id_value).strip()
+    if candidate_id:
+        memory = store.get_house_memory(target_house_id, ensure=True) or {}
+        existing_attempt_count = 0
+        semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
+        existing_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
+        for entry in existing_entries:
+            if isinstance(entry, dict) and str(entry.get("candidate_id", "") or "") == candidate_id:
+                try:
+                    existing_attempt_count = int(entry.get("attempt_count", 0) or 0)
+                except Exception:
+                    existing_attempt_count = 0
+                break
+        store.upsert_candidate_entry(
+            target_house_id,
+            {
+                "candidate_id": candidate_id,
+                "semantic_class": best_target_candidate.get("class_name"),
+                "target_match_score": float(best_target_candidate.get("candidate_target_match_score", 0.0) or 0.0),
+                "distance_cm": float(best_target_candidate.get("entry_distance_cm", 0.0) or 0.0),
+                "opening_width_cm": float(best_target_candidate.get("opening_width_cm", 0.0) or 0.0),
+                "center_x_norm": best_target_candidate.get("center_x_norm"),
+                "candidate_total_score": float(best_target_candidate.get("candidate_total_score", 0.0) or 0.0),
+                "status": infer_candidate_entry_status(
+                    candidate=best_target_candidate,
+                    target_conditioned_state=target_conditioned_state,
+                ),
+                "attempt_count": existing_attempt_count + 1,
+                "last_checked_time": datetime.now().timestamp(),
+            },
+        )
+        store.update_semantic_memory(target_house_id, {"last_best_entry_id": candidate_id})
+
+    store.save()
+    updated_memory = store.get_house_memory(target_house_id, ensure=True) or {}
+    return {
+        "status": "ok",
+        "memory_path": store.path,
+        "house_id": target_house_id,
+        "sector_id": sector_id if bool(target_context.get("target_house_in_fov", False)) else None,
+        "entry_search_status": entry_search_status,
+        "semantic_memory": copy.deepcopy(updated_memory.get("semantic_memory", {})),
+    }
+
+
 def score_candidate_for_target_house(
     *,
     detection: Dict[str, Any],
@@ -345,6 +532,418 @@ def score_candidate_for_target_house(
         "crossing_ready": crossing_ready,
         "semantic_depth_assessment": semantic_depth_assessment,
     }
+
+
+def load_target_house_memory(target_house_id: Optional[str]) -> Dict[str, Any]:
+    house_id = str(target_house_id or "").strip()
+    if not house_id:
+        return {}
+    try:
+        store = EntrySearchMemoryStore()
+        store.load()
+        memory = store.get_house_memory(house_id, ensure=False)
+        return copy.deepcopy(memory) if isinstance(memory, dict) else {}
+    except Exception:
+        return {}
+
+
+def score_memory_candidate_similarity(
+    candidate: Dict[str, Any],
+    memory_entry: Dict[str, Any],
+) -> float:
+    candidate_name = normalize_class_name(candidate.get("class_name"))
+    memory_name = normalize_class_name(
+        memory_entry.get("semantic_class") or memory_entry.get("class_name")
+    )
+    if candidate_name == memory_name and candidate_name:
+        class_score = 1.0
+    elif candidate_name in DOORLIKE_CLASSES and memory_name in DOORLIKE_CLASSES:
+        class_score = 0.75
+    elif candidate_name in WINDOW_CLASSES and memory_name in WINDOW_CLASSES:
+        class_score = 0.7
+    else:
+        class_score = 0.0
+
+    center_score = 0.5
+    try:
+        candidate_center = float(candidate.get("center_x_norm"))
+        memory_center = float(memory_entry.get("center_x_norm"))
+        center_score = clamp(1.0 - abs(candidate_center - memory_center) / 0.35, 0.0, 1.0)
+    except Exception:
+        center_score = 0.5
+
+    distance_score = 0.5
+    try:
+        candidate_distance = float(candidate.get("entry_distance_cm"))
+        memory_distance = float(memory_entry.get("distance_cm"))
+        tolerance_cm = max(150.0, max(candidate_distance, memory_distance) * 0.5)
+        distance_score = clamp(
+            1.0 - abs(candidate_distance - memory_distance) / tolerance_cm,
+            0.0,
+            1.0,
+        )
+    except Exception:
+        distance_score = 0.5
+
+    target_score = 0.5
+    try:
+        candidate_target_score = float(candidate.get("candidate_target_match_score"))
+        memory_target_score = float(memory_entry.get("target_match_score"))
+        target_score = clamp(
+            1.0 - abs(candidate_target_score - memory_target_score) / 0.45,
+            0.0,
+            1.0,
+        )
+    except Exception:
+        target_score = 0.5
+
+    return clamp(
+        0.35 * class_score
+        + 0.25 * center_score
+        + 0.25 * distance_score
+        + 0.15 * target_score,
+        0.0,
+        1.0,
+    )
+
+
+def compute_sector_repeat_penalty(
+    semantic_memory: Dict[str, Any],
+    sector_id: Optional[str],
+    candidate: Dict[str, Any],
+) -> float:
+    if not isinstance(semantic_memory, dict):
+        return 0.0
+    sector_key = str(sector_id or "").strip()
+    if not sector_key:
+        return 0.0
+    searched_sectors = semantic_memory.get("searched_sectors", {})
+    if not isinstance(searched_sectors, dict):
+        return 0.0
+    sector = searched_sectors.get(sector_key)
+    if not isinstance(sector, dict):
+        return 0.0
+
+    try:
+        observation_count = int(sector.get("observation_count", 0) or 0)
+    except Exception:
+        observation_count = 0
+    if observation_count < 2:
+        return 0.0
+
+    best_entry_state = str(sector.get("best_entry_state", "") or "").strip()
+    best_subgoal = str(sector.get("best_target_conditioned_subgoal", "") or "").strip()
+    try:
+        best_target_match_score = float(sector.get("best_target_match_score", 0.0) or 0.0)
+    except Exception:
+        best_target_match_score = 0.0
+    try:
+        candidate_target_score = float(candidate.get("candidate_target_match_score", 0.0) or 0.0)
+    except Exception:
+        candidate_target_score = 0.0
+
+    low_yield = (
+        best_entry_state in MEMORY_LOW_YIELD_ENTRY_STATES
+        or best_subgoal in {"keep_search_target_house", "ignore_non_target_entry"}
+    ) and best_target_match_score < 0.6
+    if not low_yield:
+        return 0.0
+    if candidate_target_score >= 0.72:
+        return 0.0
+
+    penalty = min(0.12, 0.03 * float(observation_count - 1))
+    if normalize_class_name(candidate.get("class_name")) in WINDOW_CLASSES:
+        penalty += 0.02
+    return clamp(penalty, 0.0, 0.15)
+
+
+def apply_memory_aware_candidate_adjustments(
+    candidate_target_scores: List[Dict[str, Any]],
+    *,
+    target_context: Dict[str, Any],
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    target_house_id = str(target_context.get("target_house_id") or "").strip()
+    house_memory = load_target_house_memory(target_house_id)
+    semantic_memory = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
+    sector_id = infer_target_sector_id(target_context)
+    candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
+    last_best_entry_id = str(semantic_memory.get("last_best_entry_id", "") or "").strip()
+
+    adjusted_scores: List[Dict[str, Any]] = []
+    sector_penalty_applied = False
+    candidate_history_used = False
+    last_best_tracking_used = False
+
+    for item in candidate_target_scores:
+        candidate = copy.deepcopy(item)
+        raw_total_score = float(candidate.get("candidate_total_score", 0.0) or 0.0)
+        sector_penalty = compute_sector_repeat_penalty(semantic_memory, sector_id, candidate)
+        sector_penalty_applied = sector_penalty_applied or sector_penalty > 0.0
+
+        best_similarity = 0.0
+        best_memory_entry: Dict[str, Any] = {}
+        for memory_entry in candidate_entries:
+            if not isinstance(memory_entry, dict):
+                continue
+            similarity = score_memory_candidate_similarity(candidate, memory_entry)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_memory_entry = memory_entry
+
+        history_penalty = 0.0
+        history_boost = 0.0
+        tracking_boost = 0.0
+        memory_status = ""
+        memory_candidate_id = ""
+        if best_similarity >= 0.55 and best_memory_entry:
+            candidate_history_used = True
+            memory_status = str(best_memory_entry.get("status", "") or "").strip()
+            memory_candidate_id = str(best_memory_entry.get("candidate_id", "") or "").strip()
+            if memory_status == "window_rejected":
+                history_penalty = 0.18 * best_similarity
+            elif memory_status == "non_target":
+                history_penalty = 0.16 * best_similarity
+            elif memory_status == "blocked_confirmed":
+                history_penalty = 0.14 * best_similarity
+            elif memory_status == "blocked_temporary":
+                history_boost = 0.05 * best_similarity
+            elif memory_status == "approachable":
+                history_boost = 0.10 * best_similarity
+            elif memory_status == "unverified" and float(candidate.get("candidate_target_match_score", 0.0) or 0.0) >= 0.65:
+                history_boost = 0.03 * best_similarity
+
+            if memory_candidate_id and memory_candidate_id == last_best_entry_id and memory_status in MEMORY_REVISIT_CANDIDATE_STATUSES:
+                tracking_boost = 0.06 * best_similarity
+                last_best_tracking_used = True
+
+        adjusted_total_score = clamp(
+            raw_total_score - sector_penalty - history_penalty + history_boost + tracking_boost,
+            0.0,
+            1.0,
+        )
+        normalized_name = normalize_class_name(candidate.get("class_name"))
+        candidate["candidate_total_score_raw"] = round(raw_total_score, 4)
+        candidate["memory_sector_penalty"] = round(sector_penalty, 4)
+        candidate["memory_history_penalty"] = round(history_penalty, 4)
+        candidate["memory_history_boost"] = round(history_boost, 4)
+        candidate["memory_tracking_boost"] = round(tracking_boost, 4)
+        candidate["memory_best_similarity"] = round(best_similarity, 4)
+        candidate["memory_best_match_status"] = memory_status or None
+        candidate["memory_best_match_candidate_id"] = memory_candidate_id or None
+        candidate["candidate_total_score"] = round(adjusted_total_score, 4)
+        candidate["candidate_is_target_house_entry"] = bool(
+            normalized_name in DOORLIKE_CLASSES
+            and float(candidate.get("candidate_target_match_score", 0.0) or 0.0) >= TARGET_MATCH_MIN_TARGET_SCORE
+            and adjusted_total_score >= TARGET_MATCH_MIN_SCORE
+        )
+        adjusted_scores.append(candidate)
+
+    memory_guidance = {
+        "target_house_id": target_house_id or None,
+        "memory_available": bool(house_memory),
+        "sector_id": sector_id if target_house_id else None,
+        "sector_penalty_applied": sector_penalty_applied,
+        "candidate_history_used": candidate_history_used,
+        "last_best_entry_id": last_best_entry_id or None,
+        "last_best_tracking_used": last_best_tracking_used,
+    }
+    return adjusted_scores, memory_guidance
+
+
+def find_best_memory_entry_match(
+    candidate: Dict[str, Any],
+    semantic_memory: Dict[str, Any],
+) -> Tuple[Dict[str, Any], float]:
+    candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory, dict) else []
+    if not isinstance(candidate_entries, list):
+        return {}, 0.0
+    best_entry: Dict[str, Any] = {}
+    best_similarity = 0.0
+    for memory_entry in candidate_entries:
+        if not isinstance(memory_entry, dict):
+            continue
+        similarity = score_memory_candidate_similarity(candidate, memory_entry)
+        if similarity > best_similarity:
+            best_similarity = similarity
+            best_entry = memory_entry
+    return best_entry, float(best_similarity)
+
+
+def preferred_alternate_sectors(current_sector_id: Optional[str]) -> List[str]:
+    sector = str(current_sector_id or "").strip()
+    mapping = {
+        "front_center": ["front_left", "front_right", "left_side", "right_side"],
+        "front_left": ["front_right", "left_side", "front_center", "right_side"],
+        "front_right": ["front_left", "right_side", "front_center", "left_side"],
+        "left_side": ["front_left", "front_center", "front_right", "right_side"],
+        "right_side": ["front_right", "front_center", "front_left", "left_side"],
+    }
+    preferred = [item for item in mapping.get(sector, []) if item in DEFAULT_SECTOR_IDS]
+    for sector_id in DEFAULT_SECTOR_IDS:
+        if sector_id != sector and sector_id not in preferred:
+            preferred.append(sector_id)
+    return preferred
+
+
+def select_alternate_sector(
+    semantic_memory: Dict[str, Any],
+    current_sector_id: Optional[str],
+) -> Optional[str]:
+    searched_sectors = semantic_memory.get("searched_sectors", {}) if isinstance(semantic_memory, dict) else {}
+    if not isinstance(searched_sectors, dict):
+        searched_sectors = {}
+    candidates: List[Tuple[int, int, float, str]] = []
+    for sector_id in preferred_alternate_sectors(current_sector_id):
+        sector = searched_sectors.get(sector_id, {})
+        if not isinstance(sector, dict):
+            sector = {}
+        observed = bool(sector.get("observed", False))
+        try:
+            observation_count = int(sector.get("observation_count", 0) or 0)
+        except Exception:
+            observation_count = 0
+        try:
+            best_target_match_score = float(sector.get("best_target_match_score", 0.0) or 0.0)
+        except Exception:
+            best_target_match_score = 0.0
+        unexplored_priority = 0 if not observed else 1
+        candidates.append((unexplored_priority, observation_count, -best_target_match_score, sector_id))
+    if not candidates:
+        return None
+    candidates.sort()
+    return candidates[0][3]
+
+
+def action_for_sector_shift(
+    current_sector_id: Optional[str],
+    target_sector_id: Optional[str],
+    target_bearing_deg: Optional[float],
+) -> str:
+    current_sector = str(current_sector_id or "").strip()
+    target_sector = str(target_sector_id or "").strip()
+    if target_sector in {"front_left", "left_side"}:
+        return "yaw_left"
+    if target_sector in {"front_right", "right_side"}:
+        return "yaw_right"
+    if target_sector == "front_center":
+        if current_sector in {"front_right", "right_side"}:
+            return "yaw_left"
+        if current_sector in {"front_left", "left_side"}:
+            return "yaw_right"
+    if target_bearing_deg is not None:
+        return "yaw_left" if float(target_bearing_deg) > 0.0 else "yaw_right"
+    return "hold"
+
+
+def apply_memory_aware_target_decision(
+    *,
+    target_context: Dict[str, Any],
+    target_state: str,
+    target_subgoal: str,
+    target_action: str,
+    target_reason: str,
+    best_target_candidate: Dict[str, Any],
+) -> Tuple[str, str, str, Dict[str, Any]]:
+    target_house_id = str(target_context.get("target_house_id") or "").strip()
+    current_sector_id = infer_target_sector_id(target_context)
+    guidance: Dict[str, Any] = {
+        "memory_available": False,
+        "decision_override_applied": False,
+        "override_reason": "",
+        "target_house_id": target_house_id or None,
+        "current_sector_id": current_sector_id or None,
+        "alternate_sector_id": None,
+        "best_memory_status": None,
+        "best_memory_similarity": 0.0,
+        "blocked_attempt_count": 0,
+        "target_reason": target_reason,
+    }
+    if not target_house_id:
+        return target_state, target_subgoal, target_action, guidance
+
+    house_memory = load_target_house_memory(target_house_id)
+    semantic_memory = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
+    if not semantic_memory:
+        return target_state, target_subgoal, target_action, guidance
+
+    guidance["memory_available"] = True
+    searched_sectors = semantic_memory.get("searched_sectors", {}) if isinstance(semantic_memory.get("searched_sectors"), dict) else {}
+    current_sector = searched_sectors.get(current_sector_id, {}) if current_sector_id else {}
+    if not isinstance(current_sector, dict):
+        current_sector = {}
+
+    best_memory_entry, best_similarity = find_best_memory_entry_match(best_target_candidate, semantic_memory)
+    memory_status = str(best_memory_entry.get("status", "") or "").strip()
+    guidance["best_memory_status"] = memory_status or None
+    guidance["best_memory_similarity"] = round(best_similarity, 4)
+    try:
+        guidance["blocked_attempt_count"] = int(best_memory_entry.get("attempt_count", 0) or 0)
+    except Exception:
+        guidance["blocked_attempt_count"] = 0
+
+    try:
+        sector_observation_count = int(current_sector.get("observation_count", 0) or 0)
+    except Exception:
+        sector_observation_count = 0
+    sector_entry_state = str(current_sector.get("best_entry_state", "") or "").strip()
+    sector_subgoal = str(current_sector.get("best_target_conditioned_subgoal", "") or "").strip()
+    try:
+        sector_target_match_score = float(current_sector.get("best_target_match_score", 0.0) or 0.0)
+    except Exception:
+        sector_target_match_score = 0.0
+
+    low_yield_sector = (
+        target_state == "target_house_entry_visible"
+        and sector_observation_count >= 2
+        and (
+            sector_entry_state in MEMORY_LOW_YIELD_ENTRY_STATES
+            or sector_subgoal in {"keep_search_target_house", "ignore_non_target_entry"}
+        )
+        and sector_target_match_score < 0.6
+    )
+    if low_yield_sector:
+        alternate_sector_id = select_alternate_sector(semantic_memory, current_sector_id)
+        if alternate_sector_id:
+            guidance["decision_override_applied"] = True
+            guidance["override_reason"] = "low_yield_sector_shift"
+            guidance["alternate_sector_id"] = alternate_sector_id
+            target_subgoal = "keep_search_target_house"
+            target_action = action_for_sector_shift(
+                current_sector_id=current_sector_id,
+                target_sector_id=alternate_sector_id,
+                target_bearing_deg=target_context.get("target_house_bearing_deg"),
+            )
+            guidance["target_reason"] = (
+                f"{target_reason}; repeated low-yield observations in sector {current_sector_id or 'unknown'} "
+                f"(count={sector_observation_count}) so search shifts toward {alternate_sector_id}"
+            )
+            return target_state, target_subgoal, target_action, guidance
+
+    persistent_blocked = (
+        target_state == "target_house_entry_blocked"
+        and best_similarity >= 0.55
+        and memory_status in {"blocked_temporary", "blocked_confirmed"}
+        and guidance["blocked_attempt_count"] >= 2
+    )
+    if persistent_blocked:
+        alternate_sector_id = select_alternate_sector(semantic_memory, current_sector_id)
+        if alternate_sector_id:
+            guidance["decision_override_applied"] = True
+            guidance["override_reason"] = "persistent_blocked_shift"
+            guidance["alternate_sector_id"] = alternate_sector_id
+            target_subgoal = "keep_search_target_house"
+            target_action = action_for_sector_shift(
+                current_sector_id=current_sector_id,
+                target_sector_id=alternate_sector_id,
+                target_bearing_deg=target_context.get("target_house_bearing_deg"),
+            )
+            guidance["target_reason"] = (
+                f"{target_reason}; similar blocked target-entry candidate was already checked "
+                f"{guidance['blocked_attempt_count']} times, so search shifts toward {alternate_sector_id}"
+            )
+            return target_state, target_subgoal, target_action, guidance
+
+    return target_state, target_subgoal, target_action, guidance
 
 
 def box_iou_xyxy(box_a: List[float], box_b: List[float]) -> float:
@@ -984,6 +1583,10 @@ def build_fusion_decision(
                 image_shape=image_shape,
             )
         )
+    candidate_target_scores, memory_guidance = apply_memory_aware_candidate_adjustments(
+        candidate_target_scores,
+        target_context=target_context,
+    )
     candidate_target_scores.sort(key=lambda item: float(item.get("candidate_total_score", 0.0)), reverse=True)
     best_target_candidate = candidate_target_scores[0] if candidate_target_scores else {}
     best_target_candidate_is_target_house_entry = bool(best_target_candidate.get("candidate_is_target_house_entry", False))
@@ -1022,6 +1625,20 @@ def build_fusion_decision(
         candidate_center_x_norm=best_target_candidate.get("center_x_norm"),
         crossing_ready=bool(best_target_candidate.get("crossing_ready", False)),
     )
+    (
+        target_conditioned_state,
+        target_conditioned_subgoal,
+        target_conditioned_action_hint,
+        memory_decision_guidance,
+    ) = apply_memory_aware_target_decision(
+        target_context=target_context,
+        target_state=target_conditioned_state,
+        target_subgoal=target_conditioned_subgoal,
+        target_action=target_conditioned_action_hint,
+        target_reason=target_conditioned_reason,
+        best_target_candidate=best_target_candidate,
+    )
+    target_conditioned_reason = str(memory_decision_guidance.get("target_reason") or target_conditioned_reason)
     decision_text = (
         f"{final_state}; "
         f"class={semantic_detection.get('class_name') if semantic_detection else 'none'}; "
@@ -1058,6 +1675,8 @@ def build_fusion_decision(
         "recommended_subgoal": recommended_subgoal,
         "recommended_action_hint": recommended_action_hint,
         "target_context": target_context,
+        "memory_guidance": memory_guidance,
+        "memory_decision_guidance": memory_decision_guidance,
         "candidate_target_scores": candidate_target_scores,
         "best_target_candidate": best_target_candidate,
         "best_target_candidate_is_target_house_entry": best_target_candidate_is_target_house_entry,
@@ -1144,6 +1763,7 @@ def build_panel_summary(result: Dict[str, Any]) -> str:
     depth_analysis = result.get("depth", {}).get("analysis", {}) if isinstance(result.get("depth", {}), dict) else {}
     best = fusion.get("chosen_depth_candidate") or fusion.get("matched_depth_candidate") or fusion.get("best_depth_candidate") or {}
     obstacle = depth_analysis.get("front_obstacle", {}) if isinstance(depth_analysis, dict) else {}
+    memory = fusion.get("entry_search_memory", {}) if isinstance(fusion.get("entry_search_memory"), dict) else {}
     return "\n".join(
         [
             f"State: {fusion.get('final_entry_state', 'unknown')}",
@@ -1170,6 +1790,21 @@ def build_panel_summary(result: Dict[str, Any]) -> str:
                 f"Target: state={fusion.get('target_conditioned_state') or 'n/a'} "
                 f"subgoal={fusion.get('target_conditioned_subgoal') or 'n/a'} "
                 f"action={fusion.get('target_conditioned_action_hint') or 'n/a'}"
+            ),
+            (
+                f"Memory: status={memory.get('entry_search_status') or 'n/a'} "
+                f"sector={memory.get('sector_id') or 'n/a'} "
+                f"house={memory.get('house_id') or 'n/a'}"
+            ),
+            (
+                f"MemoryGuide: history={int(bool((fusion.get('memory_guidance') or {}).get('candidate_history_used', False)))} "
+                f"sector_penalty={int(bool((fusion.get('memory_guidance') or {}).get('sector_penalty_applied', False)))} "
+                f"track={int(bool((fusion.get('memory_guidance') or {}).get('last_best_tracking_used', False)))}"
+            ),
+            (
+                f"MemoryDecision: override={int(bool((fusion.get('memory_decision_guidance') or {}).get('decision_override_applied', False)))} "
+                f"reason={((fusion.get('memory_decision_guidance') or {}).get('override_reason') or 'none')} "
+                f"alt_sector={((fusion.get('memory_decision_guidance') or {}).get('alternate_sector_id') or 'n/a')}"
             ),
             f"Reason: {fusion.get('decision_reason', 'n/a')}",
         ]
@@ -1296,6 +1931,7 @@ def build_labeling_manifest(
             "fusion_result": str(labeling_dir / "fusion_result.json"),
             "fusion_summary": str(labeling_dir / "fusion_summary.txt"),
             "labeling_summary": str(labeling_dir / "labeling_summary.txt"),
+            "entry_search_memory": str(fusion_section.get("entry_search_memory", {}).get("memory_path") or ""),
         },
         "camera_info": camera_info or {},
         "pose_history": pose_history,
@@ -1332,6 +1968,15 @@ def build_labeling_manifest(
             "target_conditioned_subgoal": fusion_section.get("target_conditioned_subgoal"),
             "target_conditioned_action_hint": fusion_section.get("target_conditioned_action_hint"),
             "target_conditioned_reason": fusion_section.get("target_conditioned_reason"),
+            "entry_search_memory_status": fusion_section.get("entry_search_memory", {}).get("entry_search_status"),
+            "entry_search_memory_sector_id": fusion_section.get("entry_search_memory", {}).get("sector_id"),
+            "entry_search_memory_house_id": fusion_section.get("entry_search_memory", {}).get("house_id"),
+            "memory_guidance_history_used": fusion_section.get("memory_guidance", {}).get("candidate_history_used"),
+            "memory_guidance_sector_penalty_applied": fusion_section.get("memory_guidance", {}).get("sector_penalty_applied"),
+            "memory_guidance_last_best_tracking_used": fusion_section.get("memory_guidance", {}).get("last_best_tracking_used"),
+            "memory_decision_override_applied": fusion_section.get("memory_decision_guidance", {}).get("decision_override_applied"),
+            "memory_decision_override_reason": fusion_section.get("memory_decision_guidance", {}).get("override_reason"),
+            "memory_decision_alternate_sector_id": fusion_section.get("memory_decision_guidance", {}).get("alternate_sector_id"),
         },
         "annotation_template": {
             "gt_entry_state": "",
@@ -1386,6 +2031,21 @@ def build_labeling_summary_text(manifest: Dict[str, Any]) -> str:
             f"target_fusion: state={fusion.get('target_conditioned_state', 'n/a')} "
             f"subgoal={fusion.get('target_conditioned_subgoal', 'n/a')} "
             f"action={fusion.get('target_conditioned_action_hint', 'n/a')}"
+        ),
+        (
+            f"entry_memory: house={fusion.get('entry_search_memory_house_id', 'n/a')} "
+            f"status={fusion.get('entry_search_memory_status', 'n/a')} "
+            f"sector={fusion.get('entry_search_memory_sector_id', 'n/a')}"
+        ),
+        (
+            f"memory_guidance: history={int(bool(fusion.get('memory_guidance_history_used', False)))} "
+            f"sector_penalty={int(bool(fusion.get('memory_guidance_sector_penalty_applied', False)))} "
+            f"track={int(bool(fusion.get('memory_guidance_last_best_tracking_used', False)))}"
+        ),
+        (
+            f"memory_decision: override={int(bool(fusion.get('memory_decision_override_applied', False)))} "
+            f"reason={fusion.get('memory_decision_override_reason', 'none')} "
+            f"alt_sector={fusion.get('memory_decision_alternate_sector_id', 'n/a')}"
         ),
         f"target_reason: {fusion.get('target_conditioned_reason', 'n/a')}",
         f"fusion_reason: {fusion.get('decision_reason', 'n/a')}",
@@ -1457,6 +2117,17 @@ def run_phase2_fusion_analysis(
         state=state,
         houses_config=houses_cfg,
     )
+    try:
+        entry_search_memory = update_entry_search_memory_from_fusion(
+            houses_config=houses_cfg,
+            fusion_result=fusion,
+        )
+    except Exception as exc:
+        entry_search_memory = {
+            "status": "error",
+            "error": str(exc),
+        }
+    fusion["entry_search_memory"] = entry_search_memory
     fusion_overlay = draw_fusion_overlay(
         rgb_bgr=rgb_bgr,
         yolo_result=yolo_result,

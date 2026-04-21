@@ -91,6 +91,17 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _read_target_house_review(labeling_dir: Path) -> Dict[str, Any]:
+    review_path = labeling_dir / "target_house_review.json"
+    if not review_path.exists():
+        return {}
+    try:
+        value = _read_json(review_path)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+
 def _normalize_token(value: Any) -> str:
     token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     token = re.sub(r"[^a-z0-9_]+", "", token)
@@ -401,6 +412,7 @@ def normalize_teacher_output(
     yolo_result: Dict[str, Any],
     depth_result: Dict[str, Any],
     state_excerpt: Optional[Dict[str, Any]] = None,
+    target_house_review: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     parsed = teacher_payload.get("parsed", {}) if isinstance(teacher_payload.get("parsed"), dict) else {}
     detections = yolo_result.get("detections", []) if isinstance(yolo_result.get("detections"), list) else []
@@ -446,6 +458,17 @@ def normalize_teacher_output(
     if not target_house_id:
         target_house_id = str(target_context.get("target_house_id") or "").strip()
 
+    review_payload = target_house_review if isinstance(target_house_review, dict) else {}
+    review_result = str(review_payload.get("review_result") or "").strip().lower()
+    reviewed_house_id = str(review_payload.get("reviewed_house_id") or "").strip()
+    reviewed_house_name = str(review_payload.get("reviewed_house_name") or "").strip()
+    original_target_house_id = str(target_house_id or "").strip()
+    target_house_review_applied = bool(reviewed_house_id)
+    target_house_review_changed = bool(reviewed_house_id) and bool(original_target_house_id) and reviewed_house_id != original_target_house_id
+    target_house_review_filled_missing = bool(reviewed_house_id) and not bool(original_target_house_id)
+    if reviewed_house_id:
+        target_house_id = reviewed_house_id
+
     target_house_in_fov = bool(target_context.get("target_house_in_fov", False))
     target_house_expected_side = str(target_context.get("target_house_expected_side") or "").strip().lower()
     target_conditioned_state = fusion_target_state if fusion_target_state in TARGET_CONDITIONED_STATES else ""
@@ -487,6 +510,13 @@ def normalize_teacher_output(
     target_confidence = _clamp(max(confidence, best_target_score), 0.0, 1.0)
     if target_conditioned_state in {"target_house_not_in_view", "target_house_entry_visible"}:
         target_confidence = _clamp(min(target_confidence, 0.85), 0.0, 1.0)
+    if target_house_review_changed or target_house_review_filled_missing:
+        target_conditioned_state = ""
+        target_conditioned_subgoal = ""
+        target_conditioned_action_hint = ""
+        target_conditioned_candidate_id = -1
+        target_conditioned_reason = ""
+        target_confidence = 0.0
 
     normalized = {
         "entry_state": entry_state,
@@ -502,6 +532,13 @@ def normalize_teacher_output(
         "task_label": task_label,
         "current_house_id": current_house_id,
         "target_house_id": target_house_id,
+        "original_target_house_id": original_target_house_id,
+        "target_house_review_result": review_result,
+        "reviewed_house_id": reviewed_house_id,
+        "reviewed_house_name": reviewed_house_name,
+        "target_house_review_applied": int(target_house_review_applied),
+        "target_house_review_changed": int(target_house_review_changed),
+        "target_house_review_filled_missing": int(target_house_review_filled_missing),
         "target_house_in_fov": target_house_in_fov,
         "target_house_expected_side": target_house_expected_side,
         "target_conditioned_state": target_conditioned_state,
@@ -792,6 +829,7 @@ def validate_labeling_dir(labeling_dir: Path, teacher_filename: str = "") -> Dic
     depth_result = _read_json(labeling_dir / "depth_result.json")
     state_excerpt_path = labeling_dir / "state_excerpt.json"
     state_excerpt = _read_json(state_excerpt_path) if state_excerpt_path.exists() else {}
+    target_house_review = _read_target_house_review(labeling_dir)
 
     fusion = fusion_result.get("fusion", {}) if isinstance(fusion_result.get("fusion"), dict) else fusion_result
     depth_analysis = depth_result.get("analysis", {}) if isinstance(depth_result.get("analysis"), dict) else depth_result
@@ -802,6 +840,7 @@ def validate_labeling_dir(labeling_dir: Path, teacher_filename: str = "") -> Dic
         yolo_result=yolo_result,
         depth_result=depth_analysis,
         state_excerpt=state_excerpt,
+        target_house_review=target_house_review,
     )
     validation = validate_teacher_output(
         teacher_output=teacher_output,
@@ -818,6 +857,7 @@ def validate_labeling_dir(labeling_dir: Path, teacher_filename: str = "") -> Dic
         "teacher_model": teacher_payload.get("model_name"),
         "teacher_family": "anthropic_scene_descriptor",
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "target_house_review": target_house_review,
         "teacher_output": validation["normalized_teacher_output"],
     }
     validation_payload = {
@@ -829,6 +869,7 @@ def validate_labeling_dir(labeling_dir: Path, teacher_filename: str = "") -> Dic
         "warnings": validation["warnings"],
         "normalized_teacher_output": validation["normalized_teacher_output"],
         "evidence": validation["evidence"],
+        "target_house_review": target_house_review,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
 

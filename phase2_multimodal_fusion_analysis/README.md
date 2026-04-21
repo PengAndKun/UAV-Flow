@@ -110,6 +110,7 @@ then:
 - normalizes it into `teacher_output.json`
 - validates it against `fusion_result.json`, `yolo_result.json`, `depth_result.json`
 - writes `teacher_validation.json`
+- if `target_house_review.json` exists, it now prefers the reviewed house id and suppresses stale target-conditioned labels when the reviewed house changes the original target assignment
 - preserves the original generic teacher fields:
   - `entry_state`
   - `subgoal`
@@ -153,6 +154,7 @@ The current builder now preserves target-conditioned signals as well:
 - `global_state.target_house_id / target_house_in_fov / target_house_expected_side`
 - `candidates[*].candidate_target_match_score / candidate_total_score / candidate_is_target_house_entry`
 - `teacher_targets.target_conditioned_state / target_conditioned_subgoal / target_conditioned_action_hint`
+- when `target_house_review.json` changed or filled the target house id, the builder now prefers the reviewed target id and clears stale target-conditioned candidate-match features
 
 Batch usage example:
 
@@ -254,3 +256,65 @@ Optional skip flags:
 The script writes a batch summary JSON under:
 
 - `phase2_multimodal_fusion_analysis/results/refresh_results_with_new_yolo_summary_*.json`
+
+Entry search memory store:
+
+- `entry_search_memory.py`
+
+This module provides the first-pass runtime storage for target-house entry
+search memory. It currently focuses on the infrastructure layer:
+
+- create / load / save `entry_search_memory.json`
+- initialize one memory object per house from `UAV-Flow-Eval/houses_config.json`
+- maintain:
+  - `working_memory`
+  - `episodic_memory`
+  - `semantic_memory`
+- update:
+  - current target house id
+  - recent actions
+  - recent target-conditioned decisions
+  - top candidates
+  - searched sectors
+  - candidate entry states
+  - episodic snapshots
+
+Default storage path:
+
+- `phase2_multimodal_fusion_analysis/entry_search_memory.json`
+
+Current integration status:
+
+- `fusion_entry_analysis.py` now updates the first-pass `semantic_memory`
+  after each fusion run
+- the written fusion result now includes:
+  - `fusion.entry_search_memory.memory_path`
+  - `fusion.entry_search_memory.house_id`
+  - `fusion.entry_search_memory.sector_id`
+  - `fusion.entry_search_memory.entry_search_status`
+- `fusion_entry_analysis.py` also starts using `semantic_memory` for first-pass
+  decision adjustment:
+  - repeated low-yield sectors can slightly reduce weak candidate priority
+  - previously rejected candidates can be down-weighted
+  - the previous `last_best_entry_id` can receive a small tracking boost
+- the written fusion result now also includes `fusion.memory_guidance`
+- the written fusion result now also includes `fusion.memory_decision_guidance`
+  so higher-level target-conditioned decisions can:
+  - shift away from repeated low-yield sectors
+  - stop repeatedly retrying a persistently blocked target entry candidate
+- `panel_summary` and `labeling_summary.txt` also expose a compact memory
+  summary so it is easier to verify whether the runtime memory is changing
+
+Default usage sketch:
+
+```python
+from phase2_multimodal_fusion_analysis import EntrySearchMemoryStore
+
+store = EntrySearchMemoryStore()
+store.load()
+store.ensure_from_houses_config()
+store.set_current_target_house("001")
+store.set_entry_search_status("001", "searching_entry")
+store.update_sector("001", "front_center", best_entry_state="blocked_entry")
+store.save()
+```

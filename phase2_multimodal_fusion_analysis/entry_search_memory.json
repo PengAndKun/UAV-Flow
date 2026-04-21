@@ -1,0 +1,659 @@
+{
+  "version": "v1",
+  "updated_at": "2026-04-20 23:55:11",
+  "current_target_house_id": "001",
+  "memories": {
+    "001": {
+      "house_id": "001",
+      "house_name": "House_1",
+      "house_status": "UNSEARCHED",
+      "target_match_active": true,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "searching_entry",
+        "last_best_entry_id": "0",
+        "search_summary": {
+          "observed_sector_count": 1,
+          "candidate_entry_count": 1,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 1,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": true,
+            "observation_count": 4,
+            "last_visit_time": 1776700511.320981,
+            "best_entry_state": "blocked_entry",
+            "best_target_conditioned_subgoal": "detour_left_to_target_entry",
+            "best_target_match_score": 0.8386116608367289
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": [
+          {
+            "candidate_id": "0",
+            "semantic_class": "open door",
+            "target_match_score": 0.8386116608367289,
+            "distance_cm": 603.2938842773438,
+            "opening_width_cm": 26.394107437133783,
+            "center_x_norm": 0.4641073703765869,
+            "candidate_total_score": 0.7908,
+            "status": "blocked_temporary",
+            "attempt_count": 2,
+            "last_checked_time": 1776700511.320981
+          }
+        ]
+      }
+    },
+    "002": {
+      "house_id": "002",
+      "house_name": "House_2",
+      "house_status": "IN_PROGRESS",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "003": {
+      "house_id": "003",
+      "house_name": "House_3",
+      "house_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "004": {
+      "house_id": "004",
+      "house_name": "House_4",
+      "house_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "005": {
+      "house_id": "005",
+      "house_name": "House_5",
+      "house_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "006": {
+      "house_id": "006",
+      "house_name": "House_6",
+      "house_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "007": {
+      "house_id": "007",
+      "house_name": "House_7",
+      "house_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "008": {
+      "house_id": "008",
+      "house_name": "House_8",
+      "house_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "009": {
+      "house_id": "009",
+      "house_name": "House_9",
+      "house_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-20 23:55:11",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    }
+  }
+}

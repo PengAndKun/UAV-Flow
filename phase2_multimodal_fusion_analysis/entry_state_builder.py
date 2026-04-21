@@ -267,6 +267,7 @@ def _build_global_state(
     fusion: Dict[str, Any],
     depth_result: Dict[str, Any],
     pose_history: Dict[str, Any],
+    teacher_targets: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     pose = state_excerpt.get("pose", {}) if isinstance(state_excerpt.get("pose"), dict) else {}
     front_obstacle = depth_result.get("front_obstacle", {}) if isinstance(depth_result.get("front_obstacle"), dict) else {}
@@ -294,6 +295,26 @@ def _build_global_state(
         if action not in deduped_history:
             deduped_history.append(action)
 
+    teacher_targets = teacher_targets if isinstance(teacher_targets, dict) else {}
+    corrected_target_house_id = str(teacher_targets.get("target_house_id") or "").strip()
+    review_applied = bool(teacher_targets.get("target_house_review_applied", 0))
+    review_changed = bool(teacher_targets.get("target_house_review_changed", 0))
+    review_filled_missing = bool(teacher_targets.get("target_house_review_filled_missing", 0))
+    review_override_target_context = review_changed or review_filled_missing
+    target_house_known_mask = int(bool(corrected_target_house_id or target_context.get("target_house_id")))
+    target_house_in_fov = int(bool(target_context.get("target_house_in_fov", False))) if not review_override_target_context else 0
+    target_house_expected_side_text = str(target_context.get("target_house_expected_side") or "") if not review_override_target_context else ""
+    target_house_expected_image_x = (
+        round(_clamp(_safe_float(target_context.get("target_house_expected_image_x"), 0.5), 0.0, 1.0), 6)
+        if not review_override_target_context
+        else 0.5
+    )
+    target_house_bbox_available_mask = int(bool(target_context.get("target_house_map_bbox_image"))) if not review_override_target_context else 0
+    target_distance_value = target_distance_cm if (target_distance_cm is not None and not review_override_target_context) else 0.0
+    target_bearing_value = target_bearing_deg if (target_bearing_deg is not None and not review_override_target_context) else 0.0
+    target_bearing_sin = round(target_bearing_sin, 6) if not review_override_target_context else 0.0
+    target_bearing_cos = round(target_bearing_cos, 6) if not review_override_target_context else 1.0
+
     return {
         "pose_x": _safe_float(pose.get("x"), 0.0),
         "pose_y": _safe_float(pose.get("y"), 0.0),
@@ -304,25 +325,26 @@ def _build_global_state(
         "front_obstacle_present": int(bool(front_obstacle.get("present", False))),
         "front_min_depth_cm": _safe_float(front_obstacle.get("front_min_depth_cm"), 0.0),
         "front_obstacle_severity": str(front_obstacle.get("severity") or "").strip().lower(),
-        "target_house_id": _house_id_to_int(target_context.get("target_house_id") or state_excerpt.get("target_house") or state_excerpt.get("target_house_id")),
+        "target_house_id": _house_id_to_int(corrected_target_house_id or target_context.get("target_house_id") or state_excerpt.get("target_house") or state_excerpt.get("target_house_id")),
         "current_house_id": _house_id_to_int(target_context.get("current_house_id") or state_excerpt.get("current_house") or state_excerpt.get("current_house_id")),
-        "target_house_known_mask": int(bool(target_context.get("target_house_id"))),
-        "target_house_in_fov": int(bool(target_context.get("target_house_in_fov", False))),
-        "target_house_expected_side": _expected_side_to_id(target_context.get("target_house_expected_side")),
-        "target_house_expected_side_text": str(target_context.get("target_house_expected_side") or ""),
-        "target_house_expected_image_x": round(
-            _clamp(_safe_float(target_context.get("target_house_expected_image_x"), 0.5), 0.0, 1.0), 6
-        ),
-        "target_house_bbox_available_mask": int(bool(target_context.get("target_house_map_bbox_image"))),
-        "target_distance_cm": target_distance_cm if target_distance_cm is not None else 0.0,
-        "target_bearing_deg": target_bearing_deg if target_bearing_deg is not None else 0.0,
-        "target_bearing_sin": round(target_bearing_sin, 6),
-        "target_bearing_cos": round(target_bearing_cos, 6),
+        "target_house_known_mask": target_house_known_mask,
+        "target_house_in_fov": target_house_in_fov,
+        "target_house_expected_side": _expected_side_to_id(target_house_expected_side_text),
+        "target_house_expected_side_text": target_house_expected_side_text,
+        "target_house_expected_image_x": target_house_expected_image_x,
+        "target_house_bbox_available_mask": target_house_bbox_available_mask,
+        "target_distance_cm": target_distance_value,
+        "target_bearing_deg": target_bearing_value,
+        "target_bearing_sin": target_bearing_sin,
+        "target_bearing_cos": target_bearing_cos,
+        "target_house_review_applied": int(review_applied),
+        "target_house_review_changed": int(review_changed),
+        "target_house_review_filled_missing": int(review_filled_missing),
         "movement_enabled": int(bool(state_excerpt.get("movement_enabled", False))),
         "history_actions": deduped_history[:4],
         "front_min_depth_norm": round(_clamp(_safe_float(front_obstacle.get("front_min_depth_cm"), 0.0) / MAX_DEPTH_CM, 0.0, 1.0), 6),
         "target_distance_norm": round(
-            _clamp(((target_distance_cm or 0.0) / MAX_TARGET_DISTANCE_CM), 0.0, 1.0), 6
+            _clamp((target_distance_value / MAX_TARGET_DISTANCE_CM), 0.0, 1.0), 6
         ),
     }
 
@@ -439,6 +461,15 @@ def _build_teacher_targets(labeling_dir: Path) -> Dict[str, Any]:
         "teacher_reason_text": str(teacher_output.get("reason") or ""),
         "teacher_reason_embedding": [],
         "confidence": round(_clamp(_safe_float(teacher_output.get("confidence"), 0.0), 0.0, 1.0), 6),
+        "target_house_id": str(teacher_output.get("target_house_id") or ""),
+        "current_house_id": str(teacher_output.get("current_house_id") or ""),
+        "original_target_house_id": str(teacher_output.get("original_target_house_id") or ""),
+        "target_house_review_result": str(teacher_output.get("target_house_review_result") or ""),
+        "reviewed_house_id": str(teacher_output.get("reviewed_house_id") or ""),
+        "reviewed_house_name": str(teacher_output.get("reviewed_house_name") or ""),
+        "target_house_review_applied": int(bool(teacher_output.get("target_house_review_applied", 0))),
+        "target_house_review_changed": int(bool(teacher_output.get("target_house_review_changed", 0))),
+        "target_house_review_filled_missing": int(bool(teacher_output.get("target_house_review_filled_missing", 0))),
         "target_conditioned_teacher_available": int(bool(teacher_output.get("target_conditioned_state"))),
         "target_conditioned_state": str(teacher_output.get("target_conditioned_state") or ""),
         "target_conditioned_subgoal": str(teacher_output.get("target_conditioned_subgoal") or ""),
@@ -450,6 +481,26 @@ def _build_teacher_targets(labeling_dir: Path) -> Dict[str, Any]:
             _clamp(_safe_float(teacher_output.get("target_confidence"), 0.0), 0.0, 1.0), 6
         ),
     }
+
+
+def _apply_review_override_to_candidates(candidates: List[Dict[str, Any]], teacher_targets: Dict[str, Any]) -> List[Dict[str, Any]]:
+    if not bool(teacher_targets.get("target_house_review_changed", 0) or teacher_targets.get("target_house_review_filled_missing", 0)):
+        return candidates
+    updated: List[Dict[str, Any]] = []
+    for candidate in candidates:
+        item = dict(candidate)
+        item["candidate_target_match_score"] = 0.0
+        item["candidate_total_score"] = 0.0
+        item["candidate_house_id"] = -1
+        item["candidate_is_target_house_entry"] = 0
+        item["candidate_target_side_match"] = 0.0
+        item["candidate_center_in_target_bbox"] = 0
+        item["candidate_near_target_bbox"] = 0
+        item["candidate_image_side"] = ""
+        item["target_expected_side"] = ""
+        item["target_expected_image_x"] = 0.5
+        updated.append(item)
+    return updated
 
 
 def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
@@ -465,15 +516,16 @@ def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
     depth_analysis = depth_result.get("analysis", {}) if isinstance(depth_result.get("analysis"), dict) else depth_result
     detections = yolo_result.get("detections", []) if isinstance(yolo_result.get("detections"), list) else []
     sorted_detections = sorted(detections, key=_sort_detection_key)
+    teacher_targets = _build_teacher_targets(labeling_dir)
 
     candidates: List[Dict[str, Any]] = []
     for rank, detection in enumerate(sorted_detections[:TOP_K_CANDIDATES]):
         candidates.append(_build_candidate(detection, fusion, depth_analysis, rank))
     while len(candidates) < TOP_K_CANDIDATES:
         candidates.append(_zero_candidate(len(candidates)))
+    candidates = _apply_review_override_to_candidates(candidates, teacher_targets)
 
-    global_state = _build_global_state(state_excerpt, fusion, depth_analysis, pose_history)
-    teacher_targets = _build_teacher_targets(labeling_dir)
+    global_state = _build_global_state(state_excerpt, fusion, depth_analysis, pose_history, teacher_targets=teacher_targets)
     metadata = {
         "sample_id": sample_id,
         "task_label": str(state_excerpt.get("task_label") or ""),
@@ -486,7 +538,9 @@ def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
         "fusion_source": "fusion_result.json",
         "top_k": TOP_K_CANDIDATES,
         "target_conditioning_enabled": int(bool(fusion.get("target_context"))),
-        "target_house_id": str((fusion.get("target_context") or {}).get("target_house_id") or ""),
+        "target_house_id": str(teacher_targets.get("target_house_id") or (fusion.get("target_context") or {}).get("target_house_id") or ""),
+        "target_house_review_applied": int(bool(teacher_targets.get("target_house_review_applied", 0))),
+        "target_house_review_changed": int(bool(teacher_targets.get("target_house_review_changed", 0))),
     }
 
     entry_state = {
