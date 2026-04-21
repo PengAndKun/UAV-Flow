@@ -13,6 +13,7 @@ Only keeps:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+from ctypes import wintypes
 
 import cv2
 import gym
@@ -108,6 +110,14 @@ class BasicUAVControlBackend:
         self.frame_index = 0
         self.last_observation_time = now_timestamp()
         self.last_observation_id = "frame_000000"
+        self.last_door_open_state: Optional[bool] = None
+        self.last_door_control_time = ""
+        self.last_door_target_name = ""
+        self.last_door_control_response = ""
+        self.last_door_control_command = ""
+        self.last_door_control_ok: Optional[bool] = None
+        self.last_door_control_method = ""
+        self.last_door_window_title = ""
         self.current_task_label = str(args.default_task_label or "")
         self.movement_enabled = bool(args.start_with_basic_movement)
         self.fixed_spawn_pose_path = os.path.abspath(args.fixed_spawn_pose_file) if args.fixed_spawn_pose_file else ""
@@ -173,6 +183,154 @@ class BasicUAVControlBackend:
         self.command_task_yaw_deg = float(self.get_task_pose()[3])
         self.position_free_view_once()
         self.refresh_observations()
+        try:
+            logger.info("Interactive doors discovered: count=%d", len(self._interactive_door_names()))
+        except Exception:
+            logger.exception("Failed to summarize interactive doors after initialization")
+
+    def _interactive_door_names(self) -> List[str]:
+        env_cfg = getattr(self.env.unwrapped, "env_configs", {}) if hasattr(self.env, "unwrapped") else {}
+        raw = env_cfg.get("interactive_door", []) if isinstance(env_cfg, dict) else []
+        if not isinstance(raw, list):
+            return []
+        names: List[str] = []
+        for item in raw:
+            name = str(item or "").strip()
+            if name:
+                names.append(name)
+        return names
+
+    def _nearest_interactive_door(self) -> Tuple[Optional[str], Optional[List[float]], Optional[float]]:
+        door_names = self._interactive_door_names()
+        if not door_names:
+            return None, None, None
+        x, y, _, _ = self.get_task_pose()
+        best_name: Optional[str] = None
+        best_loc: Optional[List[float]] = None
+        best_dist: Optional[float] = None
+        for door_name in door_names:
+            try:
+                with self.unrealcv_lock:
+                    loc = self.env.unwrapped.unrealcv.get_obj_location(door_name)
+                if not isinstance(loc, (list, tuple)) or len(loc) < 3:
+                    continue
+                dx = float(loc[0]) - float(x)
+                dy = float(loc[1]) - float(y)
+                dist = float(np.hypot(dx, dy))
+                if best_dist is None or dist < best_dist:
+                    best_name = door_name
+                    best_loc = [float(loc[0]), float(loc[1]), float(loc[2])]
+                    best_dist = dist
+            except Exception as exc:
+                logger.debug("Failed to query interactive door %s: %s", door_name, exc)
+                continue
+        return best_name, best_loc, best_dist
+
+    def _looks_like_error_response(self, raw_response: str) -> bool:
+        text = str(raw_response or "").strip().lower()
+        if not text:
+            return False
+        return text.startswith("error") or " argument invalid" in text or "failed" in text
+
+    def _interaction_window_tokens(self) -> List[str]:
+        tokens: List[str] = []
+        for raw in (
+            os.path.splitext(os.path.basename(str(self.args.env_bin_win or "")))[0],
+            str(self.args.env_id or ""),
+            str(getattr(self.env.unwrapped, "env_name", "") or ""),
+        ):
+            token = str(raw or "").strip()
+            if token and token not in tokens:
+                tokens.append(token)
+        return tokens
+
+    def _find_interaction_window(self) -> Tuple[Optional[int], str]:
+        if os.name != "nt":
+            return None, ""
+        user32 = ctypes.windll.user32
+        tokens = [token.lower() for token in self._interaction_window_tokens()]
+        if not tokens:
+            return None, ""
+        matches: List[Tuple[int, str]] = []
+
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        def enum_windows_proc(hwnd, _lparam):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return True
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            title = str(buffer.value or "").strip()
+            if not title:
+                return True
+            lowered = title.lower()
+            if any(token in lowered for token in tokens):
+                matches.append((int(hwnd), title))
+            return True
+
+        user32.EnumWindows(enum_windows_proc, 0)
+        if not matches:
+            return None, ""
+        hwnd, title = matches[0]
+        return hwnd, title
+
+    def _send_interact_e_to_window(self) -> Tuple[bool, str, str]:
+        if os.name != "nt":
+            return False, "", "Keyboard interaction is only supported on Windows."
+        hwnd, title = self._find_interaction_window()
+        if not hwnd:
+            return False, "", "Could not find Unreal window for interaction."
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        user32.ShowWindow(hwnd, 5)
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        user32.SetActiveWindow(hwnd)
+        time.sleep(0.05)
+
+        ULONG_PTR = wintypes.WPARAM
+        INPUT_KEYBOARD = 1
+        KEYEVENTF_KEYUP = 0x0002
+        WM_KEYDOWN = 0x0100
+        WM_KEYUP = 0x0101
+        VK_E = 0x45
+
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk", wintypes.WORD),
+                ("wScan", wintypes.WORD),
+                ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD),
+                ("dwExtraInfo", ULONG_PTR),
+            ]
+
+        class _INPUTUNION(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", wintypes.DWORD), ("union", _INPUTUNION)]
+
+        inputs = (INPUT * 2)()
+        inputs[0] = INPUT(type=INPUT_KEYBOARD, union=_INPUTUNION(ki=KEYBDINPUT(wVk=VK_E, wScan=0, dwFlags=0, time=0, dwExtraInfo=0)))
+        inputs[1] = INPUT(type=INPUT_KEYBOARD, union=_INPUTUNION(ki=KEYBDINPUT(wVk=VK_E, wScan=0, dwFlags=KEYEVENTF_KEYUP, time=0, dwExtraInfo=0)))
+
+        kernel32.SetLastError(0)
+        sent = int(user32.SendInput(len(inputs), inputs, ctypes.sizeof(INPUT)))
+        if sent == len(inputs):
+            return True, title, "SendInput:E"
+
+        sendinput_error = int(ctypes.get_last_error())
+        down_ok = int(user32.PostMessageW(hwnd, WM_KEYDOWN, VK_E, 0))
+        up_ok = int(user32.PostMessageW(hwnd, WM_KEYUP, VK_E, 0))
+        if down_ok and up_ok:
+            return True, title, f"PostMessage:E fallback sendinput={sent} lasterr={sendinput_error}"
+        return False, title, (
+            f"SendInput returned {sent} lasterr={sendinput_error}; "
+            f"PostMessage down={down_ok} up={up_ok}"
+        )
 
     def hide_non_primary_agents(self) -> None:
         for idx, player_name in enumerate(self.env.unwrapped.player_list[1:], start=1):
@@ -486,6 +644,32 @@ class BasicUAVControlBackend:
             "command_yaw": float(self.command_task_yaw_deg),
         }
 
+    def _build_door_control_state(self) -> Dict[str, Any]:
+        nearest_name, nearest_loc, nearest_dist = self._nearest_interactive_door()
+        available_count = len(self._interactive_door_names())
+        return {
+            "supported": bool(available_count),
+            "mode": "player_blueprint_action",
+            "control_player_name": str(self.player_name or ""),
+            "available_count": int(available_count),
+            "nearest_door_name": str(nearest_name or ""),
+            "nearest_door_distance_cm": None if nearest_dist is None else float(nearest_dist),
+            "nearest_door_location": nearest_loc,
+            "last_requested_open": None if self.last_door_open_state is None else bool(self.last_door_open_state),
+            "last_requested_label": (
+                "unknown"
+                if self.last_door_open_state is None
+                else ("open" if self.last_door_open_state else "closed")
+            ),
+            "last_target_name": str(self.last_door_target_name or ""),
+            "last_command": str(self.last_door_control_command or ""),
+            "last_response": str(self.last_door_control_response or ""),
+            "last_ok": None if self.last_door_control_ok is None else bool(self.last_door_control_ok),
+            "last_method": str(self.last_door_control_method or ""),
+            "last_window_title": str(self.last_door_window_title or ""),
+            "last_control_time": str(self.last_door_control_time or ""),
+        }
+
     def get_state(self, *, status: str = "ok", message: str = "") -> Dict[str, Any]:
         return {
             "status": status,
@@ -505,6 +689,7 @@ class BasicUAVControlBackend:
             "house_registry": self.house_registry.get_status_summary(),
             "house_mission": self.get_house_mission_state(),
             "overhead_map": dict(self.last_overhead_info),
+            "door_control": self._build_door_control_state(),
         }
 
     # ------------------------------------------------------------------
@@ -655,6 +840,92 @@ class BasicUAVControlBackend:
                     + (" Synced heading." if self.movement_enabled else "")
                 )
             )
+
+    def set_open_door_state(self, is_open: bool) -> Dict[str, Any]:
+        with self.lock:
+            door_name, door_loc, door_distance = self._nearest_interactive_door()
+            if not door_name:
+                logger.warning("Door control requested open=%s but no interactive door is available.", is_open)
+                self.last_door_control_ok = False
+                self.last_door_control_response = "No interactive door found."
+                self.last_door_control_command = ""
+                return self.get_state(status="error", message="No interactive door found in current environment configuration.")
+            try:
+                command = self.env.unwrapped.unrealcv.set_open_door(self.player_name, 1 if is_open else 0, return_cmd=True)
+                raw_response = ""
+                logger.info(
+                    "Door control request -> action=%s player=%s nearest=%s loc=%s distance_cm=%s cmd=%s",
+                    "open" if is_open else "close",
+                    self.player_name,
+                    door_name,
+                    door_loc,
+                    f"{door_distance:.1f}" if door_distance is not None else "n/a",
+                    command,
+                )
+                with self.unrealcv_lock:
+                    raw_response = str(self.env.unwrapped.unrealcv.client.request(command))
+                self.last_door_open_state = bool(is_open)
+                self.last_door_control_time = now_timestamp()
+                self.last_door_target_name = str(door_name)
+                self.last_door_control_command = str(command)
+                self.last_door_control_response = raw_response
+                self.last_door_control_ok = not self._looks_like_error_response(raw_response)
+                self.last_door_control_method = "player_blueprint_set_open_door"
+                self.last_door_window_title = ""
+                self.last_action = "door_open" if is_open else "door_close"
+                distance_note = "" if door_distance is None else f" nearest={door_distance:.1f}cm"
+                logger.info(
+                    "Door control completed -> action=%s player=%s nearest=%s loc=%s distance_cm=%s ok=%s response=%s",
+                    "open" if is_open else "close",
+                    self.player_name,
+                    door_name,
+                    door_loc,
+                    f"{door_distance:.1f}" if door_distance is not None else "n/a",
+                    self.last_door_control_ok,
+                    raw_response,
+                )
+                if not self.last_door_control_ok:
+                    return self.get_state(status="error", message=f"Door command rejected for player {self.player_name} near {door_name}.{distance_note} response={raw_response}")
+                return self.get_state(message=f"Requested door {'open' if is_open else 'close'} via player {self.player_name} near {door_name}.{distance_note}")
+            except Exception as exc:
+                self.last_door_control_time = now_timestamp()
+                self.last_door_target_name = str(door_name)
+                self.last_door_control_command = str(locals().get("command", ""))
+                self.last_door_control_response = str(exc)
+                self.last_door_control_ok = False
+                self.last_door_control_method = "player_blueprint_set_open_door"
+                self.last_door_window_title = ""
+                logger.warning("Door control failed for player=%s nearest=%s open=%s: %s", self.player_name, door_name, is_open, exc)
+                return self.get_state(status="error", message=f"Door control failed: {exc}")
+
+    def toggle_open_door_state(self) -> Dict[str, Any]:
+        next_state = True if self.last_door_open_state is None else (not bool(self.last_door_open_state))
+        return self.set_open_door_state(next_state)
+
+    def interact_open_door_with_key(self) -> Dict[str, Any]:
+        with self.lock:
+            door_name, door_loc, door_distance = self._nearest_interactive_door()
+            ok, window_title, response = self._send_interact_e_to_window()
+            self.last_door_control_time = now_timestamp()
+            self.last_door_target_name = str(door_name or "")
+            self.last_door_control_command = "SendInput:E"
+            self.last_door_control_response = str(response)
+            self.last_door_control_ok = bool(ok)
+            self.last_door_control_method = "keyboard_interact_e"
+            self.last_door_window_title = str(window_title or "")
+            self.last_action = "door_interact_e"
+            logger.info(
+                "Door interact(E) -> target=%s loc=%s distance_cm=%s window=%s ok=%s response=%s",
+                door_name or "",
+                door_loc,
+                f"{door_distance:.1f}" if door_distance is not None else "n/a",
+                window_title or "",
+                ok,
+                response,
+            )
+            if not ok:
+                return self.get_state(status="error", message=f"Door interact(E) failed: {response}")
+            return self.get_state(message=f"Door interact(E) sent to window '{window_title}'")
 
     def move_relative(
         self,
@@ -1113,6 +1384,14 @@ def make_handler(backend: BasicUAVControlBackend):
                     )
                 elif parsed.path == "/task":
                     self._send_json(backend.set_task_label(str(data.get("task_label", ""))))
+                elif parsed.path == "/door_open":
+                    self._send_json(backend.set_open_door_state(True))
+                elif parsed.path == "/door_close":
+                    self._send_json(backend.set_open_door_state(False))
+                elif parsed.path == "/door_toggle":
+                    self._send_json(backend.toggle_open_door_state())
+                elif parsed.path == "/door_interact_e":
+                    self._send_json(backend.interact_open_door_with_key())
                 elif parsed.path == "/set_pose":
                     required_keys = {"x", "y", "z", "yaw"}
                     if not isinstance(data, dict) or not required_keys.issubset(set(data.keys())):

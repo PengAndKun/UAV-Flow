@@ -42,6 +42,68 @@ MOVE_COMMANDS: Dict[str, Dict[str, Any]] = {
     "x": {"forward_cm": 0.0, "right_cm": 0.0, "up_cm": 0.0, "yaw_delta_deg": 0.0, "action_name": "hold"},
 }
 
+TARGET_CONDITIONED_STATE_OPTIONS: List[str] = [
+    "target_house_not_in_view",
+    "target_house_entry_visible",
+    "target_house_entry_approachable",
+    "target_house_entry_blocked",
+    "non_target_house_entry_visible",
+    "target_house_geometric_opening_needs_confirmation",
+]
+
+TARGET_CONDITIONED_SUBGOAL_OPTIONS: List[str] = [
+    "reorient_to_target_house",
+    "keep_search_target_house",
+    "approach_target_entry",
+    "align_target_entry",
+    "detour_left_to_target_entry",
+    "detour_right_to_target_entry",
+    "cross_target_entry",
+    "ignore_non_target_entry",
+    "backoff_and_reobserve",
+]
+
+TARGET_CONDITIONED_ACTION_OPTIONS: List[str] = [
+    "forward",
+    "yaw_left",
+    "yaw_right",
+    "left",
+    "right",
+    "backward",
+    "hold",
+]
+
+TARGET_CONDITIONED_STATE_NOTES: Dict[str, str] = {
+    "target_house_not_in_view": "目标房屋当前不在主要视野内，通常应继续转向目标房屋，而不是处理当前画面中的入口。",
+    "target_house_entry_visible": "目标房屋已经在视野内，但入口还不够明确或不够稳定，适合继续围绕目标房屋观察和搜索。",
+    "target_house_entry_approachable": "目标房屋入口已经明确，且前方条件允许靠近，通常应继续朝入口接近。",
+    "target_house_entry_blocked": "目标房屋入口是对的，但前方有障碍、遮挡或路径受限，需要先绕行或调整位置。",
+    "non_target_house_entry_visible": "当前看到的是非目标房屋的入口，即使它看起来可进入，也不应该优先进这个门。",
+    "target_house_geometric_opening_needs_confirmation": "几何上像目标房屋有开口，但语义或归属还不够确定，需要继续确认是否真的是目标入口。",
+}
+
+TARGET_CONDITIONED_SUBGOAL_NOTES: Dict[str, str] = {
+    "reorient_to_target_house": "当前主要任务是重新朝向目标房屋，让目标房屋重新进入有效视野。",
+    "keep_search_target_house": "目标房屋已经基本进入观察范围，但还需要继续扫描立面或门口区域，找到真正入口。",
+    "approach_target_entry": "目标入口已经确认，下一步应稳定向入口靠近，而不是继续横向搜索。",
+    "align_target_entry": "入口已经找到，但机体姿态或中心线还没对齐，需要先调整朝向和位置。",
+    "detour_left_to_target_entry": "入口方向是正确的，但左侧绕行更合理，通常是因为左侧更安全或障碍更少。",
+    "detour_right_to_target_entry": "入口方向是正确的，但右侧绕行更合理，通常是因为右侧更安全或障碍更少。",
+    "cross_target_entry": "已经足够接近且对齐目标入口，可以尝试穿过入口进入。",
+    "ignore_non_target_entry": "虽然画面里有入口，但它不属于目标房屋，应忽略并继续找目标房屋入口。",
+    "backoff_and_reobserve": "当前判断不稳定或距离太近导致视野差，先后退一点，再重新观察会更稳。",
+}
+
+TARGET_CONDITIONED_ACTION_NOTES: Dict[str, str] = {
+    "forward": "当前最合理的是向前推进，通常表示入口已较明确且前方空间允许靠近。",
+    "yaw_left": "当前更适合向左转头，常见于目标房屋或目标入口偏在左侧，需要重新把它转到中央。",
+    "yaw_right": "当前更适合向右转头，常见于目标房屋或目标入口偏在右侧，需要重新把它转到中央。",
+    "left": "当前更适合向左平移或左绕行，通常是为了避开障碍或贴近左侧入口通道。",
+    "right": "当前更适合向右平移或右绕行，通常是为了避开障碍或贴近右侧入口通道。",
+    "backward": "当前更适合后退，通常是因为离得太近、视野过窄或需要先拉开距离再判断。",
+    "hold": "当前更适合悬停保持，说明这一步主要是在稳定观察，而不是立刻移动。",
+}
+
 
 class Client:
     def __init__(self, base_url: str, timeout_s: float) -> None:
@@ -106,6 +168,7 @@ class Panel:
         self.pose_var = tk.StringVar(value="Pose: waiting...")
         self.depth_var = tk.StringVar(value="Depth: waiting...")
         self.control_var = tk.StringVar(value="Movement: waiting...")
+        self.door_var = tk.StringVar(value="Door: waiting...")
         self.capture_var = tk.StringVar(value="Capture: waiting...")
         self.fusion_summary_var = tk.StringVar(value="Fusion: idle")
         self.fusion_dir_var = tk.StringVar(value="Fusion dir: none")
@@ -165,6 +228,20 @@ class Panel:
         self.review_info_var = tk.StringVar(value="No sample loaded.")
         self.review_queue: List[Dict[str, Any]] = []
         self.review_current_item: Optional[Dict[str, Any]] = None
+        self.indicator_review_window: Optional[tk.Toplevel] = None
+        self.indicator_review_image_label: Optional[tk.Label] = None
+        self.indicator_review_image_photo: Optional[ImageTk.PhotoImage] = None
+        self.indicator_review_status_var = tk.StringVar(value="Indicator reviewer: idle")
+        self.indicator_review_info_var = tk.StringVar(value="No sample loaded.")
+        self.indicator_review_queue: List[Dict[str, Any]] = []
+        self.indicator_review_current_item: Optional[Dict[str, Any]] = None
+        self.indicator_review_house_var = tk.StringVar(value="")
+        self.indicator_review_state_var = tk.StringVar(value="")
+        self.indicator_review_subgoal_var = tk.StringVar(value="")
+        self.indicator_review_action_var = tk.StringVar(value="")
+        self.indicator_review_state_note_var = tk.StringVar(value="")
+        self.indicator_review_subgoal_note_var = tk.StringVar(value="")
+        self.indicator_review_action_note_var = tk.StringVar(value="")
         self.calibration_anchors: List[Dict[str, float]] = []
         self.pending_anchor_world: Optional[Dict[str, float]] = None
         self.pending_image_anchor: Optional[Dict[str, float]] = None
@@ -191,6 +268,10 @@ class Panel:
         self.default_map_path = os.path.join(self.eval_dir, "map", "qq.png")
         self.phase2_fusion_output_root = os.path.join(PROJECT_ROOT, "phase2_multimodal_fusion_analysis", "results")
 
+        self.indicator_review_state_var.trace_add("write", lambda *_: self._refresh_indicator_review_explanations())
+        self.indicator_review_subgoal_var.trace_add("write", lambda *_: self._refresh_indicator_review_explanations())
+        self.indicator_review_action_var.trace_add("write", lambda *_: self._refresh_indicator_review_explanations())
+
         self.build_ui()
         self._refresh_target_house_choices()
         self._refresh_default_fusion_model()
@@ -204,7 +285,7 @@ class Panel:
 
         status = tk.LabelFrame(root, text="Runtime Status")
         status.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
-        for idx, var in enumerate((self.status_var, self.pose_var, self.depth_var, self.control_var, self.capture_var, self.mission_var, self.current_house_var, self.target_house_var, self.target_dist_var, self.map_status_var, self.map_pose_var, self.calib_var)):
+        for idx, var in enumerate((self.status_var, self.pose_var, self.depth_var, self.control_var, self.door_var, self.capture_var, self.mission_var, self.current_house_var, self.target_house_var, self.target_dist_var, self.map_status_var, self.map_pose_var, self.calib_var)):
             tk.Label(status, textvariable=var, anchor="w", justify="left", font=("Consolas", 11)).grid(row=idx, column=0, sticky="ew", padx=6, pady=2)
         status.grid_columnconfigure(0, weight=1)
 
@@ -252,7 +333,8 @@ class Panel:
             wraplength=560,
             font=("Consolas", 10),
         ).grid(row=3, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 4))
-        tk.Button(fusion, text="Result Reviewer", command=self.toggle_result_reviewer_window).grid(row=4, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(fusion, text="House Reviewer", command=self.toggle_result_reviewer_window).grid(row=4, column=0, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(fusion, text="Indicator Reviewer", command=self.toggle_indicator_reviewer_window).grid(row=4, column=1, padx=6, pady=(0, 6), sticky="ew")
         self.fusion_preview_label = tk.Label(fusion, text="No fusion image yet", anchor="center")
         self.fusion_preview_label.grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
 
@@ -265,6 +347,10 @@ class Panel:
             ("Up (R)", "r", 3, 0), ("Backward (S)", "s", 3, 1), ("Down (F)", "f", 3, 2),
         ):
             tk.Button(move, text=label, command=lambda s=symbol: self.send_move_symbol(s), width=18).grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+        tk.Button(move, text="Open Door", command=self.on_door_open, width=18).grid(row=4, column=0, padx=6, pady=6, sticky="nsew")
+        tk.Button(move, text="Toggle Door", command=self.on_door_toggle, width=18).grid(row=4, column=1, padx=6, pady=6, sticky="nsew")
+        tk.Button(move, text="Close Door", command=self.on_door_close, width=18).grid(row=4, column=2, padx=6, pady=6, sticky="nsew")
+        tk.Button(move, text="Interact Door (E)", command=self.on_door_interact_e, width=18).grid(row=5, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="nsew")
         for col in range(3): move.grid_columnconfigure(col, weight=1)
 
         seq = tk.LabelFrame(left, text="Sequence Control"); seq.grid(row=3, column=0, sticky="ew", pady=(0, 8)); seq.grid_columnconfigure(1, weight=1)
@@ -420,6 +506,9 @@ class Panel:
     def _review_json_path(self, labeling_dir: str) -> str:
         return os.path.join(labeling_dir, "target_house_review.json")
 
+    def _indicator_review_json_path(self, labeling_dir: str) -> str:
+        return os.path.join(labeling_dir, "target_conditioned_review.json")
+
     def _list_pending_review_items(self) -> List[Dict[str, Any]]:
         results_root = Path(self.phase2_fusion_output_root)
         if not results_root.exists():
@@ -475,6 +564,8 @@ class Panel:
         if display:
             return display
         name = str(house_name or "").strip()
+        if name and name.startswith(hid) and "|" in name:
+            return name
         return f"{hid} | {name}" if name else hid
 
     def _refresh_review_queue(self) -> None:
@@ -581,6 +672,294 @@ class Panel:
             else:
                 selected_house_id = display
         self._save_review_result(is_correct=False, corrected_house_id=selected_house_id)
+
+    def _extract_target_conditioned_fields(
+        self,
+        *,
+        fusion_result: Optional[Dict[str, Any]] = None,
+        teacher_root: Optional[Dict[str, Any]] = None,
+        target_house_review: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, str]:
+        fusion_result = fusion_result if isinstance(fusion_result, dict) else {}
+        teacher_root = teacher_root if isinstance(teacher_root, dict) else {}
+        teacher_output = teacher_root.get("teacher_output", {}) if isinstance(teacher_root.get("teacher_output"), dict) else {}
+        target_context = fusion_result.get("target_context", {}) if isinstance(fusion_result.get("target_context"), dict) else {}
+        house_review = target_house_review if isinstance(target_house_review, dict) else {}
+
+        target_house_id = str(
+            house_review.get("reviewed_house_id", "") or
+            teacher_output.get("target_house_id", "") or
+            target_context.get("target_house_id", "") or
+            ""
+        ).strip()
+        target_house_name = str(
+            house_review.get("reviewed_house_name", "") or
+            target_context.get("target_house_name", "") or
+            ""
+        ).strip()
+        entry_state = str(
+            teacher_output.get("entry_state", "") or
+            fusion_result.get("final_entry_state", "") or
+            ""
+        ).strip()
+        subgoal = str(
+            teacher_output.get("subgoal", "") or
+            fusion_result.get("recommended_subgoal", "") or
+            ""
+        ).strip()
+        action_hint = str(
+            teacher_output.get("action_hint", "") or
+            fusion_result.get("recommended_action_hint", "") or
+            ""
+        ).strip()
+        target_state = str(
+            teacher_output.get("target_conditioned_state", "") or
+            fusion_result.get("target_conditioned_state", "") or
+            ""
+        ).strip()
+        target_subgoal = str(
+            teacher_output.get("target_conditioned_subgoal", "") or
+            fusion_result.get("target_conditioned_subgoal", "") or
+            ""
+        ).strip()
+        target_action = str(
+            teacher_output.get("target_conditioned_action_hint", "") or
+            fusion_result.get("target_conditioned_action_hint", "") or
+            ""
+        ).strip()
+        current_house_id = str(
+            teacher_output.get("current_house_id", "") or
+            target_context.get("current_house_id", "") or
+            ""
+        ).strip()
+        return {
+            "target_house_id": target_house_id,
+            "target_house_name": target_house_name,
+            "entry_state": entry_state,
+            "subgoal": subgoal,
+            "action_hint": action_hint,
+            "target_state": target_state,
+            "target_subgoal": target_subgoal,
+            "target_action": target_action,
+            "current_house_id": current_house_id,
+        }
+
+    def _list_pending_indicator_review_items(self) -> List[Dict[str, Any]]:
+        results_root = Path(self.phase2_fusion_output_root)
+        if not results_root.exists():
+            return []
+        items: List[Dict[str, Any]] = []
+        for run_dir in sorted(results_root.iterdir()):
+            if not run_dir.is_dir():
+                continue
+            labeling_dir = run_dir / "labeling"
+            overlay_path = labeling_dir / "fusion_overlay.png"
+            indicator_review_path = Path(self._indicator_review_json_path(str(labeling_dir)))
+            fusion_result_path = labeling_dir / "fusion_result.json"
+            teacher_output_path = labeling_dir / "teacher_output.json"
+            manifest_path = labeling_dir / "labeling_manifest.json"
+            house_review_path = Path(self._review_json_path(str(labeling_dir)))
+            if not labeling_dir.exists() or not overlay_path.exists() or indicator_review_path.exists():
+                continue
+            manifest: Dict[str, Any] = {}
+            fusion_result: Dict[str, Any] = {}
+            teacher_root: Dict[str, Any] = {}
+            house_review: Dict[str, Any] = {}
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+            except Exception:
+                manifest = {}
+            try:
+                fusion_result = json.loads(fusion_result_path.read_text(encoding="utf-8")) if fusion_result_path.exists() else {}
+            except Exception:
+                fusion_result = {}
+            try:
+                teacher_root = json.loads(teacher_output_path.read_text(encoding="utf-8")) if teacher_output_path.exists() else {}
+            except Exception:
+                teacher_root = {}
+            try:
+                house_review = json.loads(house_review_path.read_text(encoding="utf-8")) if house_review_path.exists() else {}
+            except Exception:
+                house_review = {}
+            teacher_output = teacher_root.get("teacher_output", {}) if isinstance(teacher_root.get("teacher_output"), dict) else {}
+            task_label = str(manifest.get("task_label", "") or teacher_output.get("task_label", "") or "").strip()
+            fields = self._extract_target_conditioned_fields(
+                fusion_result=fusion_result,
+                teacher_root=teacher_root,
+                target_house_review=house_review,
+            )
+            items.append(
+                {
+                    "sample_id": str(manifest.get("sample_id", run_dir.name) or run_dir.name),
+                    "run_dir": str(run_dir),
+                    "labeling_dir": str(labeling_dir),
+                    "overlay_path": str(overlay_path),
+                    "task_label": task_label,
+                    "indicator_review_json_path": str(indicator_review_path),
+                    **fields,
+                }
+            )
+        return items
+
+    def _refresh_indicator_review_queue(self) -> None:
+        self._refresh_target_house_choices()
+        self.indicator_review_queue = self._list_pending_indicator_review_items()
+        if not self.indicator_review_queue:
+            self.indicator_review_current_item = None
+            self.indicator_review_status_var.set("Indicator reviewer: no pending samples")
+            self.indicator_review_info_var.set("All target-conditioned samples already reviewed.")
+            if self.indicator_review_image_label is not None:
+                self.indicator_review_image_label.configure(image="", text="No pending indicator review sample")
+            return
+        self._show_indicator_review_item(0)
+
+    def _advance_indicator_review_item(self) -> None:
+        if not self.indicator_review_queue:
+            self._refresh_indicator_review_queue()
+            return
+        if len(self.indicator_review_queue) <= 1:
+            self.indicator_review_status_var.set("Indicator reviewer: skipped current sample, no later pending sample")
+            return
+        current_sample = str((self.indicator_review_current_item or {}).get("sample_id", "") or "")
+        if current_sample:
+            current_index = next(
+                (idx for idx, queued in enumerate(self.indicator_review_queue) if str(queued.get("sample_id", "") or "") == current_sample),
+                0,
+            )
+            next_index = (current_index + 1) % len(self.indicator_review_queue)
+        else:
+            next_index = 1
+        self._show_indicator_review_item(next_index)
+
+    def _refresh_indicator_review_explanations(self) -> None:
+        state_value = self.indicator_review_state_var.get().strip()
+        subgoal_value = self.indicator_review_subgoal_var.get().strip()
+        action_value = self.indicator_review_action_var.get().strip()
+        self.indicator_review_state_note_var.set(
+            TARGET_CONDITIONED_STATE_NOTES.get(state_value, "请选择最符合当前画面含义的目标状态。")
+        )
+        self.indicator_review_subgoal_note_var.set(
+            TARGET_CONDITIONED_SUBGOAL_NOTES.get(subgoal_value, "请选择当前最合理的目标子任务。")
+        )
+        self.indicator_review_action_note_var.set(
+            TARGET_CONDITIONED_ACTION_NOTES.get(action_value, "请选择当前最合理的动作建议。")
+        )
+
+    def _show_indicator_review_item(self, index: int) -> None:
+        if index < 0 or index >= len(self.indicator_review_queue):
+            return
+        item = self.indicator_review_queue[index]
+        self.indicator_review_current_item = item
+        display_target = self._build_house_display(item.get("target_house_id", ""), item.get("target_house_name", ""))
+        self.indicator_review_house_var.set("" if display_target == "none" else display_target)
+        self.indicator_review_state_var.set(str(item.get("target_state", "") or ""))
+        self.indicator_review_subgoal_var.set(str(item.get("target_subgoal", "") or ""))
+        self.indicator_review_action_var.set(str(item.get("target_action", "") or ""))
+        self._refresh_indicator_review_explanations()
+        self.indicator_review_status_var.set(
+            f"Indicator reviewer: {index + 1}/{len(self.indicator_review_queue)}  sample={item.get('sample_id', '')}"
+        )
+        self.indicator_review_info_var.set(
+            f"Task: {item.get('task_label', '') or 'n/a'}\n"
+            f"Current house: {item.get('current_house_id', '') or 'n/a'}\n"
+            f"Reviewed target house: {display_target}\n"
+            f"Pred entry/subgoal/action: {item.get('entry_state', '') or 'n/a'} / {item.get('subgoal', '') or 'n/a'} / {item.get('action_hint', '') or 'n/a'}\n"
+            f"Pred target state/subgoal/action: {item.get('target_state', '') or 'n/a'} / {item.get('target_subgoal', '') or 'n/a'} / {item.get('target_action', '') or 'n/a'}\n"
+            f"Run: {os.path.basename(str(item.get('run_dir', '')))}"
+        )
+        image_path = str(item.get("overlay_path", "") or "")
+        photo = self._load_display_photo(image_path, max_width=880, max_height=620)
+        if self.indicator_review_image_label is not None:
+            if photo is not None:
+                self.indicator_review_image_photo = photo
+                self.indicator_review_image_label.configure(image=photo, text="")
+            else:
+                self.indicator_review_image_photo = None
+                self.indicator_review_image_label.configure(image="", text=f"Failed to load image:\n{image_path}")
+
+    def _save_indicator_review_result(
+        self,
+        *,
+        is_correct: bool,
+        corrected_house_id: str = "",
+        corrected_state: str = "",
+        corrected_subgoal: str = "",
+        corrected_action: str = "",
+    ) -> None:
+        item = self.indicator_review_current_item
+        if not item:
+            return
+        original_target_house_id = str(item.get("target_house_id", "") or "").strip()
+        predicted_state = str(item.get("target_state", "") or "").strip()
+        predicted_subgoal = str(item.get("target_subgoal", "") or "").strip()
+        predicted_action = str(item.get("target_action", "") or "").strip()
+
+        final_house_id = original_target_house_id if is_correct else str(corrected_house_id or "").strip()
+        final_state = predicted_state if is_correct else str(corrected_state or "").strip()
+        final_subgoal = predicted_subgoal if is_correct else str(corrected_subgoal or "").strip()
+        final_action = predicted_action if is_correct else str(corrected_action or "").strip()
+
+        if not final_house_id:
+            self.indicator_review_status_var.set("Indicator reviewer: corrected house id required.")
+            return
+        if not final_state or not final_subgoal or not final_action:
+            self.indicator_review_status_var.set("Indicator reviewer: target state/subgoal/action are all required.")
+            return
+
+        payload = {
+            "sample_id": str(item.get("sample_id", "") or ""),
+            "run_dir": str(item.get("run_dir", "") or ""),
+            "labeling_dir": str(item.get("labeling_dir", "") or ""),
+            "task_label": str(item.get("task_label", "") or ""),
+            "original_target_house_id": original_target_house_id,
+            "original_target_house_name": str(item.get("target_house_name", "") or ""),
+            "predicted_entry_state": str(item.get("entry_state", "") or ""),
+            "predicted_subgoal": str(item.get("subgoal", "") or ""),
+            "predicted_action_hint": str(item.get("action_hint", "") or ""),
+            "predicted_target_conditioned_state": predicted_state,
+            "predicted_target_conditioned_subgoal": predicted_subgoal,
+            "predicted_target_conditioned_action_hint": predicted_action,
+            "review_result": "correct" if is_correct else "corrected",
+            "reviewed_house_id": final_house_id,
+            "reviewed_house_name": self._build_house_display(final_house_id),
+            "reviewed_target_conditioned_state": final_state,
+            "reviewed_target_conditioned_subgoal": final_subgoal,
+            "reviewed_target_conditioned_action_hint": final_action,
+            "reviewed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        review_json_path = str(item.get("indicator_review_json_path", "") or "")
+        with open(review_json_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        current_sample = str(item.get("sample_id", "") or "")
+        self.indicator_review_queue = [queued for queued in self.indicator_review_queue if str(queued.get("sample_id", "") or "") != current_sample]
+        if self.indicator_review_queue:
+            self._show_indicator_review_item(0)
+            self.indicator_review_status_var.set(f"Indicator reviewer: saved {current_sample}, moving to next")
+        else:
+            self.indicator_review_current_item = None
+            self.indicator_review_status_var.set(f"Indicator reviewer: saved {current_sample}, all pending complete")
+            self.indicator_review_info_var.set("All target-conditioned samples already reviewed.")
+            if self.indicator_review_image_label is not None:
+                self.indicator_review_image_label.configure(image="", text="No pending indicator review sample")
+
+    def on_indicator_review_mark_correct(self) -> None:
+        self._save_indicator_review_result(is_correct=True)
+
+    def on_indicator_review_mark_corrected(self) -> None:
+        display = self.indicator_review_house_var.get().strip()
+        selected_house_id = self.target_house_choice_map.get(display, "")
+        if not selected_house_id:
+            if "|" in display:
+                selected_house_id = display.split("|", 1)[0].strip()
+            else:
+                selected_house_id = display
+        self._save_indicator_review_result(
+            is_correct=False,
+            corrected_house_id=selected_house_id,
+            corrected_state=self.indicator_review_state_var.get().strip(),
+            corrected_subgoal=self.indicator_review_subgoal_var.get().strip(),
+            corrected_action=self.indicator_review_action_var.get().strip(),
+        )
 
     def _get_local_overhead_config(self) -> Dict[str, Any]:
         raw = self._read_local_houses_config()
@@ -891,10 +1270,42 @@ class Panel:
     def apply_state(self, state: Dict[str, Any]) -> None:
         pose, depth = state.get("pose", {}), state.get("depth", {})
         mission = state.get("house_mission", {}) if isinstance(state.get("house_mission"), dict) else {}
+        door_control = state.get("door_control", {}) if isinstance(state.get("door_control"), dict) else {}
         self.pose_var.set(f"Pose x={float(pose.get('x',0)):.1f} y={float(pose.get('y',0)):.1f} z={float(pose.get('z',0)):.1f} yaw={float(pose.get('task_yaw',0)):.1f} action={state.get('last_action','idle')} task={state.get('task_label','')}")
         self.depth_var.set(f"Depth frame={depth.get('frame_id','')} min={float(depth.get('min_depth',0)):.1f} max={float(depth.get('max_depth',0)):.1f} front_min={float(depth.get('front_min_depth',0)):.1f}")
         self.movement_enabled_state = bool(state.get("movement_enabled", False))
         self.control_var.set(f"Movement enabled={1 if self.movement_enabled_state else 0} origin={state.get('last_action_origin','n/a')}")
+        nearest_door_name = str(door_control.get("nearest_door_name", "") or "")
+        nearest_door_dist = door_control.get("nearest_door_distance_cm")
+        nearest_door_loc = door_control.get("nearest_door_location") if isinstance(door_control.get("nearest_door_location"), list) else None
+        control_player_name = str(door_control.get("control_player_name", "") or "")
+        last_target_name = str(door_control.get("last_target_name", "") or "")
+        last_ok = door_control.get("last_ok")
+        last_response = str(door_control.get("last_response", "") or "")
+        last_method = str(door_control.get("last_method", "") or "")
+        last_window_title = str(door_control.get("last_window_title", "") or "")
+        nearest_door_text = nearest_door_name or "none"
+        if nearest_door_dist is not None:
+            nearest_door_text = f"{nearest_door_text} ({float(nearest_door_dist):.1f}cm)"
+        nearest_door_loc_text = "-"
+        if isinstance(nearest_door_loc, list) and len(nearest_door_loc) >= 3:
+            nearest_door_loc_text = f"({float(nearest_door_loc[0]):.1f}, {float(nearest_door_loc[1]):.1f}, {float(nearest_door_loc[2]):.1f})"
+        response_text = last_response if len(last_response) <= 60 else (last_response[:57] + "...")
+        self.door_var.set(
+            "Door "
+            f"supported={int(bool(door_control.get('supported', False)))} "
+            f"mode={str(door_control.get('mode', 'unknown') or 'unknown')} "
+            f"player={control_player_name or 'none'} "
+            f"nearest={nearest_door_text} "
+            f"xyz={nearest_door_loc_text} "
+            f"last_target={last_target_name or 'none'} "
+            f"method={last_method or 'none'} "
+            f"window={last_window_title or 'none'} "
+            f"ok={str(last_ok)} "
+            f"resp={response_text or '-'} "
+            f"last={str(door_control.get('last_requested_label', 'unknown') or 'unknown')} "
+            f"time={str(door_control.get('last_control_time', '') or '-')}"
+        )
         self.capture_var.set(f"Capture last={(state.get('last_capture') or {}).get('capture_id','none')}")
         self.mission_var.set(f"Mission: current={mission.get('current_house_name') or 'none'} target={mission.get('target_house_name') or 'none'}")
         self.current_house_var.set(f"Current house: {mission.get('current_house_name') or 'none'} [{mission.get('current_house_status') or '-'}]")
@@ -1205,6 +1616,10 @@ class Panel:
         except json.JSONDecodeError as exc: self.status_var.set(f"Invalid pose JSON: {exc}"); return
         self.call_async("Setting pose", lambda: self._apply_response(self.safe(self.client.post_json, "/set_pose", payload, label="Set Pose")))
     def on_toggle_movement(self) -> None: self.call_async("Toggling movement", lambda: self._apply_response(self.safe(self.client.post_json, "/basic_movement_enable", {"enabled": not self.movement_enabled_state}, label="Toggle Movement")))
+    def on_door_open(self) -> None: self.call_async("Opening door", lambda: self._apply_response(self.safe(self.client.post_json, "/door_open", {}, label="Open Door")))
+    def on_door_close(self) -> None: self.call_async("Closing door", lambda: self._apply_response(self.safe(self.client.post_json, "/door_close", {}, label="Close Door")))
+    def on_door_toggle(self) -> None: self.call_async("Toggling door", lambda: self._apply_response(self.safe(self.client.post_json, "/door_toggle", {}, label="Toggle Door")))
+    def on_door_interact_e(self) -> None: self.call_async("Sending E interaction", lambda: self._apply_response(self.safe(self.client.post_json, "/door_interact_e", {}, label="Door Interact E")))
 
     def _apply_response(self, response: Any) -> None:
         if isinstance(response, dict):
@@ -1382,6 +1797,101 @@ class Panel:
 
         self._refresh_review_queue()
 
+    def toggle_indicator_reviewer_window(self) -> None:
+        if self.indicator_review_window and self.indicator_review_window.winfo_exists():
+            self._close_indicator_reviewer_window()
+            return
+        self._refresh_target_house_choices()
+        self.indicator_review_window = tk.Toplevel(self.root)
+        self.indicator_review_window.title("Fusion Indicator Reviewer")
+        self.indicator_review_window.geometry("1240x980")
+        self.indicator_review_window.protocol("WM_DELETE_WINDOW", self._close_indicator_reviewer_window)
+
+        top_bar = tk.Frame(self.indicator_review_window)
+        top_bar.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Label(top_bar, textvariable=self.indicator_review_status_var, anchor="w", font=("Consolas", 11, "bold")).pack(side="left")
+        tk.Button(top_bar, text="Refresh Queue", command=self._refresh_indicator_review_queue).pack(side="right", padx=(6, 0))
+
+        info_bar = tk.Frame(self.indicator_review_window)
+        info_bar.pack(fill="x", padx=8, pady=(0, 4))
+        tk.Label(info_bar, textvariable=self.indicator_review_info_var, anchor="w", justify="left", wraplength=1200).pack(fill="x")
+
+        choice_bar = tk.Frame(self.indicator_review_window)
+        choice_bar.pack(fill="x", padx=8, pady=(0, 6))
+
+        tk.Label(choice_bar, text="House ID").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=4)
+        indicator_house_combo = ttk.Combobox(
+            choice_bar,
+            textvariable=self.indicator_review_house_var,
+            state="readonly",
+            width=28,
+            values=[""] + list(self.target_house_choice_map.keys()),
+        )
+        indicator_house_combo.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=4)
+
+        tk.Label(choice_bar, text="Target State").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=4)
+        indicator_state_combo = ttk.Combobox(
+            choice_bar,
+            textvariable=self.indicator_review_state_var,
+            state="readonly",
+            width=42,
+            values=[""] + TARGET_CONDITIONED_STATE_OPTIONS,
+        )
+        indicator_state_combo.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=4)
+        tk.Label(
+            choice_bar,
+            textvariable=self.indicator_review_state_note_var,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+            foreground="#2f4f4f",
+        ).grid(row=1, column=2, sticky="w", padx=(0, 12), pady=4)
+
+        tk.Label(choice_bar, text="Target Subgoal").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=4)
+        indicator_subgoal_combo = ttk.Combobox(
+            choice_bar,
+            textvariable=self.indicator_review_subgoal_var,
+            state="readonly",
+            width=42,
+            values=[""] + TARGET_CONDITIONED_SUBGOAL_OPTIONS,
+        )
+        indicator_subgoal_combo.grid(row=2, column=1, sticky="w", padx=(0, 12), pady=4)
+        tk.Label(
+            choice_bar,
+            textvariable=self.indicator_review_subgoal_note_var,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+            foreground="#2f4f4f",
+        ).grid(row=2, column=2, sticky="w", padx=(0, 12), pady=4)
+
+        tk.Label(choice_bar, text="Target Action").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=4)
+        indicator_action_combo = ttk.Combobox(
+            choice_bar,
+            textvariable=self.indicator_review_action_var,
+            state="readonly",
+            width=28,
+            values=[""] + TARGET_CONDITIONED_ACTION_OPTIONS,
+        )
+        indicator_action_combo.grid(row=3, column=1, sticky="w", padx=(0, 12), pady=4)
+        tk.Label(
+            choice_bar,
+            textvariable=self.indicator_review_action_note_var,
+            anchor="w",
+            justify="left",
+            wraplength=420,
+            foreground="#2f4f4f",
+        ).grid(row=3, column=2, sticky="w", padx=(0, 12), pady=4)
+
+        tk.Button(choice_bar, text="Correct", command=self.on_indicator_review_mark_correct, width=14).grid(row=0, column=3, padx=(12, 6), pady=4, sticky="w")
+        tk.Button(choice_bar, text="Save Corrected", command=self.on_indicator_review_mark_corrected, width=16).grid(row=1, column=3, padx=(12, 6), pady=4, sticky="w")
+        tk.Button(choice_bar, text="Skip", command=self._advance_indicator_review_item).grid(row=2, column=3, padx=(12, 6), pady=4, sticky="w")
+
+        self.indicator_review_image_label = tk.Label(self.indicator_review_window, text="Loading indicator review sample...", anchor="center")
+        self.indicator_review_image_label.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+
+        self._refresh_indicator_review_queue()
+
     def _close_result_reviewer_window(self) -> None:
         try:
             if self.review_window is not None and self.review_window.winfo_exists():
@@ -1392,6 +1902,17 @@ class Panel:
         self.review_image_label = None
         self.review_image_photo = None
         self.review_current_item = None
+
+    def _close_indicator_reviewer_window(self) -> None:
+        try:
+            if self.indicator_review_window is not None and self.indicator_review_window.winfo_exists():
+                self.indicator_review_window.destroy()
+        except Exception:
+            pass
+        self.indicator_review_window = None
+        self.indicator_review_image_label = None
+        self.indicator_review_image_photo = None
+        self.indicator_review_current_item = None
 
     def toggle_open_map_window(self) -> None:
         if self.open_map_window and self.open_map_window.winfo_exists():
@@ -1752,7 +2273,7 @@ class Panel:
         threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self) -> None:
-        for window in (self.preview_window, self.depth_window, self.fusion_window, self.review_window, self.map_window, self.open_map_window):
+        for window in (self.preview_window, self.depth_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
             try:
                 if window is not None: window.destroy()
             except Exception:
