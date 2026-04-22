@@ -146,6 +146,7 @@ The file contains:
 
 - `global_state`
 - `candidates` (fixed top-K, current implementation uses `K=3`)
+- `memory_context`
 - `teacher_targets`
 - `metadata`
 
@@ -153,8 +154,20 @@ The current builder now preserves target-conditioned signals as well:
 
 - `global_state.target_house_id / target_house_in_fov / target_house_expected_side`
 - `candidates[*].candidate_target_match_score / candidate_total_score / candidate_is_target_house_entry`
+- `memory_context.memory_features`
+  - `observed_sector_count`
+  - `entry_search_status`
+  - `current_sector_observation_count`
+  - `current_sector_low_yield_flag`
+  - `last_best_entry_status / last_best_entry_attempt_count`
+  - `previous_action / previous_subgoal`
 - `teacher_targets.target_conditioned_state / target_conditioned_subgoal / target_conditioned_action_hint`
 - when `target_house_review.json` changed or filled the target house id, the builder now prefers the reviewed target id and clears stale target-conditioned candidate-match features
+- it also tries to read:
+  - `entry_search_memory_snapshot_before.json`
+  - `entry_search_memory_snapshot_after.json`
+  - `entry_search_memory_snapshot.json`
+  and falls back to the memory summary embedded in `fusion_result.json`
 
 Batch usage example:
 
@@ -204,6 +217,12 @@ The exported JSONL records and manifest now include both:
   - `target_conditioned_subgoal`
   - `target_conditioned_action_hint`
   - `target_conditioned_target_candidate_id`
+- plus first-pass memory-aware fields
+  - `memory_available`
+  - `memory_source`
+  - `memory_snapshot_before_path`
+  - `memory_snapshot_after_path`
+  - `memory_features`
 
 Batch usage example:
 

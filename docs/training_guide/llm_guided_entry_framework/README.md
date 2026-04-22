@@ -44,6 +44,8 @@
 26. [`25_entry_search_memory_implementation_plan.md`](25_entry_search_memory_implementation_plan.md)
 27. [`26_memory_aware_data_collection_spec_zh.md`](26_memory_aware_data_collection_spec_zh.md)
 28. [`27_memory_snapshot_export_spec.md`](27_memory_snapshot_export_spec.md)
+29. [`28_memory_architecture_diagram_zh.md`](28_memory_architecture_diagram_zh.md)
+30. [`29_v5_training_improvement_plan_zh.md`](29_v5_training_improvement_plan_zh.md)
 
 ## 这条路线的核心思想
 

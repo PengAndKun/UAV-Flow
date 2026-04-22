@@ -30,6 +30,32 @@ EXPECTED_SIDE_TO_ID = {
     "out_of_view": 3,
     "unknown": 4,
 }
+ENTRY_SEARCH_STATUS_TO_ID = {
+    "not_started": 0,
+    "searching_entry": 1,
+    "entry_found": 2,
+    "entered_house": 3,
+    "entry_search_exhausted": 4,
+    "unknown": 5,
+}
+CANDIDATE_MEMORY_STATUS_TO_ID = {
+    "": 0,
+    "unverified": 1,
+    "approachable": 2,
+    "blocked_temporary": 3,
+    "blocked_confirmed": 4,
+    "window_rejected": 5,
+    "non_target": 6,
+    "entered": 7,
+}
+MEMORY_SOURCE_TO_ID = {
+    "none": 0,
+    "before_snapshot": 1,
+    "after_snapshot": 2,
+    "single_snapshot": 3,
+    "fusion_embedded_after": 4,
+}
+LOW_YIELD_ENTRY_STATES = {"no_entry", "weak_entry", "non_target_entry_visible"}
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -38,6 +64,15 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _read_optional_json(path: Path) -> Dict[str, Any]:
+    try:
+        if path.exists():
+            return _read_json(path)
+    except Exception:
+        return {}
+    return {}
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -119,6 +154,21 @@ def _class_onehot(name: str) -> List[int]:
 def _expected_side_to_id(value: Any) -> int:
     token = str(value or "").strip().lower()
     return EXPECTED_SIDE_TO_ID.get(token, EXPECTED_SIDE_TO_ID["unknown"])
+
+
+def _entry_search_status_to_id(value: Any) -> int:
+    token = str(value or "").strip().lower()
+    return ENTRY_SEARCH_STATUS_TO_ID.get(token, ENTRY_SEARCH_STATUS_TO_ID["unknown"])
+
+
+def _candidate_memory_status_to_id(value: Any) -> int:
+    token = str(value or "").strip().lower()
+    return CANDIDATE_MEMORY_STATUS_TO_ID.get(token, 0)
+
+
+def _memory_source_to_id(value: Any) -> int:
+    token = str(value or "").strip().lower()
+    return MEMORY_SOURCE_TO_ID.get(token, 0)
 
 
 def _zero_candidate(slot_id: int) -> Dict[str, Any]:
@@ -483,6 +533,221 @@ def _build_teacher_targets(labeling_dir: Path) -> Dict[str, Any]:
     }
 
 
+def _compute_semantic_memory_summary(semantic_memory: Dict[str, Any]) -> Dict[str, int]:
+    search_summary = (
+        semantic_memory.get("search_summary", {})
+        if isinstance(semantic_memory.get("search_summary"), dict)
+        else {}
+    )
+    if search_summary:
+        return {
+            "observed_sector_count": _safe_int(search_summary.get("observed_sector_count"), 0),
+            "approachable_entry_count": _safe_int(search_summary.get("approachable_entry_count"), 0),
+            "blocked_entry_count": _safe_int(search_summary.get("blocked_entry_count"), 0),
+            "rejected_entry_count": _safe_int(search_summary.get("rejected_entry_count"), 0),
+        }
+
+    searched_sectors = semantic_memory.get("searched_sectors", {})
+    if not isinstance(searched_sectors, dict):
+        searched_sectors = {}
+    candidate_entries = semantic_memory.get("candidate_entries", [])
+    if not isinstance(candidate_entries, list):
+        candidate_entries = []
+
+    observed_sector_count = 0
+    approachable_entry_count = 0
+    blocked_entry_count = 0
+    rejected_entry_count = 0
+    for sector in searched_sectors.values():
+        if isinstance(sector, dict) and bool(sector.get("observed", False)):
+            observed_sector_count += 1
+    for entry in candidate_entries:
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "").strip()
+        if status == "approachable":
+            approachable_entry_count += 1
+        elif status in {"blocked_temporary", "blocked_confirmed"}:
+            blocked_entry_count += 1
+        elif status in {"window_rejected", "non_target"}:
+            rejected_entry_count += 1
+    return {
+        "observed_sector_count": observed_sector_count,
+        "approachable_entry_count": approachable_entry_count,
+        "blocked_entry_count": blocked_entry_count,
+        "rejected_entry_count": rejected_entry_count,
+    }
+
+
+def _is_low_yield_sector(sector: Dict[str, Any]) -> bool:
+    if not isinstance(sector, dict):
+        return False
+    best_entry_state = str(sector.get("best_entry_state") or "").strip()
+    best_subgoal = str(sector.get("best_target_conditioned_subgoal") or "").strip()
+    best_target_match_score = _safe_float(sector.get("best_target_match_score"), 0.0)
+    return (
+        best_entry_state in LOW_YIELD_ENTRY_STATES
+        or best_subgoal in {"keep_search_target_house", "ignore_non_target_entry"}
+    ) and best_target_match_score < 0.6
+
+
+def _build_memory_context(
+    labeling_dir: Path,
+    fusion: Dict[str, Any],
+    pose_history: Dict[str, Any],
+    teacher_targets: Dict[str, Any],
+) -> Dict[str, Any]:
+    before_path = labeling_dir / "entry_search_memory_snapshot_before.json"
+    after_path = labeling_dir / "entry_search_memory_snapshot_after.json"
+    single_path = labeling_dir / "entry_search_memory_snapshot.json"
+    sample_metadata_path = labeling_dir / "sample_metadata.json"
+    temporal_context_path = labeling_dir / "temporal_context.json"
+
+    sample_metadata = _read_optional_json(sample_metadata_path)
+    temporal_context = _read_optional_json(temporal_context_path)
+
+    snapshot_payload: Dict[str, Any] = {}
+    memory_source = "none"
+    if before_path.exists():
+        snapshot_payload = _read_optional_json(before_path)
+        memory_source = "before_snapshot"
+    elif after_path.exists():
+        snapshot_payload = _read_optional_json(after_path)
+        memory_source = "after_snapshot"
+    elif single_path.exists():
+        snapshot_payload = _read_optional_json(single_path)
+        memory_source = "single_snapshot"
+    else:
+        embedded_memory = (
+            fusion.get("entry_search_memory", {})
+            if isinstance(fusion.get("entry_search_memory"), dict)
+            else {}
+        )
+        if embedded_memory:
+            snapshot_payload = {
+                "current_target_house_id": embedded_memory.get("house_id"),
+                "working_memory": {},
+                "episodic_memory": [],
+                "semantic_memory": embedded_memory.get("semantic_memory", {}),
+            }
+            memory_source = "fusion_embedded_after"
+
+    semantic_memory = (
+        snapshot_payload.get("semantic_memory", {})
+        if isinstance(snapshot_payload.get("semantic_memory"), dict)
+        else {}
+    )
+    working_memory = (
+        snapshot_payload.get("working_memory", {})
+        if isinstance(snapshot_payload.get("working_memory"), dict)
+        else {}
+    )
+    episodic_memory = (
+        snapshot_payload.get("episodic_memory", [])
+        if isinstance(snapshot_payload.get("episodic_memory"), list)
+        else []
+    )
+
+    current_sector_id = str(
+        ((fusion.get("memory_guidance") or {}).get("sector_id"))
+        or ((fusion.get("entry_search_memory") or {}).get("sector_id"))
+        or ""
+    ).strip()
+    searched_sectors = semantic_memory.get("searched_sectors", {})
+    if not isinstance(searched_sectors, dict):
+        searched_sectors = {}
+    current_sector = searched_sectors.get(current_sector_id, {}) if current_sector_id else {}
+    if not isinstance(current_sector, dict):
+        current_sector = {}
+
+    candidate_entries = semantic_memory.get("candidate_entries", [])
+    if not isinstance(candidate_entries, list):
+        candidate_entries = []
+
+    last_best_entry_id = str(
+        semantic_memory.get("last_best_entry_id")
+        or working_memory.get("last_best_entry_id")
+        or ""
+    ).strip()
+    last_best_entry: Dict[str, Any] = {}
+    if last_best_entry_id:
+        for item in candidate_entries:
+            if isinstance(item, dict) and str(item.get("candidate_id") or "").strip() == last_best_entry_id:
+                last_best_entry = item
+                break
+
+    summary = _compute_semantic_memory_summary(semantic_memory)
+    entry_search_status_text = str(
+        semantic_memory.get("entry_search_status")
+        or (fusion.get("entry_search_memory") or {}).get("entry_search_status")
+        or "not_started"
+    ).strip()
+
+    previous_action = str(
+        temporal_context.get("previous_action")
+        or pose_history.get("action")
+        or ""
+    ).strip()
+    previous_subgoal = str(
+        temporal_context.get("previous_target_conditioned_subgoal")
+        or ""
+    ).strip()
+    previous_best_candidate_id = str(
+        temporal_context.get("previous_best_candidate_id")
+        or ""
+    ).strip()
+
+    memory_features = {
+        "observed_sector_count": summary["observed_sector_count"],
+        "entry_search_status": entry_search_status_text,
+        "entry_search_status_id": _entry_search_status_to_id(entry_search_status_text),
+        "candidate_entry_count": len(candidate_entries),
+        "approachable_entry_count": summary["approachable_entry_count"],
+        "blocked_entry_count": summary["blocked_entry_count"],
+        "rejected_entry_count": summary["rejected_entry_count"],
+        "current_sector_id": current_sector_id,
+        "current_sector_observation_count": _safe_int(current_sector.get("observation_count"), 0),
+        "current_sector_low_yield_flag": int(_is_low_yield_sector(current_sector)),
+        "current_sector_best_target_match_score": round(
+            _clamp(_safe_float(current_sector.get("best_target_match_score"), 0.0), 0.0, 1.0), 6
+        ),
+        "last_best_entry_exists": int(bool(last_best_entry_id)),
+        "last_best_entry_id": last_best_entry_id,
+        "last_best_entry_status": str(last_best_entry.get("status") or "").strip(),
+        "last_best_entry_status_id": _candidate_memory_status_to_id(last_best_entry.get("status")),
+        "last_best_entry_attempt_count": _safe_int(last_best_entry.get("attempt_count"), 0),
+        "previous_action": previous_action,
+        "previous_subgoal": previous_subgoal,
+        "previous_best_candidate_id": previous_best_candidate_id,
+        "episodic_snapshot_count": len(episodic_memory),
+    }
+
+    return {
+        "available": int(bool(snapshot_payload or semantic_memory)),
+        "source": memory_source,
+        "source_id": _memory_source_to_id(memory_source),
+        "snapshot_before_path": str(before_path) if before_path.exists() else "",
+        "snapshot_after_path": str(after_path) if after_path.exists() else "",
+        "snapshot_path": str(single_path) if single_path.exists() else "",
+        "sample_metadata_path": str(sample_metadata_path) if sample_metadata_path.exists() else "",
+        "temporal_context_path": str(temporal_context_path) if temporal_context_path.exists() else "",
+        "episode_id": str(sample_metadata.get("episode_id") or ""),
+        "step_index": _safe_int(sample_metadata.get("step_index"), -1),
+        "sample_timestamp": _safe_float(sample_metadata.get("sample_timestamp"), 0.0),
+        "working_memory": working_memory,
+        "semantic_memory": semantic_memory,
+        "episodic_summary": {
+            "snapshot_count": len(episodic_memory),
+        },
+        "temporal_context": {
+            "previous_action": previous_action,
+            "previous_target_conditioned_subgoal": previous_subgoal,
+            "previous_best_candidate_id": previous_best_candidate_id,
+        },
+        "memory_features": memory_features,
+    }
+
+
 def _apply_review_override_to_candidates(candidates: List[Dict[str, Any]], teacher_targets: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not bool(teacher_targets.get("target_house_review_changed", 0) or teacher_targets.get("target_house_review_filled_missing", 0)):
         return candidates
@@ -517,6 +782,7 @@ def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
     detections = yolo_result.get("detections", []) if isinstance(yolo_result.get("detections"), list) else []
     sorted_detections = sorted(detections, key=_sort_detection_key)
     teacher_targets = _build_teacher_targets(labeling_dir)
+    memory_context = _build_memory_context(labeling_dir, fusion, pose_history, teacher_targets)
 
     candidates: List[Dict[str, Any]] = []
     for rank, detection in enumerate(sorted_detections[:TOP_K_CANDIDATES]):
@@ -541,12 +807,17 @@ def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
         "target_house_id": str(teacher_targets.get("target_house_id") or (fusion.get("target_context") or {}).get("target_house_id") or ""),
         "target_house_review_applied": int(bool(teacher_targets.get("target_house_review_applied", 0))),
         "target_house_review_changed": int(bool(teacher_targets.get("target_house_review_changed", 0))),
+        "memory_available": int(bool(memory_context.get("available", 0))),
+        "memory_source": str(memory_context.get("source") or ""),
+        "memory_snapshot_before_path": str(memory_context.get("snapshot_before_path") or ""),
+        "memory_snapshot_after_path": str(memory_context.get("snapshot_after_path") or ""),
     }
 
     entry_state = {
         "sample_id": sample_id,
         "global_state": global_state,
         "candidates": candidates,
+        "memory_context": memory_context,
         "teacher_targets": teacher_targets,
         "metadata": metadata,
     }
@@ -560,6 +831,8 @@ def build_entry_state_for_labeling_dir(labeling_dir: Path) -> Dict[str, Any]:
         "top_candidate_traversable": candidates[0]["traversable"] if candidates else 0,
         "target_candidate_id": teacher_targets.get("target_candidate_id", -1),
         "target_conditioned_state": teacher_targets.get("target_conditioned_state", ""),
+        "memory_available": memory_context.get("available", 0),
+        "memory_source": memory_context.get("source", ""),
     }
 
 
@@ -615,6 +888,8 @@ def main() -> None:
     error_count = 0
     top_candidate_class_counts: Counter[str] = Counter()
     target_conditioned_state_counts: Counter[str] = Counter()
+    memory_available_count = 0
+    memory_source_counts: Counter[str] = Counter()
     for idx, labeling_dir in enumerate(labeling_dirs, start=1):
         sample_name = labeling_dir.parent.name
         print(f"[{idx}/{total}] start -> {sample_name}")
@@ -625,12 +900,15 @@ def main() -> None:
                 f"(teacher={summary['teacher_available']}; top={summary['top_candidate_class']}; "
                 f"trav={summary['top_candidate_traversable']}; "
                 f"target_teacher={summary['target_conditioned_teacher_available']}; "
-                f"target_state={summary['target_conditioned_state']})"
+                f"target_state={summary['target_conditioned_state']}; "
+                f"memory={summary['memory_source'] or 'none'})"
             )
             summary_items.append({"run_dir": str(labeling_dir.parent), "status": "ok", **summary})
             ok_count += 1
             top_candidate_class_counts[str(summary.get("top_candidate_class") or "")] += 1
             target_conditioned_state_counts[str(summary.get("target_conditioned_state") or "")] += 1
+            memory_available_count += int(bool(summary.get("memory_available", 0)))
+            memory_source_counts[str(summary.get("memory_source") or "none")] += 1
         except Exception as exc:
             print(f"[{idx}/{total}] error -> {sample_name}: {exc}")
             summary_items.append(
@@ -652,6 +930,8 @@ def main() -> None:
             "error_count": error_count,
             "top_candidate_class_counts": dict(top_candidate_class_counts),
             "target_conditioned_state_counts": dict(target_conditioned_state_counts),
+            "memory_available_count": memory_available_count,
+            "memory_source_counts": dict(memory_source_counts),
             "items": summary_items,
         },
     )

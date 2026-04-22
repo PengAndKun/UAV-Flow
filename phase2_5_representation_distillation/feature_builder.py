@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Mapping
 
 from .label_schema import (
     DEFAULT_TOP_K_CANDIDATES,
+    ACTION_HINT_LABELS,
+    TARGET_CONDITIONED_SUBGOAL_LABELS,
     encode_action_hint,
     encode_entry_state,
     encode_subgoal,
@@ -17,6 +19,42 @@ from .label_schema import (
 SEVERITY_LABELS = ("clear", "low", "medium", "high", "unknown")
 SIDE_LABELS = ("left", "center", "right", "out_of_view", "unknown")
 SOURCE_LABELS = ("semantic_region", "depth_candidate", "none", "unknown")
+MEMORY_SOURCE_LABELS = (
+    "before_snapshot",
+    "after_snapshot",
+    "single_snapshot",
+    "fusion_embedded_after",
+    "none",
+    "unknown",
+)
+ENTRY_SEARCH_STATUS_LABELS = (
+    "not_started",
+    "searching_entry",
+    "entry_found",
+    "entered_house",
+    "entry_search_exhausted",
+    "unknown",
+)
+MEMORY_SECTOR_LABELS = (
+    "front_left",
+    "front_center",
+    "front_right",
+    "left_side",
+    "right_side",
+    "unknown",
+)
+MEMORY_CANDIDATE_STATUS_LABELS = (
+    "unverified",
+    "non_target",
+    "window_rejected",
+    "blocked_temporary",
+    "blocked_confirmed",
+    "approachable",
+    "entered",
+    "unknown",
+)
+PREVIOUS_ACTION_LABELS = ACTION_HINT_LABELS + ("unknown",)
+PREVIOUS_SUBGOAL_LABELS = TARGET_CONDITIONED_SUBGOAL_LABELS + ("unknown",)
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -57,9 +95,137 @@ def _normalize_aspect_ratio(value: Any) -> float:
     return _clamp(_safe_float(value, 0.0), 0.0, 4.0) / 4.0
 
 
+def _normalize_small_count(value: Any, max_count: float) -> float:
+    return _clamp(_safe_float(value, 0.0), 0.0, float(max_count)) / float(max_count)
+
+
+def build_memory_feature_vector(sample: Mapping[str, Any]) -> Dict[str, Any]:
+    entry_state = sample.get("entry_state", {}) if isinstance(sample.get("entry_state"), dict) else {}
+    memory_context = (
+        entry_state.get("memory_context", {})
+        if isinstance(entry_state.get("memory_context"), dict)
+        else {}
+    )
+    memory_features = (
+        memory_context.get("memory_features", {})
+        if isinstance(memory_context.get("memory_features"), dict)
+        else {}
+    )
+
+    memory_source_onehot = _onehot(str(memory_context.get("source") or "unknown"), MEMORY_SOURCE_LABELS)
+    entry_status_onehot = _onehot(
+        str(memory_features.get("entry_search_status") or "unknown"),
+        ENTRY_SEARCH_STATUS_LABELS,
+    )
+    current_sector_onehot = _onehot(
+        str(memory_features.get("current_sector_id") or "unknown"),
+        MEMORY_SECTOR_LABELS,
+    )
+    last_best_status_onehot = _onehot(
+        str(memory_features.get("last_best_entry_status") or "unknown"),
+        MEMORY_CANDIDATE_STATUS_LABELS,
+    )
+    previous_action_onehot = _onehot(
+        str(memory_features.get("previous_action") or "unknown"),
+        PREVIOUS_ACTION_LABELS,
+    )
+    previous_subgoal_onehot = _onehot(
+        str(memory_features.get("previous_subgoal") or "unknown"),
+        PREVIOUS_SUBGOAL_LABELS,
+    )
+
+    features: List[float] = [
+        _normalize_binary(memory_context.get("available")),
+        *memory_source_onehot,
+        _normalize_small_count(memory_features.get("observed_sector_count"), 5.0),
+        *entry_status_onehot,
+        _normalize_small_count(memory_features.get("candidate_entry_count"), 10.0),
+        _normalize_small_count(memory_features.get("approachable_entry_count"), 5.0),
+        _normalize_small_count(memory_features.get("blocked_entry_count"), 5.0),
+        _normalize_small_count(memory_features.get("rejected_entry_count"), 10.0),
+        *current_sector_onehot,
+        _normalize_small_count(memory_features.get("current_sector_observation_count"), 10.0),
+        _normalize_binary(memory_features.get("current_sector_low_yield_flag")),
+        _normalize_ratio(memory_features.get("current_sector_best_target_match_score")),
+        _normalize_binary(memory_features.get("last_best_entry_exists")),
+        *last_best_status_onehot,
+        _normalize_small_count(memory_features.get("last_best_entry_attempt_count"), 10.0),
+        *previous_action_onehot,
+        *previous_subgoal_onehot,
+        _normalize_small_count(memory_features.get("episodic_snapshot_count"), 10.0),
+    ]
+
+    feature_names = [
+        "memory_available",
+        "memory_source_before_snapshot",
+        "memory_source_after_snapshot",
+        "memory_source_single_snapshot",
+        "memory_source_fusion_embedded_after",
+        "memory_source_none",
+        "memory_source_unknown",
+        "memory_observed_sector_count_norm",
+        "memory_entry_search_status_not_started",
+        "memory_entry_search_status_searching_entry",
+        "memory_entry_search_status_entry_found",
+        "memory_entry_search_status_entered_house",
+        "memory_entry_search_status_entry_search_exhausted",
+        "memory_entry_search_status_unknown",
+        "memory_candidate_entry_count_norm",
+        "memory_approachable_entry_count_norm",
+        "memory_blocked_entry_count_norm",
+        "memory_rejected_entry_count_norm",
+        "memory_sector_front_left",
+        "memory_sector_front_center",
+        "memory_sector_front_right",
+        "memory_sector_left_side",
+        "memory_sector_right_side",
+        "memory_sector_unknown",
+        "memory_current_sector_observation_count_norm",
+        "memory_current_sector_low_yield_flag",
+        "memory_current_sector_best_target_match_score",
+        "memory_last_best_entry_exists",
+        "memory_last_best_status_unverified",
+        "memory_last_best_status_non_target",
+        "memory_last_best_status_window_rejected",
+        "memory_last_best_status_blocked_temporary",
+        "memory_last_best_status_blocked_confirmed",
+        "memory_last_best_status_approachable",
+        "memory_last_best_status_entered",
+        "memory_last_best_status_unknown",
+        "memory_last_best_entry_attempt_count_norm",
+        "memory_previous_action_forward",
+        "memory_previous_action_yaw_left",
+        "memory_previous_action_yaw_right",
+        "memory_previous_action_left",
+        "memory_previous_action_right",
+        "memory_previous_action_backward",
+        "memory_previous_action_hold",
+        "memory_previous_action_unknown",
+        "memory_previous_subgoal_reorient_to_target_house",
+        "memory_previous_subgoal_keep_search_target_house",
+        "memory_previous_subgoal_approach_target_entry",
+        "memory_previous_subgoal_align_target_entry",
+        "memory_previous_subgoal_detour_left_to_target_entry",
+        "memory_previous_subgoal_detour_right_to_target_entry",
+        "memory_previous_subgoal_cross_target_entry",
+        "memory_previous_subgoal_ignore_non_target_entry",
+        "memory_previous_subgoal_backoff_and_reobserve",
+        "memory_previous_subgoal_unknown",
+        "memory_episodic_snapshot_count_norm",
+    ]
+
+    return {
+        "vector": features,
+        "feature_names": feature_names,
+        "available": _safe_int(memory_context.get("available"), 0),
+        "source": str(memory_context.get("source") or ""),
+    }
+
+
 def build_global_feature_vector(sample: Mapping[str, Any]) -> Dict[str, Any]:
     global_state = sample.get("global_state", {}) if isinstance(sample.get("global_state"), dict) else {}
     metadata = sample.get("metadata", {}) if isinstance(sample.get("metadata"), dict) else {}
+    memory_payload = build_memory_feature_vector(sample)
 
     target_house_id = _safe_int(global_state.get("target_house_id"), -1)
     current_house_id = _safe_int(global_state.get("current_house_id"), -1)
@@ -122,11 +288,18 @@ def build_global_feature_vector(sample: Mapping[str, Any]) -> Dict[str, Any]:
         "target_conditioning_enabled",
     ]
 
+    combined_features = features + memory_payload["vector"]
+    combined_feature_names = feature_names + memory_payload["feature_names"]
+
     return {
-        "vector": features,
-        "feature_names": feature_names,
+        "vector": combined_features,
+        "feature_names": combined_feature_names,
         "target_house_id": target_house_id,
         "current_house_id": current_house_id,
+        "memory_available": memory_payload["available"],
+        "memory_source": memory_payload["source"],
+        "memory_vector": memory_payload["vector"],
+        "memory_feature_names": memory_payload["feature_names"],
     }
 
 
@@ -303,6 +476,8 @@ def build_training_example(sample: Mapping[str, Any], *, top_k: int = DEFAULT_TO
         "split": str(sample.get("split") or ""),
         "global_features": global_payload["vector"],
         "global_feature_names": global_payload["feature_names"],
+        "memory_features": global_payload["memory_vector"],
+        "memory_feature_names": global_payload["memory_feature_names"],
         "candidate_features": candidate_vectors,
         "candidate_feature_names": candidate_feature_names,
         "candidate_valid_mask": candidate_masks,
@@ -313,6 +488,7 @@ def build_training_example(sample: Mapping[str, Any], *, top_k: int = DEFAULT_TO
             "target_house_id": global_payload["target_house_id"],
             "current_house_id": global_payload["current_house_id"],
             "num_candidates": len(candidates),
+            "memory_available": global_payload["memory_available"],
+            "memory_source": global_payload["memory_source"],
         },
     }
-

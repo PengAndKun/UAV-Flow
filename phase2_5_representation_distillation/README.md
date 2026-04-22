@@ -15,6 +15,7 @@ Current modules:
   - export-dataset reader for `train.jsonl` / `val.jsonl`
 - `feature_builder.py`
   - converts `entry_state.json` samples into fixed-length numeric training features
+  - current version also folds `memory_context.memory_features` into the global feature branch
 - `model.py`
   - multi-branch student network for distilled entry representation learning
 - `losses.py`
@@ -43,6 +44,14 @@ Basic training usage:
 ```powershell
 python E:\github\UAV-Flow\phase2_5_representation_distillation\train_representation_distillation.py
 ```
+
+Memory-aware training note:
+
+- exported samples from
+  [phase2_5_distillation_dataset_20260421_223847](/E:/github/UAV-Flow/phase2_multimodal_fusion_analysis/exports/phase2_5_distillation_dataset_20260421_223847)
+  already include `memory_features`
+- `feature_builder.py` appends these memory-aware features to `global_features`
+- the student model input dimension is inferred automatically, so no manual model-dimension edit is required
 
 Use another config file:
 

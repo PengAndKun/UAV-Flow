@@ -1,15 +1,15 @@
 {
   "version": "v1",
-  "updated_at": "2026-04-20 23:55:11",
-  "current_target_house_id": "001",
+  "updated_at": "2026-04-21 22:29:35",
+  "current_target_house_id": "002",
   "memories": {
     "001": {
       "house_id": "001",
       "house_name": "House_1",
-      "house_status": "UNSEARCHED",
-      "target_match_active": true,
+      "house_status": "IN_PROGRESS",
+      "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",
@@ -23,36 +23,240 @@
         "entry_search_status": "searching_entry",
         "last_best_entry_id": "0",
         "search_summary": {
-          "observed_sector_count": 1,
-          "candidate_entry_count": 1,
+          "observed_sector_count": 3,
+          "candidate_entry_count": 11,
           "approachable_entry_count": 0,
-          "blocked_entry_count": 1,
-          "rejected_entry_count": 0
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 10
         },
         "searched_sectors": {
           "front_left": {
-            "observed": false,
-            "observation_count": 0,
-            "last_visit_time": null,
-            "best_entry_state": "",
-            "best_target_conditioned_subgoal": "",
+            "observed": true,
+            "observation_count": 22,
+            "last_visit_time": 1776781745.932442,
+            "best_entry_state": "weak_entry",
+            "best_target_conditioned_subgoal": "keep_search_target_house",
             "best_target_match_score": 0.0
           },
           "front_center": {
             "observed": true,
-            "observation_count": 4,
-            "last_visit_time": 1776700511.320981,
-            "best_entry_state": "blocked_entry",
-            "best_target_conditioned_subgoal": "detour_left_to_target_entry",
-            "best_target_match_score": 0.8386116608367289
+            "observation_count": 21,
+            "last_visit_time": 1776781715.562254,
+            "best_entry_state": "weak_entry",
+            "best_target_conditioned_subgoal": "keep_search_target_house",
+            "best_target_match_score": 0.217238050488292
           },
           "front_right": {
+            "observed": true,
+            "observation_count": 31,
+            "last_visit_time": 1776781756.590414,
+            "best_entry_state": "non_target_entry_visible",
+            "best_target_conditioned_subgoal": "ignore_non_target_entry",
+            "best_target_match_score": 0.34118236544976305
+          },
+          "left_side": {
             "observed": false,
             "observation_count": 0,
             "last_visit_time": null,
             "best_entry_state": "",
             "best_target_conditioned_subgoal": "",
             "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": [
+          {
+            "candidate_id": "0",
+            "semantic_class": "close door",
+            "target_match_score": 0.0,
+            "distance_cm": 0.0,
+            "opening_width_cm": 0.0,
+            "center_x_norm": 0.4741854667663574,
+            "candidate_total_score": 0.1976,
+            "status": "unverified",
+            "attempt_count": 158,
+            "last_checked_time": 1776781758.372484
+          },
+          {
+            "candidate_id": "1",
+            "semantic_class": "window",
+            "target_match_score": 0.0,
+            "distance_cm": 932.2515869140625,
+            "opening_width_cm": 11.653144836425781,
+            "center_x_norm": 0.28565906286239623,
+            "candidate_total_score": 0.0559,
+            "status": "window_rejected",
+            "attempt_count": 22,
+            "last_checked_time": 1776781744.990394
+          },
+          {
+            "candidate_id": "3",
+            "semantic_class": "window",
+            "target_match_score": 0.7652728146990908,
+            "distance_cm": 1188.0645751953125,
+            "opening_width_cm": 7.425403594970702,
+            "center_x_norm": 0.6081435441970825,
+            "candidate_total_score": 0.4277,
+            "status": "window_rejected",
+            "attempt_count": 8,
+            "last_checked_time": 1776781754.445128
+          },
+          {
+            "candidate_id": "2",
+            "semantic_class": "window",
+            "target_match_score": 0.0,
+            "distance_cm": 199.80738830566406,
+            "opening_width_cm": 18.107544565200804,
+            "center_x_norm": 0.8120410680770874,
+            "candidate_total_score": 0.0938,
+            "status": "window_rejected",
+            "attempt_count": 15,
+            "last_checked_time": 1776781757.554543
+          },
+          {
+            "candidate_id": "4",
+            "semantic_class": "window",
+            "target_match_score": 0.9243868527817336,
+            "distance_cm": 726.5,
+            "opening_width_cm": 9.081249999999999,
+            "center_x_norm": 0.24218549728393554,
+            "candidate_total_score": 0.4603,
+            "status": "window_rejected",
+            "attempt_count": 4,
+            "last_checked_time": 1776781707.459137
+          },
+          {
+            "candidate_id": "6",
+            "semantic_class": "window",
+            "target_match_score": 0.9008240282097577,
+            "distance_cm": 825.3333129882812,
+            "opening_width_cm": 7.7374998092651355,
+            "center_x_norm": 0.9293529987335205,
+            "candidate_total_score": 0.482,
+            "status": "window_rejected",
+            "attempt_count": 3,
+            "last_checked_time": 1776781755.685995
+          },
+          {
+            "candidate_id": "7",
+            "semantic_class": "window",
+            "target_match_score": 0.768912922812653,
+            "distance_cm": 0.0,
+            "opening_width_cm": 0.0,
+            "center_x_norm": 0.6184463024139404,
+            "candidate_total_score": 0.3582,
+            "status": "window_rejected",
+            "attempt_count": 2,
+            "last_checked_time": 1776781717.062814
+          },
+          {
+            "candidate_id": "11",
+            "semantic_class": "window",
+            "target_match_score": 0.8865462562950202,
+            "distance_cm": 995.2933959960938,
+            "opening_width_cm": 31.102918624877926,
+            "center_x_norm": 0.6698391914367676,
+            "candidate_total_score": 0.4383,
+            "status": "window_rejected",
+            "attempt_count": 1,
+            "last_checked_time": 1776781717.329339
+          },
+          {
+            "candidate_id": "9",
+            "semantic_class": "window",
+            "target_match_score": 0.803961630496427,
+            "distance_cm": 0.0,
+            "opening_width_cm": 0.0,
+            "center_x_norm": 0.9719716072082519,
+            "candidate_total_score": 0.3651,
+            "status": "window_rejected",
+            "attempt_count": 1,
+            "last_checked_time": 1776781749.518349
+          },
+          {
+            "candidate_id": "8",
+            "semantic_class": "window",
+            "target_match_score": 0.963252025340239,
+            "distance_cm": 1057.0555419921875,
+            "opening_width_cm": 9.909895706176755,
+            "center_x_norm": 0.6803444623947144,
+            "candidate_total_score": 0.452,
+            "status": "window_rejected",
+            "attempt_count": 1,
+            "last_checked_time": 1776781753.955662
+          },
+          {
+            "candidate_id": "5",
+            "semantic_class": "window",
+            "target_match_score": 0.4088494656235438,
+            "distance_cm": 387.3487243652344,
+            "opening_width_cm": 280.8278251647949,
+            "center_x_norm": 0.4906562328338623,
+            "candidate_total_score": 0.4461,
+            "status": "window_rejected",
+            "attempt_count": 1,
+            "last_checked_time": 1776781754.197077
+          }
+        ]
+      }
+    },
+    "002": {
+      "house_id": "002",
+      "house_name": "House_2",
+      "house_status": "UNSEARCHED",
+      "target_match_active": true,
+      "created_at": "2026-04-20 23:50:58",
+      "updated_at": "2026-04-21 22:29:35",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "searching_entry",
+        "last_best_entry_id": "0",
+        "search_summary": {
+          "observed_sector_count": 2,
+          "candidate_entry_count": 5,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 3
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": true,
+            "observation_count": 2,
+            "last_visit_time": 1776781770.899974,
+            "best_entry_state": "weak_entry",
+            "best_target_conditioned_subgoal": "keep_search_target_house",
+            "best_target_match_score": 0.5799539836631089
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": true,
+            "observation_count": 5,
+            "last_visit_time": 1776781759.899252,
+            "best_entry_state": "non_target_entry_visible",
+            "best_target_conditioned_subgoal": "ignore_non_target_entry",
+            "best_target_match_score": 0.4709548889139204
           },
           "left_side": {
             "observed": false,
@@ -75,87 +279,64 @@
           {
             "candidate_id": "0",
             "semantic_class": "open door",
-            "target_match_score": 0.8386116608367289,
-            "distance_cm": 603.2938842773438,
-            "opening_width_cm": 26.394107437133783,
-            "center_x_norm": 0.4641073703765869,
-            "candidate_total_score": 0.7908,
-            "status": "blocked_temporary",
+            "target_match_score": 0.0,
+            "distance_cm": 694.0440063476562,
+            "opening_width_cm": 459.80415420532216,
+            "center_x_norm": 0.24853651523590087,
+            "candidate_total_score": 0.5036,
+            "status": "unverified",
+            "attempt_count": 57,
+            "last_checked_time": 1776781775.516699
+          },
+          {
+            "candidate_id": "10",
+            "semantic_class": "window",
+            "target_match_score": 0.7734090977959238,
+            "distance_cm": 0.0,
+            "opening_width_cm": 0.0,
+            "center_x_norm": 0.6228021860122681,
+            "candidate_total_score": 0.4715,
+            "status": "window_rejected",
+            "attempt_count": 1,
+            "last_checked_time": 1776781759.12815
+          },
+          {
+            "candidate_id": "2",
+            "semantic_class": "window",
+            "target_match_score": 0.0,
+            "distance_cm": 857.59033203125,
+            "opening_width_cm": 5.3599395751953125,
+            "center_x_norm": 0.5708258628845215,
+            "candidate_total_score": 0.0738,
+            "status": "window_rejected",
             "attempt_count": 2,
-            "last_checked_time": 1776700511.320981
+            "last_checked_time": 1776781770.272984
+          },
+          {
+            "candidate_id": "8",
+            "semantic_class": "window",
+            "target_match_score": 0.4709548889139204,
+            "distance_cm": 1128.949462890625,
+            "opening_width_cm": 10.583901214599607,
+            "center_x_norm": 0.4811926603317261,
+            "candidate_total_score": 0.3992,
+            "status": "window_rejected",
+            "attempt_count": 1,
+            "last_checked_time": 1776781759.899252
+          },
+          {
+            "candidate_id": "1",
+            "semantic_class": "door",
+            "target_match_score": 0.0,
+            "distance_cm": 0.0,
+            "opening_width_cm": 0.0,
+            "center_x_norm": 0.33503174781799316,
+            "candidate_total_score": 0.1891,
+            "status": "unverified",
+            "attempt_count": 4,
+            "last_checked_time": 1776781772.977847
           }
         ]
-      }
-    },
-    "002": {
-      "house_id": "002",
-      "house_name": "House_2",
-      "house_status": "IN_PROGRESS",
-      "target_match_active": false,
-      "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
-      "working_memory": {
-        "target_house_id": "",
-        "current_house_id": "",
-        "last_best_entry_id": "",
-        "recent_actions": [],
-        "recent_target_decisions": [],
-        "top_candidates": []
-      },
-      "episodic_memory": [],
-      "semantic_memory": {
-        "entry_search_status": "not_started",
-        "last_best_entry_id": "",
-        "search_summary": {
-          "observed_sector_count": 0,
-          "candidate_entry_count": 0,
-          "approachable_entry_count": 0,
-          "blocked_entry_count": 0,
-          "rejected_entry_count": 0
-        },
-        "searched_sectors": {
-          "front_left": {
-            "observed": false,
-            "observation_count": 0,
-            "last_visit_time": null,
-            "best_entry_state": "",
-            "best_target_conditioned_subgoal": "",
-            "best_target_match_score": 0.0
-          },
-          "front_center": {
-            "observed": false,
-            "observation_count": 0,
-            "last_visit_time": null,
-            "best_entry_state": "",
-            "best_target_conditioned_subgoal": "",
-            "best_target_match_score": 0.0
-          },
-          "front_right": {
-            "observed": false,
-            "observation_count": 0,
-            "last_visit_time": null,
-            "best_entry_state": "",
-            "best_target_conditioned_subgoal": "",
-            "best_target_match_score": 0.0
-          },
-          "left_side": {
-            "observed": false,
-            "observation_count": 0,
-            "last_visit_time": null,
-            "best_entry_state": "",
-            "best_target_conditioned_subgoal": "",
-            "best_target_match_score": 0.0
-          },
-          "right_side": {
-            "observed": false,
-            "observation_count": 0,
-            "last_visit_time": null,
-            "best_entry_state": "",
-            "best_target_conditioned_subgoal": "",
-            "best_target_match_score": 0.0
-          }
-        },
-        "candidate_entries": []
       }
     },
     "003": {
@@ -164,7 +345,7 @@
       "house_status": "UNSEARCHED",
       "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",
@@ -235,7 +416,7 @@
       "house_status": "UNSEARCHED",
       "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",
@@ -306,7 +487,7 @@
       "house_status": "UNSEARCHED",
       "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",
@@ -377,7 +558,7 @@
       "house_status": "UNSEARCHED",
       "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",
@@ -448,7 +629,7 @@
       "house_status": "UNSEARCHED",
       "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",
@@ -519,7 +700,7 @@
       "house_status": "UNSEARCHED",
       "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",
@@ -590,7 +771,7 @@
       "house_status": "UNSEARCHED",
       "target_match_active": false,
       "created_at": "2026-04-20 23:50:58",
-      "updated_at": "2026-04-20 23:55:11",
+      "updated_at": "2026-04-21 22:29:35",
       "working_memory": {
         "target_house_id": "",
         "current_house_id": "",

@@ -190,6 +190,8 @@ def _make_export_record(sample: Dict[str, Any], sample_dir: Path, split: str) ->
     teacher_targets = sample.get("teacher_targets", {})
     metadata = sample.get("metadata", {})
     global_state = sample.get("global_state", {})
+    memory_context = sample.get("entry_state", {}).get("memory_context", {}) if isinstance(sample.get("entry_state"), dict) else {}
+    memory_features = memory_context.get("memory_features", {}) if isinstance(memory_context.get("memory_features"), dict) else {}
     return {
         "sample_id": sample["sample_id"],
         "split": split,
@@ -222,6 +224,12 @@ def _make_export_record(sample: Dict[str, Any], sample_dir: Path, split: str) ->
         "target_conditioning_enabled": _safe_int(
             sample.get("metadata", {}).get("target_conditioning_enabled"), 0
         ),
+        "memory_available": _safe_int(memory_context.get("available"), 0),
+        "memory_source": str(memory_context.get("source") or ""),
+        "memory_snapshot_before_path": str(memory_context.get("snapshot_before_path") or ""),
+        "memory_snapshot_after_path": str(memory_context.get("snapshot_after_path") or ""),
+        "memory_feature_available": int(bool(memory_features)),
+        "memory_features": memory_features,
         "task_label": str(metadata.get("task_label") or ""),
         "source_run_dir": str(metadata.get("source_run_dir") or sample["run_dir"]),
     }
@@ -299,6 +307,9 @@ def export_distillation_dataset(
     target_conditioned_teacher_available_count = _teacher_available_count(
         loaded_samples, "target_conditioned_teacher_available"
     )
+    memory_available_count = 0
+    memory_feature_available_count = 0
+    memory_source_counts: Counter[str] = Counter()
     missing_target_conditioned_fields = {
         "target_conditioned_state": _missing_teacher_field_count(
             loaded_samples, "target_conditioned_state"
@@ -333,10 +344,17 @@ def export_distillation_dataset(
                 "current_house_id": sample["global_state"].get("current_house_id"),
                 "target_house_in_fov": sample["global_state"].get("target_house_in_fov"),
                 "target_conditioning_enabled": sample["metadata"].get("target_conditioning_enabled", 1),
+                "memory_available": sample.get("entry_state", {}).get("memory_context", {}).get("available", 0),
+                "memory_source": sample.get("entry_state", {}).get("memory_context", {}).get("source", ""),
+                "memory_snapshot_before_path": sample.get("entry_state", {}).get("memory_context", {}).get("snapshot_before_path", ""),
+                "memory_snapshot_after_path": sample.get("entry_state", {}).get("memory_context", {}).get("snapshot_after_path", ""),
             },
         )
         split = "val" if sample["sample_id"] in val_sample_ids else "train"
         record = _make_export_record(sample, sample_dir, split)
+        memory_available_count += _safe_int(record.get("memory_available"), 0)
+        memory_feature_available_count += _safe_int(record.get("memory_feature_available"), 0)
+        memory_source_counts[str(record.get("memory_source") or "none")] += 1
         if split == "train":
             train_records.append(record)
         else:
@@ -359,6 +377,9 @@ def export_distillation_dataset(
         "target_conditioned_enabled": True,
         "target_conditioned_teacher_available_count": target_conditioned_teacher_available_count,
         "missing_target_conditioned_fields_count": missing_target_conditioned_fields,
+        "memory_available_count": memory_available_count,
+        "memory_feature_available_count": memory_feature_available_count,
+        "memory_source_counts": dict(sorted(memory_source_counts.items(), key=lambda pair: pair[0])),
     }
     _write_json(export_dir / "quality_report.json", quality_report)
 
@@ -377,6 +398,9 @@ def export_distillation_dataset(
         "allow_weak_valid": bool(allow_weak_valid),
         "min_teacher_confidence": float(min_teacher_confidence),
         "target_conditioned_enabled": True,
+        "memory_available_count": memory_available_count,
+        "memory_feature_available_count": memory_feature_available_count,
+        "memory_source_counts": dict(sorted(memory_source_counts.items(), key=lambda pair: pair[0])),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     _write_json(export_dir / "manifest.json", manifest)
@@ -394,6 +418,9 @@ def export_distillation_dataset(
         "target_conditioned_state_counts": export_class_counts["target_conditioned_state"],
         "target_conditioned_subgoal_counts": export_class_counts["target_conditioned_subgoal"],
         "target_conditioned_action_hint_counts": export_class_counts["target_conditioned_action_hint"],
+        "memory_available_count": memory_available_count,
+        "memory_feature_available_count": memory_feature_available_count,
+        "memory_source_counts": dict(sorted(memory_source_counts.items(), key=lambda pair: pair[0])),
         "skipped_counts": quality_report["skipped_counts"],
     }
 
