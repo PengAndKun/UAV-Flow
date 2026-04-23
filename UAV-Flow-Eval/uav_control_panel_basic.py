@@ -192,8 +192,13 @@ class Panel:
         self.task_label_var = tk.StringVar(value="")
         self.capture_label_var = tk.StringVar(value="")
         self.memory_episode_label_var = tk.StringVar(value="")
+        self.memory_capture_label_var = tk.StringVar(value="")
+        self.memory_step_display_var = tk.StringVar(value="0")
         self.memory_reset_on_start_var = tk.BooleanVar(value=True)
         self.memory_auto_refresh_var = tk.BooleanVar(value=True)
+        self.memory_auto_mode_var = tk.StringVar(value="off")
+        self.memory_auto_seconds_var = tk.StringVar(value="5")
+        self.memory_auto_steps_var = tk.StringVar(value="3")
         self.phase1_settle_var = tk.StringVar(value="0.20")
         self.sequence_var = tk.StringVar(value="")
         self.sequence_delay_var = tk.StringVar(value="260")
@@ -259,6 +264,7 @@ class Panel:
 
         self.manual_request_inflight = False
         self.move_request_inflight = False
+        self.memory_capture_inflight = False
         self.state_refresh_inflight = False
         self.preview_refresh_inflight = False
         self.depth_refresh_inflight = False
@@ -269,6 +275,12 @@ class Panel:
         self.sequence_thread: Optional[threading.Thread] = None
         self.sequence_stop_event = threading.Event()
         self.movement_enabled_state = False
+        self.latest_state: Dict[str, Any] = {}
+        self.latest_memory_collection_state: Dict[str, Any] = {}
+        self.memory_auto_enabled = False
+        self.memory_auto_last_capture_time = 0.0
+        self.memory_auto_last_capture_step = 0
+        self.memory_auto_episode_id = ""
 
         self.eval_dir = os.path.dirname(os.path.abspath(__file__))
         self.houses_config_path = os.path.join(self.eval_dir, "houses_config.json")
@@ -282,7 +294,7 @@ class Panel:
         self.build_ui()
         self._refresh_target_house_choices()
         self._refresh_default_fusion_model()
-        for delay, fn in ((200, self.schedule_state_refresh), (350, self.schedule_preview_refresh), (500, self.schedule_depth_refresh), (1200, self.schedule_map_refresh)):
+        for delay, fn in ((200, self.schedule_state_refresh), (350, self.schedule_preview_refresh), (500, self.schedule_depth_refresh), (900, self.schedule_memory_auto_capture), (1200, self.schedule_map_refresh)):
             self.root.after(delay, fn)
 
     def build_ui(self) -> None:
@@ -312,10 +324,9 @@ class Panel:
         )
         self.target_house_combo.grid(row=0, column=4, columnspan=2, sticky="w", padx=(0, 6), pady=6)
         self.target_house_combo.bind("<<ComboboxSelected>>", self.on_target_house_combo_selected)
-        tk.Label(task, text="Capture Label").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        tk.Label(task, text="Run Label").grid(row=1, column=0, sticky="w", padx=6, pady=6)
         tk.Entry(task, textvariable=self.capture_label_var).grid(row=1, column=1, sticky="ew", padx=6, pady=6)
-        tk.Button(task, text="Capture", command=self.on_capture).grid(row=1, column=2, padx=6, pady=6)
-        tk.Button(task, text="Phase1 Scan x12", command=self.on_capture_phase1_scan).grid(row=1, column=3, padx=6, pady=6)
+        tk.Button(task, text="Phase1 Scan x12", command=self.on_capture_phase1_scan).grid(row=1, column=2, padx=6, pady=6)
         tk.Label(task, text="Settle s").grid(row=1, column=4, sticky="e", padx=(10, 4), pady=6)
         tk.Entry(task, textvariable=self.phase1_settle_var, width=8).grid(row=1, column=5, sticky="w", padx=(0, 6), pady=6)
         tk.Label(task, text="Init Pose JSON").grid(row=2, column=0, sticky="nw", padx=6, pady=6)
@@ -327,14 +338,34 @@ class Panel:
         memory = tk.LabelFrame(left, text="Memory Collection")
         memory.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         memory.grid_columnconfigure(1, weight=1)
+        memory.grid_columnconfigure(3, weight=1)
         tk.Label(memory, text="Episode Label").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         tk.Entry(memory, textvariable=self.memory_episode_label_var).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
-        tk.Checkbutton(memory, text="Reset Store On Start", variable=self.memory_reset_on_start_var).grid(row=0, column=2, sticky="w", padx=6, pady=6)
+        tk.Checkbutton(memory, text="Reset Store On Start", variable=self.memory_reset_on_start_var).grid(row=0, column=2, columnspan=2, sticky="w", padx=6, pady=6)
         tk.Button(memory, text="Start Episode", command=self.on_memory_collection_start).grid(row=1, column=0, padx=6, pady=6, sticky="ew")
         tk.Button(memory, text="Stop Episode", command=self.on_memory_collection_stop).grid(row=1, column=1, padx=6, pady=6, sticky="ew")
         tk.Button(memory, text="Reset Memory", command=self.on_memory_collection_reset).grid(row=1, column=2, padx=6, pady=6, sticky="ew")
-        tk.Button(memory, text="Snapshot Now", command=self.on_memory_snapshot).grid(row=2, column=0, padx=6, pady=(0, 6), sticky="ew")
-        tk.Button(memory, text="Open Memory Window", command=self.toggle_memory_window).grid(row=2, column=1, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(memory, text="Snapshot Now", command=self.on_memory_snapshot).grid(row=1, column=3, padx=6, pady=6, sticky="ew")
+        tk.Label(memory, text="Capture Label").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(memory, textvariable=self.memory_capture_label_var).grid(row=2, column=1, sticky="ew", padx=6, pady=6)
+        tk.Label(memory, text="Current Step").grid(row=2, column=2, sticky="e", padx=(10, 4), pady=6)
+        tk.Label(memory, textvariable=self.memory_step_display_var, anchor="w").grid(row=2, column=3, sticky="w", padx=(0, 6), pady=6)
+        tk.Button(memory, text="Capture Step+Analyze", command=self.on_memory_capture_analyze).grid(row=3, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(memory, text="Open Memory Window", command=self.toggle_memory_window).grid(row=3, column=2, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Label(memory, text="Auto Mode").grid(row=4, column=0, sticky="w", padx=6, pady=6)
+        ttk.Combobox(
+            memory,
+            textvariable=self.memory_auto_mode_var,
+            values=["off", "time", "step"],
+            state="readonly",
+            width=12,
+        ).grid(row=4, column=1, sticky="w", padx=6, pady=6)
+        tk.Label(memory, text="Time(s)").grid(row=4, column=2, sticky="e", padx=(10, 4), pady=6)
+        tk.Entry(memory, textvariable=self.memory_auto_seconds_var, width=10).grid(row=4, column=3, sticky="w", padx=(0, 6), pady=6)
+        tk.Label(memory, text="Step Interval").grid(row=5, column=0, sticky="w", padx=6, pady=(0, 6))
+        tk.Entry(memory, textvariable=self.memory_auto_steps_var, width=12).grid(row=5, column=1, sticky="w", padx=6, pady=(0, 6))
+        tk.Button(memory, text="Start Auto Capture", command=self.on_memory_auto_capture_start).grid(row=5, column=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(memory, text="Stop Auto Capture", command=self.on_memory_auto_capture_stop).grid(row=5, column=3, padx=6, pady=(0, 6), sticky="ew")
 
         fusion = tk.LabelFrame(left, text="Phase2 Fusion")
         fusion.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -1308,7 +1339,13 @@ class Panel:
         if restored:
             self.calibration_anchors = restored
 
+    def _reset_memory_auto_tracking(self, episode_id: str, step_index: int) -> None:
+        self.memory_auto_episode_id = str(episode_id or "")
+        self.memory_auto_last_capture_time = time.time()
+        self.memory_auto_last_capture_step = int(step_index)
+
     def apply_state(self, state: Dict[str, Any]) -> None:
+        self.latest_state = state if isinstance(state, dict) else {}
         pose, depth = state.get("pose", {}), state.get("depth", {})
         mission = state.get("house_mission", {}) if isinstance(state.get("house_mission"), dict) else {}
         door_control = state.get("door_control", {}) if isinstance(state.get("door_control"), dict) else {}
@@ -1348,22 +1385,33 @@ class Panel:
             f"time={str(door_control.get('last_control_time', '') or '-')}"
         )
         memory_collection = state.get("memory_collection", {}) if isinstance(state.get("memory_collection"), dict) else {}
+        self.latest_memory_collection_state = dict(memory_collection)
         episode_id = str(memory_collection.get("episode_id", "") or "")
         episode_label = str(memory_collection.get("episode_label", "") or "")
         collection_dir = str(memory_collection.get("collection_dir", "") or "")
         collection_dir_name = os.path.basename(collection_dir) if collection_dir else "none"
+        current_step_index = int(memory_collection.get("step_index", 0) or 0)
+        self.memory_step_display_var.set(str(current_step_index))
+        if episode_id and episode_id != self.memory_auto_episode_id:
+            self._reset_memory_auto_tracking(episode_id, current_step_index)
         self.memory_var.set(
             "Memory "
             f"active={int(bool(memory_collection.get('active', False)))} "
             f"episode={episode_id or 'none'} "
             f"label={episode_label or '-'} "
-            f"step={int(memory_collection.get('step_index', 0) or 0)} "
+            f"step={current_step_index} "
             f"snapshots={int(memory_collection.get('snapshot_count', 0) or 0)} "
             f"target={str(memory_collection.get('current_target_house_id', '') or 'none')} "
             f"current={str(memory_collection.get('current_house_id', '') or 'none')} "
             f"dir={collection_dir_name}"
         )
-        self.capture_var.set(f"Capture last={(state.get('last_capture') or {}).get('capture_id','none')}")
+        last_capture = state.get("last_capture", {}) if isinstance(state.get("last_capture"), dict) else {}
+        self.capture_var.set(
+            "Capture "
+            f"last={str(last_capture.get('capture_id', 'none') or 'none')} "
+            f"source={str(last_capture.get('capture_source', '-') or '-')} "
+            f"step={str(last_capture.get('step_index', '-') or '-')}"
+        )
         self.mission_var.set(f"Mission: current={mission.get('current_house_name') or 'none'} target={mission.get('target_house_name') or 'none'}")
         self.current_house_var.set(f"Current house: {mission.get('current_house_name') or 'none'} [{mission.get('current_house_status') or '-'}]")
         self.target_house_var.set(f"Target: {mission.get('target_house_name') or 'none'} [{mission.get('target_house_status') or '-'}]  next={mission.get('nearest_unsearched_house_name') or 'none'}")
@@ -1397,8 +1445,19 @@ class Panel:
         lines.append(f"snapshot_count: {int(memory_collection.get('snapshot_count', 0) or 0)}")
         lines.append(f"current_target_house_id: {memory_collection.get('current_target_house_id', '')}")
         lines.append(f"current_house_id: {memory_collection.get('current_house_id', '')}")
+        lines.append(f"capture_root: {memory_collection.get('capture_root', '')}")
         lines.append(f"last_snapshot_before_path: {memory_collection.get('last_snapshot_before_path', '')}")
         lines.append(f"last_snapshot_after_path: {memory_collection.get('last_snapshot_after_path', '')}")
+        lines.append(f"last_capture_run_dir: {memory_collection.get('last_capture_run_dir', '')}")
+        lines.append(f"last_capture_label: {memory_collection.get('last_capture_label', '')}")
+        lines.append(f"last_capture_source: {memory_collection.get('last_capture_source', '')}")
+        lines.append(f"last_capture_time: {memory_collection.get('last_capture_time', '')}")
+        lines.append("")
+        lines.append("=== Local Auto Capture ===")
+        lines.append(f"enabled: {bool(self.memory_auto_enabled)}")
+        lines.append(f"mode: {self.memory_auto_mode_var.get().strip() or 'off'}")
+        lines.append(f"time_seconds: {self.memory_auto_seconds_var.get().strip() or '0'}")
+        lines.append(f"step_interval: {self.memory_auto_steps_var.get().strip() or '0'}")
         lines.append("")
         lines.append("=== Mission Context ===")
         lines.append(f"target_house_id: {house_mission.get('target_house_id', '')}")
@@ -1534,6 +1593,107 @@ class Panel:
         if has_setting or has_open:
             self.refresh_map_async()
         self.root.after(1500, self.schedule_map_refresh)
+
+    def _start_memory_auto_capture_local(self) -> None:
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        current_step = int(memory_collection.get("step_index", 0) or 0)
+        episode_id = str(memory_collection.get("episode_id", "") or "")
+        self.memory_auto_enabled = True
+        self._reset_memory_auto_tracking(episode_id, current_step)
+        mode = self.memory_auto_mode_var.get().strip() or "off"
+        self.status_var.set(f"Memory auto capture started: mode={mode}")
+
+    def _stop_memory_auto_capture_local(self) -> None:
+        self.memory_auto_enabled = False
+        self.status_var.set("Memory auto capture stopped.")
+
+    def _maybe_trigger_memory_auto_capture(self) -> None:
+        if not self.memory_auto_enabled or self.memory_capture_inflight:
+            return
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        if not bool(memory_collection.get("active", False)):
+            return
+        episode_id = str(memory_collection.get("episode_id", "") or "")
+        current_step = int(memory_collection.get("step_index", 0) or 0)
+        if episode_id and episode_id != self.memory_auto_episode_id:
+            self._reset_memory_auto_tracking(episode_id, current_step)
+
+        mode = self.memory_auto_mode_var.get().strip().lower()
+        if mode == "time":
+            try:
+                interval_s = max(1.0, float(self.memory_auto_seconds_var.get().strip()))
+            except ValueError:
+                return
+            if (time.time() - float(self.memory_auto_last_capture_time)) < interval_s:
+                return
+            threading.Thread(
+                target=lambda: self._run_memory_capture_analyze(
+                    capture_source="auto_time",
+                    note=f"auto_time interval_s={interval_s:.2f}",
+                    update_status=False,
+                ),
+                daemon=True,
+            ).start()
+        elif mode == "step":
+            try:
+                step_interval = max(1, int(float(self.memory_auto_steps_var.get().strip())))
+            except ValueError:
+                return
+            if current_step - int(self.memory_auto_last_capture_step) < step_interval:
+                return
+            threading.Thread(
+                target=lambda: self._run_memory_capture_analyze(
+                    capture_source="auto_step",
+                    note=f"auto_step interval={step_interval}",
+                    update_status=False,
+                ),
+                daemon=True,
+            ).start()
+
+    def schedule_memory_auto_capture(self) -> None:
+        self._maybe_trigger_memory_auto_capture()
+        self.root.after(500, self.schedule_memory_auto_capture)
+
+    def _run_memory_capture_analyze(self, *, capture_source: str, note: str, update_status: bool) -> bool:
+        if self.memory_capture_inflight:
+            return False
+        self.memory_capture_inflight = True
+        try:
+            response = self.safe(
+                self.client.post_json,
+                "/memory_capture_analyze",
+                {
+                    "label": self.memory_capture_label_var.get().strip(),
+                    "capture_source": str(capture_source or "manual"),
+                    "note": str(note or ""),
+                },
+                label=f"Memory Capture {capture_source}",
+                timeout_s=max(float(self.args.timeout_s), 180.0),
+            ) or {}
+            if not isinstance(response, dict):
+                return False
+            ok = str(response.get("status", "")) == "ok"
+            state = response.get("state")
+            result = response.get("result")
+            if isinstance(state, dict):
+                self.root.after(0, lambda s=state: self.apply_state(s))
+                memory_collection = state.get("memory_collection", {}) if isinstance(state.get("memory_collection"), dict) else {}
+                self.memory_auto_last_capture_step = int(memory_collection.get("step_index", self.memory_auto_last_capture_step) or self.memory_auto_last_capture_step)
+                self.memory_auto_episode_id = str(memory_collection.get("episode_id", self.memory_auto_episode_id) or self.memory_auto_episode_id)
+            if ok:
+                self.memory_auto_last_capture_time = time.time()
+            if isinstance(result, dict):
+                self.root.after(0, lambda r=result: self.apply_fusion_result(r))
+            run_dir = str(response.get("run_dir", "") or "")
+            if update_status:
+                status_message = str(response.get("message", "") or "")
+                if ok:
+                    self.root.after(0, lambda rd=run_dir: self.status_var.set(f"Memory capture analyze saved: {rd or 'done'}"))
+                else:
+                    self.root.after(0, lambda msg=status_message: self.status_var.set(msg or "Memory capture analyze failed."))
+            return ok
+        finally:
+            self.memory_capture_inflight = False
 
     def apply_map_data(self, state: Dict[str, Any], registry: Dict[str, Any]) -> None:
         if not self.root.winfo_exists():
@@ -1706,7 +1866,7 @@ class Panel:
     def on_memory_collection_start(self) -> None:
         self.call_async(
             "Starting memory collection",
-            lambda: self._apply_response(
+            lambda: self._apply_response_and_reset_memory_auto(
                 self.safe(
                     self.client.post_json,
                     "/memory_collection_start",
@@ -1719,6 +1879,7 @@ class Panel:
             ),
         )
     def on_memory_collection_stop(self) -> None:
+        self._stop_memory_auto_capture_local()
         self.call_async(
             "Stopping memory collection",
             lambda: self._apply_response(
@@ -1726,6 +1887,7 @@ class Panel:
             ),
         )
     def on_memory_collection_reset(self) -> None:
+        self._stop_memory_auto_capture_local()
         self.call_async(
             "Resetting memory store",
             lambda: self._apply_response(
@@ -1751,7 +1913,55 @@ class Panel:
             {"snapshot_type": snapshot_type, "note": note},
             label=f"Memory Snapshot {snapshot_type}",
         )
-    def on_capture(self) -> None: self.call_async("Capturing", lambda: self._apply_response((self.safe(self.client.post_json, "/capture", {"label": self.capture_label_var.get().strip()}, label="Capture") or {}).get("state")))
+    def _apply_response_and_reset_memory_auto(self, response: Any) -> None:
+        self._apply_response(response)
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        self._reset_memory_auto_tracking(
+            str(memory_collection.get("episode_id", "") or ""),
+            int(memory_collection.get("step_index", 0) or 0),
+        )
+
+    def on_memory_capture_analyze(self) -> None:
+        self.call_async(
+            "Memory capture analyze",
+            lambda: self._run_memory_capture_analyze(
+                capture_source="manual",
+                note="manual_step_capture_from_panel",
+                update_status=True,
+            ),
+        )
+
+    def on_memory_auto_capture_start(self) -> None:
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        if not bool(memory_collection.get("active", False)):
+            self.status_var.set("Start Episode first, then start auto capture.")
+            return
+        mode = self.memory_auto_mode_var.get().strip().lower()
+        if mode not in {"time", "step"}:
+            self.status_var.set("Auto capture mode must be 'time' or 'step'.")
+            return
+        if mode == "time":
+            try:
+                if float(self.memory_auto_seconds_var.get().strip()) <= 0:
+                    raise ValueError
+            except ValueError:
+                self.status_var.set("Invalid auto capture time interval.")
+                return
+        if mode == "step":
+            try:
+                if int(float(self.memory_auto_steps_var.get().strip())) <= 0:
+                    raise ValueError
+            except ValueError:
+                self.status_var.set("Invalid auto capture step interval.")
+                return
+        self._start_memory_auto_capture_local()
+
+    def on_memory_auto_capture_stop(self) -> None:
+        self._stop_memory_auto_capture_local()
+
+    def on_capture(self) -> None:
+        self.on_memory_capture_analyze()
+
     def on_capture_phase1_scan(self) -> None:
         long_timeout_s = max(float(self.args.timeout_s), 120.0)
         try:

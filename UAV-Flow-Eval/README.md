@@ -77,6 +77,12 @@ Additional integration:
   - `sequence_end`
   - `sequence_stop`
   - `sequence_failed`
+- `Capture Step+Analyze` writes each sample into the active episode directory under:
+  - `memory_fusion_captures/memory_capture_*/`
+  - and runs YOLO + depth + fusion analysis immediately
+- `Auto Capture` supports two modes:
+  - `time`
+  - `step`
 
 The memory snapshots are written alongside capture metadata so later dataset export can recover:
 - the state before capture
@@ -92,5 +98,10 @@ python uav_control_panel_basic.py --host 127.0.0.1 --port 5020
 Recommended workflow:
 1. Select target house and task.
 2. Start a memory collection episode from the panel.
-3. Move/capture as usual.
-4. Stop the episode after finishing the sequence.
+3. Use `Capture Step+Analyze` for manual episode sampling.
+4. Or enable `Auto Capture` with:
+   - `Auto Mode = time`
+   - or `Auto Mode = step`
+5. Move / sequence / scan as usual.
+6. Open `Memory Collection Inspector` to observe episode, step, snapshots, and capture output.
+7. Stop the episode after finishing the sequence.

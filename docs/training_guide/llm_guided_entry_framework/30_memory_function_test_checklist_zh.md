@@ -72,7 +72,7 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
 
 1. 做 2 到 3 步移动
 2. 点击：
-   - `Capture`
+   - `Capture Step+Analyze`
 3. 点击：
    - `Snapshot Now`
 
@@ -90,11 +90,12 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
    - `step_index` 大于 0
    - `snapshot_count` 大于 0
 
-2. `capture_dir` 中新增的 `*_bundle.json` 里：
-   - `memory_episode_id`
-   - `memory_step_index`
-   - `memory_snapshot_before_path`
-   - `memory_snapshot_after_path`
+2. 当前 episode 目录下新生成的 memory capture run 中：
+   - `labeling/entry_search_memory_snapshot_before.json`
+   - `labeling/entry_search_memory_snapshot_after.json`
+   - `labeling/sample_metadata.json`
+   - `labeling/temporal_context.json`
+   - `labeling/fusion_result.json`
 
 3. [entry_search_memory.json](/E:/github/UAV-Flow/phase2_multimodal_fusion_analysis/entry_search_memory.json) 里：
    - `current_target_house_id`
@@ -158,13 +159,13 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
 重点看这些：
 
 - [entry_search_memory.json](/E:/github/UAV-Flow/phase2_multimodal_fusion_analysis/entry_search_memory.json)
-- `capture_dir` 下的 `*_bundle.json`
-- `capture_dir` 下的：
-  - `*_entry_search_memory_snapshot_before.json`
-  - `*_entry_search_memory_snapshot_after.json`
+- 当前 episode 目录下的：
+  - `memory_fusion_captures/memory_capture_*/labeling/entry_search_memory_snapshot_before.json`
+  - `memory_fusion_captures/memory_capture_*/labeling/entry_search_memory_snapshot_after.json`
+  - `memory_fusion_captures/memory_capture_*/labeling/sample_metadata.json`
+  - `memory_fusion_captures/memory_capture_*/labeling/temporal_context.json`
+  - `memory_fusion_captures/memory_capture_*/labeling/fusion_result.json`
 - `phase1_scan_manifest.json`
-- 各样本目录中的：
-  - `fusion_result.json`
 
 ---
 
@@ -178,7 +179,7 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
    - `Start Episode`
 4. 执行几步移动
 5. 点击：
-   - `Capture`
+   - `Capture Step+Analyze`
 6. 点击：
    - `Snapshot Now`
 7. 点击：
@@ -194,16 +195,15 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
    - `step_index` 增长
    - `snapshot_count` 增长
 
-2. `*_bundle.json` 中出现：
-   - `memory_collection_active`
-   - `memory_episode_id`
-   - `memory_step_index`
-   - `memory_snapshot_before_path`
-   - `memory_snapshot_after_path`
+2. 当前 episode 目录下新增一个：
+   - `memory_fusion_captures/memory_capture_*`
 
-3. 采集目录中出现：
-   - `*_entry_search_memory_snapshot_before.json`
-   - `*_entry_search_memory_snapshot_after.json`
+3. 该 capture run 的 `labeling/` 目录中出现：
+   - `entry_search_memory_snapshot_before.json`
+   - `entry_search_memory_snapshot_after.json`
+   - `sample_metadata.json`
+   - `temporal_context.json`
+   - `fusion_result.json`
 
 ### 4.3 判定标准
 
@@ -211,7 +211,39 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
 
 - `episode_id` 正常生成
 - `step_index` 不是一直为 0
-- capture 结果中带有 before/after memory snapshot
+- memory capture run 中带有 before/after memory snapshot 和 fusion 结果
+
+### 4.4 自动采集测试
+
+按时间自动采集：
+
+1. `Start Episode`
+2. 在 `Memory Collection` 中设置：
+   - `Auto Mode = time`
+   - `Time(s) = 3` 或其它秒数
+3. 点击：
+   - `Start Auto Capture`
+4. 保持 UAV 继续移动或观察一段时间
+5. 查看当前 episode 目录下是否周期性新增：
+   - `memory_fusion_captures/memory_capture_*`
+
+按步数自动采集：
+
+1. `Start Episode`
+2. 在 `Memory Collection` 中设置：
+   - `Auto Mode = step`
+   - `Step Interval = 3` 或其它步数
+3. 点击：
+   - `Start Auto Capture`
+4. 执行若干步移动或 sequence
+5. 查看当前 episode 目录下是否按步数新增：
+   - `memory_fusion_captures/memory_capture_*`
+
+自动采集通过标准：
+
+- 新生成的 capture run 周期性出现
+- `sample_metadata.json` 中的 `step_index`、`capture_source` 正确
+- 每个自动采集样本都带 `fusion_result.json`
 
 ---
 
@@ -236,7 +268,7 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
    - 弱门线索
 5. 连续多次：
    - 小幅转向
-   - Capture
+   - `Capture Step+Analyze`
    - 或运行同一类 fusion 样本
 
 ### 5.3 期望现象
@@ -279,7 +311,7 @@ python E:\github\UAV-Flow\UAV-Flow-Eval\uav_control_panel_basic.py `
 2. 选一个目标房屋
 3. 让 UAV 多次从近似视角观察同一扇被障碍挡住的门
 4. 多次执行：
-   - Capture
+   - `Capture Step+Analyze`
    - 或 sequence 小移动后再次观察
 
 ### 6.3 期望现象

@@ -23,6 +23,7 @@ import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 from ctypes import wintypes
@@ -57,11 +58,21 @@ DEFAULT_HOUSES_CONFIG = os.path.join(EVAL_DIR, "houses_config.json")
 from phase2_multimodal_fusion_analysis import (  # noqa: E402
     DEFAULT_ENTRY_SEARCH_MEMORY_PATH,
     EntrySearchMemoryStore,
+    run_phase2_fusion_analysis,
 )
 
 
 def now_timestamp() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
+
+
+def sanitize_fragment(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"[^0-9A-Za-z_\-]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text[:80]
 
 
 def normalize_angle_deg(angle_deg: float) -> float:
@@ -146,6 +157,11 @@ class BasicUAVControlBackend:
         self.last_memory_snapshot_before_path = ""
         self.last_memory_snapshot_after_path = ""
         self.last_memory_snapshot_time = ""
+        self.memory_capture_root = ""
+        self.last_memory_capture_run_dir = ""
+        self.last_memory_capture_label = ""
+        self.last_memory_capture_source = ""
+        self.last_memory_capture_time = ""
         # --- House registry ---
         self.house_registry = HouseRegistry(args.houses_config)
         try:
@@ -740,6 +756,7 @@ class BasicUAVControlBackend:
             "episode_label": str(self.memory_collection_episode_label or ""),
             "started_at": str(self.memory_collection_started_at or ""),
             "collection_dir": str(self.memory_collection_dir or ""),
+            "capture_root": str(self.memory_capture_root or ""),
             "step_index": int(self.memory_collection_step_index),
             "snapshot_count": int(self.memory_collection_snapshot_count),
             "memory_store_path": str(self.memory_store_path),
@@ -748,6 +765,10 @@ class BasicUAVControlBackend:
             "last_snapshot_before_path": str(self.last_memory_snapshot_before_path or ""),
             "last_snapshot_after_path": str(self.last_memory_snapshot_after_path or ""),
             "last_snapshot_time": str(self.last_memory_snapshot_time or ""),
+            "last_capture_run_dir": str(self.last_memory_capture_run_dir or ""),
+            "last_capture_label": str(self.last_memory_capture_label or ""),
+            "last_capture_source": str(self.last_memory_capture_source or ""),
+            "last_capture_time": str(self.last_memory_capture_time or ""),
         }
 
     def _reset_memory_store(self) -> None:
@@ -816,6 +837,12 @@ class BasicUAVControlBackend:
             self.last_memory_snapshot_before_path = ""
             self.last_memory_snapshot_after_path = ""
             self.last_memory_snapshot_time = ""
+            self.memory_capture_root = os.path.join(collection_dir, "memory_fusion_captures")
+            os.makedirs(self.memory_capture_root, exist_ok=True)
+            self.last_memory_capture_run_dir = ""
+            self.last_memory_capture_label = ""
+            self.last_memory_capture_source = ""
+            self.last_memory_capture_time = ""
             if reset_store:
                 self._reset_memory_store()
             start_snapshot_path = os.path.join(collection_dir, "entry_search_memory_snapshot_start.json")
@@ -855,6 +882,10 @@ class BasicUAVControlBackend:
             self.last_memory_snapshot_before_path = ""
             self.last_memory_snapshot_after_path = ""
             self.last_memory_snapshot_time = ""
+            self.last_memory_capture_run_dir = ""
+            self.last_memory_capture_label = ""
+            self.last_memory_capture_source = ""
+            self.last_memory_capture_time = ""
             logger.info("Memory store reset path=%s", self.memory_store_path)
             return self.get_state(message="Memory store reset.")
 
@@ -873,6 +904,136 @@ class BasicUAVControlBackend:
             )
             logger.info("Memory snapshot saved type=%s path=%s", snapshot_type, snapshot_path)
             return self.get_state(message=f"Memory snapshot saved: {snapshot_name}")
+
+    def capture_memory_fusion_sample(
+        self,
+        *,
+        label: str = "",
+        capture_source: str = "manual",
+        note: str = "",
+    ) -> Dict[str, Any]:
+        with self.lock:
+            if not self.memory_collection_active or not self.memory_collection_dir:
+                return self.get_state(status="error", message="Start a memory collection episode first.")
+
+            self._sync_memory_runtime_context()
+            if self.last_raw_frame is None or self.last_depth_frame is None:
+                self.refresh_observations()
+            if self.last_raw_frame is None or self.last_depth_frame is None:
+                raise RuntimeError("No synchronized RGB/depth frame available for memory capture.")
+
+            step_index = int(self.memory_collection_step_index)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_label = sanitize_fragment(label)
+            safe_source = sanitize_fragment(capture_source) or "manual"
+            label_suffix = f"_{safe_label}" if safe_label else ""
+            run_name = f"memory_capture_{timestamp}_step{step_index:04d}_{safe_source}{label_suffix}"
+            capture_root = self.memory_capture_root or os.path.join(self.memory_collection_dir, "memory_fusion_captures")
+            os.makedirs(capture_root, exist_ok=True)
+            run_dir = os.path.join(capture_root, run_name)
+            labeling_dir = os.path.join(run_dir, "labeling")
+            os.makedirs(labeling_dir, exist_ok=True)
+
+            step_note = str(note or "").strip()
+            state = self.get_state()
+            camera_info = self.get_camera_info()
+            rgb_bgr = np.ascontiguousarray(self.last_raw_frame.copy())
+            depth_raw = np.clip(
+                np.nan_to_num(self.last_depth_frame, nan=0.0, posinf=0.0, neginf=0.0),
+                0.0,
+                65535.0,
+            ).astype(np.uint16)
+
+            extra = {
+                "capture_source": safe_source,
+                "step_index": step_index,
+                "requested_label": str(label or ""),
+                "note": step_note,
+                "run_dir": run_dir,
+            }
+            before_snapshot_path = os.path.join(labeling_dir, "entry_search_memory_snapshot_before.json")
+            self.last_memory_snapshot_before_path = self._save_memory_snapshot_file(
+                before_snapshot_path,
+                "before_memory_capture",
+                note="Snapshot before memory capture analyze.",
+                extra=extra,
+                step_index=step_index,
+            )
+
+            result = run_phase2_fusion_analysis(
+                rgb_bgr=rgb_bgr,
+                depth_raw=depth_raw,
+                existing_run_dir=Path(run_dir),
+                label="",
+                camera_info=camera_info if isinstance(camera_info, dict) else {},
+                state=state if isinstance(state, dict) else {},
+            )
+
+            sample_metadata = {
+                "episode_id": str(self.memory_collection_episode_id or ""),
+                "episode_label": str(self.memory_collection_episode_label or ""),
+                "step_index": step_index,
+                "capture_source": safe_source,
+                "requested_label": str(label or ""),
+                "note": step_note,
+                "collection_dir": str(self.memory_collection_dir or ""),
+                "capture_root": str(capture_root),
+                "capture_run_dir": str(run_dir),
+                "memory_store_path": str(self.memory_store_path),
+            }
+            temporal_context = {
+                "episode_id": str(self.memory_collection_episode_id or ""),
+                "step_index": step_index,
+                "previous_action": str(self.last_action or ""),
+                "capture_source": safe_source,
+                "capture_time": now_timestamp(),
+            }
+            with open(os.path.join(labeling_dir, "sample_metadata.json"), "w", encoding="utf-8") as fh:
+                json.dump(sample_metadata, fh, indent=2, ensure_ascii=False)
+            with open(os.path.join(labeling_dir, "temporal_context.json"), "w", encoding="utf-8") as fh:
+                json.dump(temporal_context, fh, indent=2, ensure_ascii=False)
+
+            self._sync_memory_runtime_context()
+            after_snapshot_path = os.path.join(labeling_dir, "entry_search_memory_snapshot_after.json")
+            self.last_memory_snapshot_after_path = self._save_memory_snapshot_file(
+                after_snapshot_path,
+                "after_memory_capture",
+                note="Snapshot after memory capture analyze.",
+                extra=extra,
+                step_index=step_index,
+            )
+
+            self.last_memory_capture_run_dir = str(run_dir)
+            self.last_memory_capture_label = str(label or "")
+            self.last_memory_capture_source = str(safe_source or "")
+            self.last_memory_capture_time = now_timestamp()
+            self.last_capture = {
+                "capture_id": run_name,
+                "capture_time": self.last_memory_capture_time,
+                "capture_source": safe_source,
+                "run_dir": str(run_dir),
+                "labeling_dir": str(labeling_dir),
+                "fusion_overlay_path": result.get("fusion_overlay_path"),
+                "bundle_path": os.path.join(labeling_dir, "labeling_manifest.json"),
+                "step_index": step_index,
+            }
+            logger.info(
+                "Memory capture analyze done -> run=%s source=%s step=%d label=%s",
+                run_name,
+                safe_source,
+                step_index,
+                str(label or ""),
+            )
+            return {
+                "status": "ok",
+                "message": f"Memory capture analyze saved: {run_name}",
+                "state": self.get_state(message=f"Memory capture analyze saved: {run_name}"),
+                "result": result,
+                "run_dir": str(run_dir),
+                "labeling_dir": str(labeling_dir),
+                "memory_snapshot_before_path": self.last_memory_snapshot_before_path,
+                "memory_snapshot_after_path": self.last_memory_snapshot_after_path,
+            }
 
     def get_memory_state(self) -> Dict[str, Any]:
         with self.lock:
@@ -1769,6 +1930,14 @@ def make_handler(backend: BasicUAVControlBackend):
                         backend.save_memory_snapshot(
                             note=str(data.get("note", "") or ""),
                             snapshot_type=str(data.get("snapshot_type", "manual") or "manual"),
+                        )
+                    )
+                elif parsed.path == "/memory_capture_analyze":
+                    self._send_json(
+                        backend.capture_memory_fusion_sample(
+                            label=str(data.get("label", "") or ""),
+                            capture_source=str(data.get("capture_source", "manual") or "manual"),
+                            note=str(data.get("note", "") or ""),
                         )
                     )
                 elif parsed.path == "/task":
