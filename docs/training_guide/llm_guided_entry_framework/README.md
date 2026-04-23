@@ -46,6 +46,7 @@
 28. [`27_memory_snapshot_export_spec.md`](27_memory_snapshot_export_spec.md)
 29. [`28_memory_architecture_diagram_zh.md`](28_memory_architecture_diagram_zh.md)
 30. [`29_v5_training_improvement_plan_zh.md`](29_v5_training_improvement_plan_zh.md)
+31. [`30_memory_function_test_checklist_zh.md`](30_memory_function_test_checklist_zh.md)
 
 ## 这条路线的核心思想
 

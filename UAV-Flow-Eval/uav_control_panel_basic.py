@@ -169,6 +169,7 @@ class Panel:
         self.depth_var = tk.StringVar(value="Depth: waiting...")
         self.control_var = tk.StringVar(value="Movement: waiting...")
         self.door_var = tk.StringVar(value="Door: waiting...")
+        self.memory_var = tk.StringVar(value="Memory: waiting...")
         self.capture_var = tk.StringVar(value="Capture: waiting...")
         self.fusion_summary_var = tk.StringVar(value="Fusion: idle")
         self.fusion_dir_var = tk.StringVar(value="Fusion dir: none")
@@ -190,6 +191,9 @@ class Panel:
 
         self.task_label_var = tk.StringVar(value="")
         self.capture_label_var = tk.StringVar(value="")
+        self.memory_episode_label_var = tk.StringVar(value="")
+        self.memory_reset_on_start_var = tk.BooleanVar(value=True)
+        self.memory_auto_refresh_var = tk.BooleanVar(value=True)
         self.phase1_settle_var = tk.StringVar(value="0.20")
         self.sequence_var = tk.StringVar(value="")
         self.sequence_delay_var = tk.StringVar(value="260")
@@ -205,6 +209,8 @@ class Panel:
         self.depth_window: Optional[tk.Toplevel] = None
         self.depth_label: Optional[tk.Label] = None
         self.depth_photo: Optional[ImageTk.PhotoImage] = None
+        self.memory_window: Optional[tk.Toplevel] = None
+        self.memory_text: Optional[tk.Text] = None
         self.fusion_preview_label: Optional[tk.Label] = None
         self.fusion_preview_photo: Optional[ImageTk.PhotoImage] = None
         self.fusion_window: Optional[tk.Toplevel] = None
@@ -258,6 +264,7 @@ class Panel:
         self.depth_refresh_inflight = False
         self.map_refresh_inflight = False
         self.map_background_refresh_inflight = False
+        self.memory_refresh_inflight = False
         self.background_pause_until = 0.0
         self.sequence_thread: Optional[threading.Thread] = None
         self.sequence_stop_event = threading.Event()
@@ -285,7 +292,7 @@ class Panel:
 
         status = tk.LabelFrame(root, text="Runtime Status")
         status.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=8, pady=8)
-        for idx, var in enumerate((self.status_var, self.pose_var, self.depth_var, self.control_var, self.door_var, self.capture_var, self.mission_var, self.current_house_var, self.target_house_var, self.target_dist_var, self.map_status_var, self.map_pose_var, self.calib_var)):
+        for idx, var in enumerate((self.status_var, self.pose_var, self.depth_var, self.control_var, self.door_var, self.memory_var, self.capture_var, self.mission_var, self.current_house_var, self.target_house_var, self.target_dist_var, self.map_status_var, self.map_pose_var, self.calib_var)):
             tk.Label(status, textvariable=var, anchor="w", justify="left", font=("Consolas", 11)).grid(row=idx, column=0, sticky="ew", padx=6, pady=2)
         status.grid_columnconfigure(0, weight=1)
 
@@ -317,8 +324,20 @@ class Panel:
         self.pose_text.insert("1.0", json.dumps({"x": 2359.9, "y": 85.3, "z": 225.0, "yaw": -1.7}, indent=2))
         tk.Button(task, text="Set Pose", command=self.on_set_pose).grid(row=2, column=2, padx=6, pady=6, sticky="n")
 
+        memory = tk.LabelFrame(left, text="Memory Collection")
+        memory.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        memory.grid_columnconfigure(1, weight=1)
+        tk.Label(memory, text="Episode Label").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(memory, textvariable=self.memory_episode_label_var).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        tk.Checkbutton(memory, text="Reset Store On Start", variable=self.memory_reset_on_start_var).grid(row=0, column=2, sticky="w", padx=6, pady=6)
+        tk.Button(memory, text="Start Episode", command=self.on_memory_collection_start).grid(row=1, column=0, padx=6, pady=6, sticky="ew")
+        tk.Button(memory, text="Stop Episode", command=self.on_memory_collection_stop).grid(row=1, column=1, padx=6, pady=6, sticky="ew")
+        tk.Button(memory, text="Reset Memory", command=self.on_memory_collection_reset).grid(row=1, column=2, padx=6, pady=6, sticky="ew")
+        tk.Button(memory, text="Snapshot Now", command=self.on_memory_snapshot).grid(row=2, column=0, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(memory, text="Open Memory Window", command=self.toggle_memory_window).grid(row=2, column=1, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+
         fusion = tk.LabelFrame(left, text="Phase2 Fusion")
-        fusion.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        fusion.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         fusion.grid_columnconfigure(0, weight=1)
         fusion.grid_columnconfigure(1, weight=1)
         tk.Button(fusion, text="Run Fusion Analyze", command=self.on_run_phase2_fusion).grid(row=0, column=0, padx=6, pady=6, sticky="ew")
@@ -338,7 +357,7 @@ class Panel:
         self.fusion_preview_label = tk.Label(fusion, text="No fusion image yet", anchor="center")
         self.fusion_preview_label.grid(row=5, column=0, columnspan=2, sticky="ew", padx=6, pady=(0, 6))
 
-        move = tk.LabelFrame(left, text="Basic Movement"); move.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        move = tk.LabelFrame(left, text="Basic Movement"); move.grid(row=3, column=0, sticky="ew", pady=(0, 8))
         self.movement_toggle_button = tk.Button(move, text="Enable Basic Movement", command=self.on_toggle_movement, width=24)
         self.movement_toggle_button.grid(row=0, column=0, columnspan=3, pady=(6, 10))
         for label, symbol, row, col in (
@@ -353,7 +372,7 @@ class Panel:
         tk.Button(move, text="Interact Door (E)", command=self.on_door_interact_e, width=18).grid(row=5, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="nsew")
         for col in range(3): move.grid_columnconfigure(col, weight=1)
 
-        seq = tk.LabelFrame(left, text="Sequence Control"); seq.grid(row=3, column=0, sticky="ew", pady=(0, 8)); seq.grid_columnconfigure(1, weight=1)
+        seq = tk.LabelFrame(left, text="Sequence Control"); seq.grid(row=4, column=0, sticky="ew", pady=(0, 8)); seq.grid_columnconfigure(1, weight=1)
         tk.Label(seq, text="Symbols").grid(row=0, column=0, sticky="w", padx=6, pady=6)
         tk.Entry(seq, textvariable=self.sequence_var).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
         tk.Button(seq, text="Execute Sequence", command=self.on_execute_sequence).grid(row=0, column=2, padx=6, pady=6)
@@ -362,7 +381,7 @@ class Panel:
         tk.Button(seq, text="Stop Sequence", command=self.on_stop_sequence).grid(row=1, column=2, padx=6, pady=6)
         tk.Label(seq, text="Use w/s/a/d/r/f/q/e/x. Example: wwwqdd", anchor="w").grid(row=2, column=0, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
 
-        preview = tk.LabelFrame(left, text="Preview Windows"); preview.grid(row=4, column=0, sticky="ew", pady=(0, 8))
+        preview = tk.LabelFrame(left, text="Preview Windows"); preview.grid(row=5, column=0, sticky="ew", pady=(0, 8))
         tk.Button(preview, text="Toggle RGB", command=self.toggle_preview_window, width=16).grid(row=0, column=0, padx=6, pady=6)
         tk.Button(preview, text="Refresh RGB", command=self.refresh_preview_window, width=16).grid(row=0, column=1, padx=6, pady=6)
         tk.Checkbutton(preview, text="Auto RGB", variable=self.auto_rgb_var).grid(row=0, column=2, padx=6, pady=6)
@@ -391,19 +410,41 @@ class Panel:
     def _on_main_canvas_configure(self, event: tk.Event) -> None:
         self.main_canvas.itemconfigure(self.content_window, width=event.width)
 
+    def _resolve_scroll_target(self, event: tk.Event):
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            return None
+        try:
+            toplevel = widget.winfo_toplevel()
+        except Exception:
+            return None
+        if self.memory_window is not None and self.memory_window.winfo_exists() and toplevel == self.memory_window and self.memory_text is not None:
+            return ("memory_text", self.memory_text)
+        if toplevel == self.root:
+            return ("main_canvas", self.main_canvas)
+        return None
+
     def _on_mousewheel(self, event: tk.Event) -> None:
         delta = getattr(event, "delta", 0)
         if delta == 0:
             return
         units = -int(delta / 120) if delta % 120 == 0 else (-1 if delta > 0 else 1)
-        self.main_canvas.yview_scroll(units, "units")
+        target = self._resolve_scroll_target(event)
+        if target is None:
+            return
+        _, widget = target
+        widget.yview_scroll(units, "units")
 
     def _on_mousewheel_linux(self, event: tk.Event) -> None:
         num = getattr(event, "num", None)
+        target = self._resolve_scroll_target(event)
+        if target is None:
+            return
+        _, widget = target
         if num == 4:
-            self.main_canvas.yview_scroll(-1, "units")
+            widget.yview_scroll(-1, "units")
         elif num == 5:
-            self.main_canvas.yview_scroll(1, "units")
+            widget.yview_scroll(1, "units")
 
     def safe(self, func, *args, label: str = "Request", **kwargs):
         try:
@@ -1306,6 +1347,22 @@ class Panel:
             f"last={str(door_control.get('last_requested_label', 'unknown') or 'unknown')} "
             f"time={str(door_control.get('last_control_time', '') or '-')}"
         )
+        memory_collection = state.get("memory_collection", {}) if isinstance(state.get("memory_collection"), dict) else {}
+        episode_id = str(memory_collection.get("episode_id", "") or "")
+        episode_label = str(memory_collection.get("episode_label", "") or "")
+        collection_dir = str(memory_collection.get("collection_dir", "") or "")
+        collection_dir_name = os.path.basename(collection_dir) if collection_dir else "none"
+        self.memory_var.set(
+            "Memory "
+            f"active={int(bool(memory_collection.get('active', False)))} "
+            f"episode={episode_id or 'none'} "
+            f"label={episode_label or '-'} "
+            f"step={int(memory_collection.get('step_index', 0) or 0)} "
+            f"snapshots={int(memory_collection.get('snapshot_count', 0) or 0)} "
+            f"target={str(memory_collection.get('current_target_house_id', '') or 'none')} "
+            f"current={str(memory_collection.get('current_house_id', '') or 'none')} "
+            f"dir={collection_dir_name}"
+        )
         self.capture_var.set(f"Capture last={(state.get('last_capture') or {}).get('capture_id','none')}")
         self.mission_var.set(f"Mission: current={mission.get('current_house_name') or 'none'} target={mission.get('target_house_name') or 'none'}")
         self.current_house_var.set(f"Current house: {mission.get('current_house_name') or 'none'} [{mission.get('current_house_status') or '-'}]")
@@ -1320,6 +1377,74 @@ class Panel:
         self.target_dist_var.set("Target distance: n/a" if dist is None else f"Target distance: {float(dist):.1f} cm")
         if self.movement_toggle_button is not None:
             self.movement_toggle_button.configure(text="Disable Basic Movement" if self.movement_enabled_state else "Enable Basic Movement")
+        if self.memory_window is not None and self.memory_window.winfo_exists() and self.memory_auto_refresh_var.get():
+            self.refresh_memory_window()
+
+    def _format_memory_payload(self, payload: Dict[str, Any]) -> str:
+        memory_collection = payload.get("memory_collection", {}) if isinstance(payload.get("memory_collection"), dict) else {}
+        house_mission = payload.get("house_mission", {}) if isinstance(payload.get("house_mission"), dict) else {}
+        memory_store = payload.get("memory_store", {}) if isinstance(payload.get("memory_store"), dict) else {}
+        target_house_memory = payload.get("target_house_memory", {}) if isinstance(payload.get("target_house_memory"), dict) else {}
+        current_house_memory = payload.get("current_house_memory", {}) if isinstance(payload.get("current_house_memory"), dict) else {}
+
+        lines: List[str] = []
+        lines.append("=== Memory Collection ===")
+        lines.append(f"active: {bool(memory_collection.get('active', False))}")
+        lines.append(f"episode_id: {memory_collection.get('episode_id', '')}")
+        lines.append(f"episode_label: {memory_collection.get('episode_label', '')}")
+        lines.append(f"collection_dir: {memory_collection.get('collection_dir', '')}")
+        lines.append(f"step_index: {int(memory_collection.get('step_index', 0) or 0)}")
+        lines.append(f"snapshot_count: {int(memory_collection.get('snapshot_count', 0) or 0)}")
+        lines.append(f"current_target_house_id: {memory_collection.get('current_target_house_id', '')}")
+        lines.append(f"current_house_id: {memory_collection.get('current_house_id', '')}")
+        lines.append(f"last_snapshot_before_path: {memory_collection.get('last_snapshot_before_path', '')}")
+        lines.append(f"last_snapshot_after_path: {memory_collection.get('last_snapshot_after_path', '')}")
+        lines.append("")
+        lines.append("=== Mission Context ===")
+        lines.append(f"target_house_id: {house_mission.get('target_house_id', '')}")
+        lines.append(f"target_house_name: {house_mission.get('target_house_name', '')}")
+        lines.append(f"current_house_id: {house_mission.get('current_house_id', '')}")
+        lines.append(f"current_house_name: {house_mission.get('current_house_name', '')}")
+        lines.append("")
+        lines.append("=== Target House Memory ===")
+        lines.append(json.dumps(target_house_memory, indent=2, ensure_ascii=False))
+        lines.append("")
+        lines.append("=== Current House Memory ===")
+        lines.append(json.dumps(current_house_memory, indent=2, ensure_ascii=False))
+        lines.append("")
+        lines.append("=== Memory Store Meta ===")
+        lines.append(json.dumps({
+            "memory_store_path": payload.get("memory_store_path", ""),
+            "version": memory_store.get("version", ""),
+            "updated_at": memory_store.get("updated_at", ""),
+            "current_target_house_id": memory_store.get("current_target_house_id", ""),
+            "memory_house_count": len(memory_store.get("memories", {})) if isinstance(memory_store.get("memories"), dict) else 0,
+        }, indent=2, ensure_ascii=False))
+        return "\n".join(lines)
+
+    def refresh_memory_window(self) -> None:
+        if self.memory_refresh_inflight:
+            return
+        if self.memory_window is None or not self.memory_window.winfo_exists() or self.memory_text is None:
+            return
+        def worker():
+            self.memory_refresh_inflight = True
+            try:
+                payload = self.safe(self.client.get_json, "/memory_state", label="Refresh Memory State")
+                if not isinstance(payload, dict):
+                    return
+                text = self._format_memory_payload(payload)
+                def apply_text() -> None:
+                    if self.memory_text is None:
+                        return
+                    self.memory_text.configure(state="normal")
+                    self.memory_text.delete("1.0", "end")
+                    self.memory_text.insert("1.0", text)
+                    self.memory_text.configure(state="disabled")
+                self.root.after(0, apply_text)
+            finally:
+                self.memory_refresh_inflight = False
+        threading.Thread(target=worker, daemon=True).start()
 
     def refresh_state_once(self) -> None:
         if self.state_refresh_inflight: return
@@ -1578,6 +1703,54 @@ class Panel:
             self._apply_response(task_resp)
 
         self.call_async("Setting task", worker)
+    def on_memory_collection_start(self) -> None:
+        self.call_async(
+            "Starting memory collection",
+            lambda: self._apply_response(
+                self.safe(
+                    self.client.post_json,
+                    "/memory_collection_start",
+                    {
+                        "episode_label": self.memory_episode_label_var.get().strip(),
+                        "reset_store": bool(self.memory_reset_on_start_var.get()),
+                    },
+                    label="Start Memory Collection",
+                )
+            ),
+        )
+    def on_memory_collection_stop(self) -> None:
+        self.call_async(
+            "Stopping memory collection",
+            lambda: self._apply_response(
+                self.safe(self.client.post_json, "/memory_collection_stop", {}, label="Stop Memory Collection")
+            ),
+        )
+    def on_memory_collection_reset(self) -> None:
+        self.call_async(
+            "Resetting memory store",
+            lambda: self._apply_response(
+                self.safe(self.client.post_json, "/memory_collection_reset", {}, label="Reset Memory Collection")
+            ),
+        )
+    def on_memory_snapshot(self) -> None:
+        self.call_async(
+            "Saving memory snapshot",
+            lambda: self._apply_response(
+                self.safe(
+                    self.client.post_json,
+                    "/memory_snapshot",
+                    {"snapshot_type": "manual", "note": "Manual snapshot from panel"},
+                    label="Save Memory Snapshot",
+                )
+            ),
+        )
+    def _send_memory_snapshot_quiet(self, snapshot_type: str, note: str) -> None:
+        self.safe(
+            self.client.post_json,
+            "/memory_snapshot",
+            {"snapshot_type": snapshot_type, "note": note},
+            label=f"Memory Snapshot {snapshot_type}",
+        )
     def on_capture(self) -> None: self.call_async("Capturing", lambda: self._apply_response((self.safe(self.client.post_json, "/capture", {"label": self.capture_label_var.get().strip()}, label="Capture") or {}).get("state")))
     def on_capture_phase1_scan(self) -> None:
         long_timeout_s = max(float(self.args.timeout_s), 120.0)
@@ -1708,12 +1881,21 @@ class Panel:
         if self.sequence_thread and self.sequence_thread.is_alive(): self.status_var.set("Sequence already running."); return
         def worker():
             self.sequence_stop_event.clear(); total = len(symbols)
+            sequence_id = f"seq_{int(time.time())}"
+            self._send_memory_snapshot_quiet("sequence_start", f"sequence_id={sequence_id} symbols={''.join(symbols)} delay_s={delay_s:.3f}")
             for i, s in enumerate(symbols, start=1):
-                if self.sequence_stop_event.is_set(): self.root.after(0, lambda i=i, t=total: self.status_var.set(f"Sequence stopped at step {i-1}/{t}.")); return
+                if self.sequence_stop_event.is_set():
+                    self._send_memory_snapshot_quiet("sequence_stop", f"sequence_id={sequence_id} stopped_at={i-1}/{total}")
+                    self.root.after(0, lambda i=i, t=total: self.status_var.set(f"Sequence stopped at step {i-1}/{t}."))
+                    return
                 while self.move_request_inflight and not self.sequence_stop_event.is_set(): time.sleep(0.02)
                 self.root.after(0, lambda i=i, t=total, s=s: self.status_var.set(f"Sequence step {i}/{t}: {s}"))
-                if not self._execute_move(s, from_sequence=True): self.root.after(0, lambda i=i, t=total: self.status_var.set(f"Sequence failed at step {i}/{t}.")); return
+                if not self._execute_move(s, from_sequence=True):
+                    self._send_memory_snapshot_quiet("sequence_failed", f"sequence_id={sequence_id} failed_at={i}/{total}")
+                    self.root.after(0, lambda i=i, t=total: self.status_var.set(f"Sequence failed at step {i}/{t}."))
+                    return
                 time.sleep(delay_s)
+            self._send_memory_snapshot_quiet("sequence_end", f"sequence_id={sequence_id} completed={total}/{total}")
             self.root.after(0, lambda: self.status_var.set(f"Sequence completed: {total}/{total} steps"))
         self.sequence_thread = threading.Thread(target=worker, daemon=True); self.sequence_thread.start()
 
@@ -1728,6 +1910,33 @@ class Panel:
         if self.depth_window and self.depth_window.winfo_exists():
             self.depth_window.destroy(); self.depth_window = None; self.depth_label = None; self.depth_photo = None; return
         self.depth_window = tk.Toplevel(self.root); self.depth_window.title("UAV Depth Preview"); self.depth_label = tk.Label(self.depth_window); self.depth_label.pack(fill="both", expand=True); self.refresh_depth_window()
+
+    def toggle_memory_window(self) -> None:
+        if self.memory_window and self.memory_window.winfo_exists():
+            self._close_memory_window()
+            return
+        self.memory_window = tk.Toplevel(self.root)
+        self.memory_window.title("Memory Collection Inspector")
+        self.memory_window.geometry("980x760")
+        self.memory_window.protocol("WM_DELETE_WINDOW", self._close_memory_window)
+        toolbar = tk.Frame(self.memory_window)
+        toolbar.pack(fill="x", padx=8, pady=(8, 4))
+        tk.Button(toolbar, text="Refresh", command=self.refresh_memory_window).pack(side="left", padx=(0, 6))
+        tk.Button(toolbar, text="Snapshot Now", command=self.on_memory_snapshot).pack(side="left", padx=(0, 6))
+        tk.Checkbutton(toolbar, text="Auto Refresh", variable=self.memory_auto_refresh_var).pack(side="left", padx=(6, 0))
+        self.memory_text = tk.Text(self.memory_window, wrap="none", font=("Consolas", 10))
+        self.memory_text.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.memory_text.configure(state="disabled")
+        self.refresh_memory_window()
+
+    def _close_memory_window(self) -> None:
+        try:
+            if self.memory_window is not None and self.memory_window.winfo_exists():
+                self.memory_window.destroy()
+        except Exception:
+            pass
+        self.memory_window = None
+        self.memory_text = None
 
     def apply_preview_photo(self, photo: ImageTk.PhotoImage, *, rgb: bool) -> None:
         if rgb:
@@ -2273,7 +2482,7 @@ class Panel:
         threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self) -> None:
-        for window in (self.preview_window, self.depth_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
+        for window in (self.preview_window, self.depth_window, self.memory_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
             try:
                 if window is not None: window.destroy()
             except Exception:

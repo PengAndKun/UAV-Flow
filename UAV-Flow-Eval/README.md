@@ -42,3 +42,55 @@ After inference finishes, compute the NDTW metric by running:
 ```bash
 python metric.py
 ```
+
+### 5. Memory-Aware Collection in Basic Controller
+
+The basic control server/panel now supports a lightweight memory-aware collection loop for entry-search data.
+
+Server:
+- `uav_control_server_basic.py`
+- new arguments:
+  - `--memory_collection_root`
+  - `--entry_search_memory_path`
+
+Panel:
+- `uav_control_panel_basic.py`
+- new `Memory Collection` section:
+  - `Start Episode`
+  - `Stop Episode`
+  - `Reset Memory`
+  - `Snapshot Now`
+  - `Open Memory Window`
+
+What gets collected when an episode is active:
+- `episode_id`
+- `step_index`
+- shared `entry_search_memory.json`
+- per-capture:
+  - `*_entry_search_memory_snapshot_before.json`
+  - `*_entry_search_memory_snapshot_after.json`
+
+Additional integration:
+- `Phase1 Scan x12` now records scan-level memory start/end snapshots and uses episode-relative step indices.
+- `Execute Sequence` now saves quiet sequence boundary snapshots:
+  - `sequence_start`
+  - `sequence_end`
+  - `sequence_stop`
+  - `sequence_failed`
+
+The memory snapshots are written alongside capture metadata so later dataset export can recover:
+- the state before capture
+- the state after capture
+- the active target/current house context
+
+Typical usage:
+```bash
+python uav_control_server_basic.py --capture_dir ./captures_remote
+python uav_control_panel_basic.py --host 127.0.0.1 --port 5020
+```
+
+Recommended workflow:
+1. Select target house and task.
+2. Start a memory collection episode from the panel.
+3. Move/capture as usual.
+4. Stop the episode after finishing the sequence.

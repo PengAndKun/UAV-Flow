@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from datetime import datetime
@@ -48,7 +49,15 @@ from lesson4.depth_planar_pipeline import coerce_depth_planar_image, generate_ca
 
 logger = logging.getLogger(__name__)
 EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(EVAL_DIR, ".."))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 DEFAULT_HOUSES_CONFIG = os.path.join(EVAL_DIR, "houses_config.json")
+
+from phase2_multimodal_fusion_analysis import (  # noqa: E402
+    DEFAULT_ENTRY_SEARCH_MEMORY_PATH,
+    EntrySearchMemoryStore,
+)
 
 
 def now_timestamp() -> str:
@@ -122,6 +131,21 @@ class BasicUAVControlBackend:
         self.movement_enabled = bool(args.start_with_basic_movement)
         self.fixed_spawn_pose_path = os.path.abspath(args.fixed_spawn_pose_file) if args.fixed_spawn_pose_file else ""
         self.command_task_yaw_deg = 0.0
+        self.memory_collection_root = os.path.abspath(
+            args.memory_collection_root or os.path.join(args.capture_dir, "memory_collection_sessions")
+        )
+        self.memory_store_path = os.path.abspath(args.entry_search_memory_path or DEFAULT_ENTRY_SEARCH_MEMORY_PATH)
+        self.memory_store = EntrySearchMemoryStore(self.memory_store_path)
+        self.memory_collection_active = False
+        self.memory_collection_episode_id = ""
+        self.memory_collection_episode_label = ""
+        self.memory_collection_started_at = ""
+        self.memory_collection_dir = ""
+        self.memory_collection_step_index = 0
+        self.memory_collection_snapshot_count = 0
+        self.last_memory_snapshot_before_path = ""
+        self.last_memory_snapshot_after_path = ""
+        self.last_memory_snapshot_time = ""
         # --- House registry ---
         self.house_registry = HouseRegistry(args.houses_config)
         try:
@@ -152,6 +176,10 @@ class BasicUAVControlBackend:
         }
 
         os.makedirs(args.capture_dir, exist_ok=True)
+        os.makedirs(self.memory_collection_root, exist_ok=True)
+        self.memory_store.load()
+        self.memory_store.ensure_from_houses_config(self.args.houses_config)
+        self.memory_store.save()
         maybe_override_env_binary(args.env_id, args.env_bin_win)
         validate_env_binary_exists(args.env_id)
         self.env = gym.make(args.env_id)
@@ -670,7 +698,283 @@ class BasicUAVControlBackend:
             "last_control_time": str(self.last_door_control_time or ""),
         }
 
+    def _sync_memory_runtime_context(self) -> Dict[str, Any]:
+        mission = self.get_house_mission_state()
+        target_house_id = str(mission.get("target_house_id", "") or "").strip()
+        current_house_id = str(mission.get("current_house_id", "") or "").strip()
+        self.memory_store.ensure_from_houses_config(self.args.houses_config)
+        if target_house_id:
+            self.memory_store.set_current_target_house(target_house_id)
+        touched_ids: List[str] = []
+        for house_id in (target_house_id, current_house_id):
+            if house_id and house_id not in touched_ids:
+                touched_ids.append(house_id)
+        for house_id in touched_ids:
+            patch = {
+                "target_house_id": target_house_id,
+                "current_house_id": current_house_id,
+            }
+            self.memory_store.update_working_memory(house_id, patch)
+        return mission
+
+    def _record_memory_action(self, action_name: str, *, increment_step: bool = True) -> None:
+        mission = self._sync_memory_runtime_context()
+        target_house_id = str(mission.get("target_house_id", "") or "").strip()
+        current_house_id = str(mission.get("current_house_id", "") or "").strip()
+        touched_ids: List[str] = []
+        for house_id in (target_house_id, current_house_id):
+            if house_id and house_id not in touched_ids:
+                touched_ids.append(house_id)
+        for house_id in touched_ids:
+            self.memory_store.append_recent_action(house_id, action_name)
+        if self.memory_collection_active and increment_step:
+            self.memory_collection_step_index = int(self.memory_collection_step_index) + 1
+        self.memory_store.save()
+
+    def _build_memory_collection_state(self) -> Dict[str, Any]:
+        mission = self.get_house_mission_state()
+        current_target_id = str(self.memory_store.to_dict().get("current_target_house_id", "") or "")
+        return {
+            "active": bool(self.memory_collection_active),
+            "episode_id": str(self.memory_collection_episode_id or ""),
+            "episode_label": str(self.memory_collection_episode_label or ""),
+            "started_at": str(self.memory_collection_started_at or ""),
+            "collection_dir": str(self.memory_collection_dir or ""),
+            "step_index": int(self.memory_collection_step_index),
+            "snapshot_count": int(self.memory_collection_snapshot_count),
+            "memory_store_path": str(self.memory_store_path),
+            "current_target_house_id": current_target_id,
+            "current_house_id": str(mission.get("current_house_id", "") or ""),
+            "last_snapshot_before_path": str(self.last_memory_snapshot_before_path or ""),
+            "last_snapshot_after_path": str(self.last_memory_snapshot_after_path or ""),
+            "last_snapshot_time": str(self.last_memory_snapshot_time or ""),
+        }
+
+    def _reset_memory_store(self) -> None:
+        self.memory_store = EntrySearchMemoryStore(self.memory_store_path)
+        self.memory_store.ensure_from_houses_config(self.args.houses_config)
+        self._sync_memory_runtime_context()
+        self.memory_store.save()
+
+    def _snapshot_payload(
+        self,
+        snapshot_type: str,
+        *,
+        note: str = "",
+        extra: Optional[Dict[str, Any]] = None,
+        step_index: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        mission = self._sync_memory_runtime_context()
+        payload = {
+            "snapshot_type": str(snapshot_type or "manual"),
+            "snapshot_time": now_timestamp(),
+            "episode_id": str(self.memory_collection_episode_id or ""),
+            "episode_label": str(self.memory_collection_episode_label or ""),
+            "step_index": int(self.memory_collection_step_index if step_index is None else step_index),
+            "task_label": str(self.current_task_label or ""),
+            "last_action": str(self.last_action or ""),
+            "pose": self._build_pose_state(),
+            "house_mission": mission,
+            "memory": self.memory_store.to_dict(),
+            "note": str(note or ""),
+        }
+        if isinstance(extra, dict) and extra:
+            payload["extra"] = extra
+        return payload
+
+    def _save_memory_snapshot_file(
+        self,
+        output_path: str,
+        snapshot_type: str,
+        *,
+        note: str = "",
+        extra: Optional[Dict[str, Any]] = None,
+        step_index: Optional[int] = None,
+    ) -> str:
+        payload = self._snapshot_payload(snapshot_type, note=note, extra=extra, step_index=step_index)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        self.last_memory_snapshot_time = str(payload.get("snapshot_time", "") or "")
+        self.memory_collection_snapshot_count = int(self.memory_collection_snapshot_count) + 1
+        return output_path
+
+    def start_memory_collection(self, *, episode_label: str = "", reset_store: bool = True) -> Dict[str, Any]:
+        with self.lock:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            label_suffix = f"_{str(episode_label).strip()}" if str(episode_label or "").strip() else ""
+            episode_id = f"memory_episode_{timestamp}{label_suffix}"
+            collection_dir = os.path.join(self.memory_collection_root, episode_id)
+            os.makedirs(collection_dir, exist_ok=True)
+            self.memory_collection_active = True
+            self.memory_collection_episode_id = episode_id
+            self.memory_collection_episode_label = str(episode_label or "").strip()
+            self.memory_collection_started_at = now_timestamp()
+            self.memory_collection_dir = collection_dir
+            self.memory_collection_step_index = 0
+            self.memory_collection_snapshot_count = 0
+            self.last_memory_snapshot_before_path = ""
+            self.last_memory_snapshot_after_path = ""
+            self.last_memory_snapshot_time = ""
+            if reset_store:
+                self._reset_memory_store()
+            start_snapshot_path = os.path.join(collection_dir, "entry_search_memory_snapshot_start.json")
+            self.last_memory_snapshot_before_path = self._save_memory_snapshot_file(
+                start_snapshot_path,
+                "episode_start",
+                note="Memory collection started.",
+            )
+            logger.info(
+                "Memory collection started episode=%s dir=%s reset_store=%s",
+                episode_id,
+                collection_dir,
+                reset_store,
+            )
+            return self.get_state(message=f"Memory collection started: {episode_id}")
+
+    def stop_memory_collection(self) -> Dict[str, Any]:
+        with self.lock:
+            if self.memory_collection_active and self.memory_collection_dir:
+                stop_snapshot_path = os.path.join(self.memory_collection_dir, "entry_search_memory_snapshot_stop.json")
+                self.last_memory_snapshot_after_path = self._save_memory_snapshot_file(
+                    stop_snapshot_path,
+                    "episode_stop",
+                    note="Memory collection stopped.",
+                )
+            episode_id = self.memory_collection_episode_id
+            self.memory_collection_active = False
+            self.memory_collection_episode_label = self.memory_collection_episode_label
+            logger.info("Memory collection stopped episode=%s", episode_id)
+            return self.get_state(message=f"Memory collection stopped: {episode_id or 'none'}")
+
+    def reset_memory_collection(self) -> Dict[str, Any]:
+        with self.lock:
+            self._reset_memory_store()
+            self.memory_collection_step_index = 0
+            self.memory_collection_snapshot_count = 0
+            self.last_memory_snapshot_before_path = ""
+            self.last_memory_snapshot_after_path = ""
+            self.last_memory_snapshot_time = ""
+            logger.info("Memory store reset path=%s", self.memory_store_path)
+            return self.get_state(message="Memory store reset.")
+
+    def save_memory_snapshot(self, *, note: str = "", snapshot_type: str = "manual") -> Dict[str, Any]:
+        with self.lock:
+            if self.memory_collection_active and self.memory_collection_dir:
+                snapshot_dir = self.memory_collection_dir
+            else:
+                snapshot_dir = self.memory_collection_root
+            snapshot_name = f"entry_search_memory_snapshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            snapshot_path = os.path.join(snapshot_dir, snapshot_name)
+            self.last_memory_snapshot_after_path = self._save_memory_snapshot_file(
+                snapshot_path,
+                snapshot_type,
+                note=note,
+            )
+            logger.info("Memory snapshot saved type=%s path=%s", snapshot_type, snapshot_path)
+            return self.get_state(message=f"Memory snapshot saved: {snapshot_name}")
+
+    def get_memory_state(self) -> Dict[str, Any]:
+        with self.lock:
+            mission = self._sync_memory_runtime_context()
+            target_house_id = str(mission.get("target_house_id", "") or "").strip()
+            current_house_id = str(mission.get("current_house_id", "") or "").strip()
+            return {
+                "status": "ok",
+                "memory_collection": self._build_memory_collection_state(),
+                "house_mission": mission,
+                "memory_store_path": str(self.memory_store_path),
+                "memory_store": self.memory_store.to_dict(),
+                "target_house_memory": self.memory_store.get_house_memory(target_house_id) if target_house_id else None,
+                "current_house_memory": self.memory_store.get_house_memory(current_house_id) if current_house_id else None,
+            }
+
+    def _capture_memory_artifacts(
+        self,
+        *,
+        snapshot_dir: str,
+        snapshot_prefix: str,
+        capture_id: str,
+        capture_time: str,
+        rgb_path: str,
+        depth_path: Optional[str],
+        depth_preview_path: Optional[str],
+        bundle_path: str,
+        step_index: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        effective_step_index = int(self.memory_collection_step_index if step_index is None else step_index)
+        if self.memory_collection_active and step_index is not None:
+            self.memory_collection_step_index = max(int(self.memory_collection_step_index), int(step_index))
+        result: Dict[str, Any] = {
+            "memory_collection_active": bool(self.memory_collection_active),
+            "memory_store_path": str(self.memory_store_path),
+            "memory_episode_id": str(self.memory_collection_episode_id or ""),
+            "memory_episode_label": str(self.memory_collection_episode_label or ""),
+            "memory_step_index": effective_step_index,
+            "memory_snapshot_before_path": None,
+            "memory_snapshot_after_path": None,
+        }
+        if not self.memory_collection_active:
+            return result
+        before_path = os.path.join(snapshot_dir, f"{snapshot_prefix}_entry_search_memory_snapshot_before.json")
+        after_path = os.path.join(snapshot_dir, f"{snapshot_prefix}_entry_search_memory_snapshot_after.json")
+        extra = {
+            "capture_id": capture_id,
+            "capture_time": capture_time,
+            "bundle_path": bundle_path,
+            "rgb_image_path": rgb_path,
+            "depth_image_path": depth_path,
+            "depth_preview_path": depth_preview_path,
+        }
+        self.last_memory_snapshot_before_path = self._save_memory_snapshot_file(
+            before_path,
+            "before_capture",
+            note="Snapshot before saving capture bundle.",
+            extra=extra,
+            step_index=effective_step_index,
+        )
+        mission = self.get_house_mission_state()
+        target_house_id = str(mission.get("target_house_id", "") or "").strip()
+        current_house_id = str(mission.get("current_house_id", "") or "").strip()
+        episodic_snapshot = {
+            "snapshot_id": f"{capture_id}_after",
+            "episode_id": str(self.memory_collection_episode_id or ""),
+            "step_index": effective_step_index,
+            "capture_id": capture_id,
+            "capture_time": capture_time,
+            "task_label": str(self.current_task_label or ""),
+            "last_action": str(self.last_action or ""),
+            "pose": self._build_pose_state(),
+            "rgb_image_path": rgb_path,
+            "depth_image_path": depth_path,
+            "depth_preview_path": depth_preview_path,
+            "bundle_path": bundle_path,
+            "current_house_id": current_house_id,
+            "target_house_id": target_house_id,
+        }
+        touched_ids: List[str] = []
+        for house_id in (target_house_id, current_house_id):
+            if house_id and house_id not in touched_ids:
+                touched_ids.append(house_id)
+        for house_id in touched_ids:
+            self.memory_store.append_episodic_snapshot(house_id, episodic_snapshot)
+        self.memory_store.save()
+        self.last_memory_snapshot_after_path = self._save_memory_snapshot_file(
+            after_path,
+            "after_capture",
+            note="Snapshot after saving capture bundle and episodic update.",
+            extra=extra,
+            step_index=effective_step_index,
+        )
+        result["memory_snapshot_before_path"] = self.last_memory_snapshot_before_path
+        result["memory_snapshot_after_path"] = self.last_memory_snapshot_after_path
+        return result
+
     def get_state(self, *, status: str = "ok", message: str = "") -> Dict[str, Any]:
+        try:
+            self._sync_memory_runtime_context()
+        except Exception:
+            logger.exception("Failed to sync memory runtime context while building state")
         return {
             "status": status,
             "message": message,
@@ -690,6 +994,7 @@ class BasicUAVControlBackend:
             "house_mission": self.get_house_mission_state(),
             "overhead_map": dict(self.last_overhead_info),
             "door_control": self._build_door_control_state(),
+            "memory_collection": self._build_memory_collection_state(),
         }
 
     # ------------------------------------------------------------------
@@ -747,6 +1052,9 @@ class BasicUAVControlBackend:
         if not ok:
             return {"status": "error", "message": f"House '{house_id}' not found."}
         self.house_registry.save_to_file(self.args.houses_config)
+        self.memory_store.ensure_from_houses_config(self.args.houses_config)
+        self.memory_store.set_current_target_house(house_id)
+        self.memory_store.save()
         house = self.house_registry.get_house(house_id)
         return {
             "status": "ok",
@@ -777,6 +1085,10 @@ class BasicUAVControlBackend:
         if not ok:
             return {"status": "error", "message": f"House '{house_id}' not found."}
         self.house_registry.save_to_file(self.args.houses_config)
+        memory = self.memory_store.get_house_memory(house_id, ensure=True)
+        if isinstance(memory, dict):
+            memory["house_status"] = "PERSON_FOUND" if person_found else "EXPLORED"
+        self.memory_store.save()
         return {
             "status": "ok",
             "message": f"House '{house_id}' marked {'PERSON_FOUND' if person_found else 'EXPLORED'}.",
@@ -925,6 +1237,7 @@ class BasicUAVControlBackend:
             )
             if not ok:
                 return self.get_state(status="error", message=f"Door interact(E) failed: {response}")
+            self._record_memory_action("door_interact_e")
             return self.get_state(message=f"Door interact(E) sent to window '{window_title}'")
 
     def move_relative(
@@ -977,11 +1290,14 @@ class BasicUAVControlBackend:
                 float(actual_task_yaw_after),
                 float(actual_uav_yaw_after),
             )
+            self._record_memory_action(self.last_action)
             return self.get_state(message=f"Executed {self.last_action}.")
 
     def set_task_label(self, task_label: str) -> Dict[str, Any]:
         with self.lock:
             self.current_task_label = str(task_label or "").strip()
+            self._sync_memory_runtime_context()
+            self.memory_store.save()
             return self.get_state(message="Task label updated.")
 
     def set_manual_pose(self, pose_payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1005,6 +1321,7 @@ class BasicUAVControlBackend:
                 float(self.get_task_pose()[3]),
                 float(self.get_task_pose()[3]),
             )
+            self._record_memory_action("set_pose")
             return self.get_state(message="Manual pose applied.")
 
     def get_frame_jpeg(self) -> bytes:
@@ -1097,6 +1414,16 @@ class BasicUAVControlBackend:
             camera_info = self.get_camera_info()
             with open(camera_info_path, "w", encoding="utf-8") as f:
                 json.dump(camera_info, f, indent=2)
+            memory_meta = self._capture_memory_artifacts(
+                snapshot_dir=self.args.capture_dir,
+                snapshot_prefix=capture_id,
+                capture_id=capture_id,
+                capture_time=timestamp,
+                rgb_path=rgb_path,
+                depth_path=depth_path if self.last_depth_frame is not None else None,
+                depth_preview_path=depth_preview_path if self.last_depth_frame is not None else None,
+                bundle_path=bundle_path,
+            )
             bundle = {
                 "capture_id": capture_id,
                 "capture_time": timestamp,
@@ -1112,6 +1439,7 @@ class BasicUAVControlBackend:
                 "depth_preview_path": depth_preview_path if self.last_depth_frame is not None else None,
                 "camera_info_path": camera_info_path,
                 "bundle_path": bundle_path,
+                **memory_meta,
             }
             with open(bundle_path, "w", encoding="utf-8") as f:
                 json.dump(bundle, f, indent=2)
@@ -1157,6 +1485,17 @@ class BasicUAVControlBackend:
         camera_info = self.get_camera_info()
         with open(camera_info_path, "w", encoding="utf-8") as f:
             json.dump(camera_info, f, indent=2)
+        memory_meta = self._capture_memory_artifacts(
+            snapshot_dir=meta_dir,
+            snapshot_prefix=step_suffix,
+            capture_id=capture_id,
+            capture_time=capture_time,
+            rgb_path=rgb_path,
+            depth_path=depth_path if self.last_depth_frame is not None else None,
+            depth_preview_path=depth_preview_path if self.last_depth_frame is not None else None,
+            bundle_path=bundle_path,
+            step_index=step_index,
+        )
         bundle = {
             "capture_id": capture_id,
             "capture_time": capture_time,
@@ -1173,6 +1512,7 @@ class BasicUAVControlBackend:
             "depth_preview_path": depth_preview_path if self.last_depth_frame is not None else None,
             "camera_info_path": camera_info_path,
             "bundle_path": bundle_path,
+            **memory_meta,
         }
         with open(bundle_path, "w", encoding="utf-8") as f:
             json.dump(bundle, f, indent=2)
@@ -1194,11 +1534,23 @@ class BasicUAVControlBackend:
             scan_id = f"phase1_spin_scan_{timestamp}{label_suffix}"
             scan_dir = os.path.join(scan_root, scan_id)
             os.makedirs(scan_dir, exist_ok=True)
+            base_step_index = int(self.memory_collection_step_index)
 
             start_pose = self.get_task_pose()
             start_yaw = float(start_pose[3])
             step_angle_deg = 360.0 / float(steps)
             captures: List[Dict[str, Any]] = []
+            memory_snapshot_start_path = ""
+            memory_snapshot_end_path = ""
+
+            if self.memory_collection_active:
+                memory_snapshot_start_path = self._save_memory_snapshot_file(
+                    os.path.join(scan_dir, "phase1_scan_memory_snapshot_start.json"),
+                    "phase1_scan_start",
+                    note="Phase1 spin scan started.",
+                    extra={"scan_id": scan_id, "num_steps": steps},
+                    step_index=base_step_index,
+                )
 
             logger.info(
                 "Phase1 spin scan started id=%s steps=%d start_pose=(%.1f, %.1f, %.1f, %.1f)",
@@ -1220,11 +1572,12 @@ class BasicUAVControlBackend:
                 self.refresh_observations()
                 capture_time = datetime.now().isoformat(timespec="milliseconds")
                 capture_id = f"{scan_id}_step_{step_index:02d}"
+                global_step_index = base_step_index + step_index
                 bundle = self._save_capture_bundle_to_directory(
                     scan_dir,
                     capture_id=capture_id,
                     capture_time=capture_time,
-                    step_index=step_index,
+                    step_index=global_step_index,
                 )
                 captures.append(bundle)
 
@@ -1233,6 +1586,16 @@ class BasicUAVControlBackend:
             self.set_task_yaw_absolute(start_yaw, tolerance_deg=1.0, attempts=8)
             self.refresh_observations()
             self.last_action = "phase1_spin_scan"
+            self.memory_collection_step_index = base_step_index + steps
+            self._record_memory_action("phase1_spin_scan", increment_step=False)
+            if self.memory_collection_active:
+                memory_snapshot_end_path = self._save_memory_snapshot_file(
+                    os.path.join(scan_dir, "phase1_scan_memory_snapshot_end.json"),
+                    "phase1_scan_end",
+                    note="Phase1 spin scan completed.",
+                    extra={"scan_id": scan_id, "num_steps": steps},
+                    step_index=self.memory_collection_step_index,
+                )
 
             manifest = {
                 "scan_id": scan_id,
@@ -1249,6 +1612,12 @@ class BasicUAVControlBackend:
                     "yaw": start_yaw,
                 },
                 "end_pose": self._build_pose_state(),
+                "memory_collection_active": bool(self.memory_collection_active),
+                "memory_episode_id": str(self.memory_collection_episode_id or ""),
+                "memory_step_index_start": base_step_index,
+                "memory_step_index_end": int(self.memory_collection_step_index),
+                "memory_snapshot_start_path": memory_snapshot_start_path or None,
+                "memory_snapshot_end_path": memory_snapshot_end_path or None,
                 "captures": captures,
             }
             manifest_path = os.path.join(scan_dir, "phase1_scan_manifest.json")
@@ -1334,6 +1703,8 @@ def make_handler(backend: BasicUAVControlBackend):
                     self._send_json({"status": "ok"})
                 elif parsed.path == "/state":
                     self._send_json(backend.get_state())
+                elif parsed.path == "/memory_state":
+                    self._send_json(backend.get_memory_state())
                 elif parsed.path == "/house_registry":
                     self._send_json(backend.get_house_registry())
                 elif parsed.path == "/house_mission":
@@ -1380,6 +1751,24 @@ def make_handler(backend: BasicUAVControlBackend):
                             label=data.get("label"),
                             num_steps=int(data.get("num_steps", 12)),
                             settle_time_s=float(data.get("settle_time_s", 0.20)),
+                        )
+                    )
+                elif parsed.path == "/memory_collection_start":
+                    self._send_json(
+                        backend.start_memory_collection(
+                            episode_label=str(data.get("episode_label", "") or ""),
+                            reset_store=bool(data.get("reset_store", True)),
+                        )
+                    )
+                elif parsed.path == "/memory_collection_stop":
+                    self._send_json(backend.stop_memory_collection())
+                elif parsed.path == "/memory_collection_reset":
+                    self._send_json(backend.reset_memory_collection())
+                elif parsed.path == "/memory_snapshot":
+                    self._send_json(
+                        backend.save_memory_snapshot(
+                            note=str(data.get("note", "") or ""),
+                            snapshot_type=str(data.get("snapshot_type", "manual") or "manual"),
                         )
                     )
                 elif parsed.path == "/task":
@@ -1500,6 +1889,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview_yaw", type=float, default=0.0)
     parser.add_argument("--default_task_label", default="")
     parser.add_argument("--capture_dir", default="./captures_remote")
+    parser.add_argument("--memory_collection_root", default="",
+                        help="Optional directory for memory collection sessions. Defaults to <capture_dir>/memory_collection_sessions.")
+    parser.add_argument("--entry_search_memory_path", default=DEFAULT_ENTRY_SEARCH_MEMORY_PATH,
+                        help="Path to the shared entry_search_memory.json file used during collection.")
     parser.add_argument("--task_json", default=None)
     parser.add_argument("--spawn_x", type=float, default=None)
     parser.add_argument("--spawn_y", type=float, default=None)
