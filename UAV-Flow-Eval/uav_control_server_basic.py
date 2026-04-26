@@ -969,31 +969,19 @@ class BasicUAVControlBackend:
                 state=state if isinstance(state, dict) else {},
             )
 
-            sample_metadata = {
-                "episode_id": str(self.memory_collection_episode_id or ""),
-                "episode_label": str(self.memory_collection_episode_label or ""),
-                "step_index": step_index,
-                "capture_source": safe_source,
-                "requested_label": str(label or ""),
-                "note": step_note,
-                "collection_dir": str(self.memory_collection_dir or ""),
-                "capture_root": str(capture_root),
-                "capture_run_dir": str(run_dir),
-                "memory_store_path": str(self.memory_store_path),
-            }
-            temporal_context = {
-                "episode_id": str(self.memory_collection_episode_id or ""),
-                "step_index": step_index,
-                "previous_action": str(self.last_action or ""),
-                "capture_source": safe_source,
-                "capture_time": now_timestamp(),
-            }
-            with open(os.path.join(labeling_dir, "sample_metadata.json"), "w", encoding="utf-8") as fh:
-                json.dump(sample_metadata, fh, indent=2, ensure_ascii=False)
-            with open(os.path.join(labeling_dir, "temporal_context.json"), "w", encoding="utf-8") as fh:
-                json.dump(temporal_context, fh, indent=2, ensure_ascii=False)
-
+            # Reload the shared memory store after fusion so the "after" snapshot
+            # reflects the same updated memory that fusion_result.json embeds.
+            self.memory_store.load()
             self._sync_memory_runtime_context()
+            self.memory_store.save()
+
+            mission_after = self.get_house_mission_state()
+            fusion_payload = result.get("fusion", {}) if isinstance(result.get("fusion"), dict) else {}
+            target_context = (
+                fusion_payload.get("target_context", {})
+                if isinstance(fusion_payload.get("target_context"), dict)
+                else {}
+            )
             after_snapshot_path = os.path.join(labeling_dir, "entry_search_memory_snapshot_after.json")
             self.last_memory_snapshot_after_path = self._save_memory_snapshot_file(
                 after_snapshot_path,
@@ -1002,6 +990,53 @@ class BasicUAVControlBackend:
                 extra=extra,
                 step_index=step_index,
             )
+
+            target_house_id = str(
+                mission_after.get("target_house_id")
+                or target_context.get("target_house_id")
+                or ""
+            ).strip()
+            current_house_id = str(
+                mission_after.get("current_house_id")
+                or target_context.get("current_house_id")
+                or ""
+            ).strip()
+            sample_metadata = {
+                "episode_id": str(self.memory_collection_episode_id or ""),
+                "memory_episode_id": str(self.memory_collection_episode_id or ""),
+                "episode_label": str(self.memory_collection_episode_label or ""),
+                "step_index": step_index,
+                "memory_step_index": step_index,
+                "capture_source": safe_source,
+                "capture_label": str(label or ""),
+                "requested_label": str(label or ""),
+                "note": step_note,
+                "collection_dir": str(self.memory_collection_dir or ""),
+                "capture_root": str(capture_root),
+                "capture_run_dir": str(run_dir),
+                "labeling_dir": str(labeling_dir),
+                "memory_store_path": str(self.memory_store_path),
+                "memory_snapshot_before_path": str(self.last_memory_snapshot_before_path or ""),
+                "memory_snapshot_after_path": str(self.last_memory_snapshot_after_path or ""),
+                "target_house_id": target_house_id,
+                "current_house_id": current_house_id,
+            }
+            temporal_context = {
+                "episode_id": str(self.memory_collection_episode_id or ""),
+                "step_index": step_index,
+                "previous_action": str(self.last_action or ""),
+                "capture_source": safe_source,
+                "capture_time": now_timestamp(),
+                "current_target_house_id": target_house_id,
+                "current_house_id": current_house_id,
+                "memory_snapshot_before_path": str(self.last_memory_snapshot_before_path or ""),
+                "memory_snapshot_after_path": str(self.last_memory_snapshot_after_path or ""),
+                "memory_store_path": str(self.memory_store_path),
+            }
+            with open(os.path.join(labeling_dir, "sample_metadata.json"), "w", encoding="utf-8") as fh:
+                json.dump(sample_metadata, fh, indent=2, ensure_ascii=False)
+            with open(os.path.join(labeling_dir, "temporal_context.json"), "w", encoding="utf-8") as fh:
+                json.dump(temporal_context, fh, indent=2, ensure_ascii=False)
 
             self.last_memory_capture_run_dir = str(run_dir)
             self.last_memory_capture_label = str(label or "")

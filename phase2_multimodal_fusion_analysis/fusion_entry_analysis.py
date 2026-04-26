@@ -125,6 +125,90 @@ def detection_center_x_norm(detection: Dict[str, Any], image_width: int) -> Opti
     return clamp(((float(det_box[0]) + float(det_box[2])) * 0.5) / float(image_width), 0.0, 1.0)
 
 
+def bbox_from_xyxy(xyxy: Any) -> Dict[str, Any]:
+    if not isinstance(xyxy, list) or len(xyxy) != 4:
+        return {}
+    x1, y1, x2, y2 = [float(value) for value in xyxy]
+    return {
+        "x": x1,
+        "y": y1,
+        "width": max(0.0, x2 - x1),
+        "height": max(0.0, y2 - y1),
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+    }
+
+
+def build_observation_frame_id(state: Optional[Dict[str, Any]], observation_id: str) -> str:
+    if str(observation_id or "").strip():
+        return str(observation_id).strip()
+    state = state if isinstance(state, dict) else {}
+    for key in ("frame_id", "capture_id", "image_id"):
+        value = str(state.get(key) or "").strip()
+        if value:
+            return value
+    memory_collection = state.get("memory_collection", {}) if isinstance(state.get("memory_collection"), dict) else {}
+    for value in (
+        state.get("memory_step_index"),
+        state.get("step_index"),
+        memory_collection.get("step_index"),
+    ):
+        try:
+            return f"frame_{int(value):06d}"
+        except Exception:
+            text = str(value or "").strip()
+            if text:
+                return text
+    return f"frame_{int(datetime.now().timestamp() * 1000)}"
+
+
+def build_bbox_history_payload(
+    candidate: Dict[str, Any],
+    *,
+    frame_id: str,
+    observation_time: str,
+) -> Dict[str, Any]:
+    xyxy = candidate.get("xyxy", []) if isinstance(candidate.get("xyxy"), list) else []
+    bbox = (
+        candidate.get("bbox", {})
+        if isinstance(candidate.get("bbox"), dict) and candidate.get("bbox")
+        else bbox_from_xyxy(xyxy)
+    )
+    return {
+        "frame_id": str(frame_id or ""),
+        "time": str(observation_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        "class_name": str(candidate.get("class_name") or ""),
+        "confidence": float(candidate.get("confidence", 0.0) or 0.0),
+        "bbox": copy.deepcopy(bbox),
+        "xyxy": [float(value) for value in xyxy] if len(xyxy) == 4 else [],
+        "center_x_norm": candidate.get("center_x_norm"),
+        "entry_distance_cm": candidate.get("entry_distance_cm"),
+        "opening_width_cm": candidate.get("opening_width_cm"),
+        "candidate_total_score": float(candidate.get("candidate_total_score", 0.0) or 0.0),
+        "target_match_score": float(candidate.get("candidate_target_match_score", 0.0) or 0.0),
+    }
+
+
+def build_association_evidence(candidate: Dict[str, Any]) -> Dict[str, float]:
+    components = (
+        candidate.get("candidate_target_score_components", {})
+        if isinstance(candidate.get("candidate_target_score_components"), dict)
+        else {}
+    )
+    bearing_score = float(components.get("bearing_score", 0.0) or 0.0)
+    image_side_score = float(components.get("image_side_score", 0.0) or 0.0)
+    return {
+        "distance_score": float(components.get("range_score", 0.0) or 0.0),
+        "view_consistency_score": float(0.5 * bearing_score + 0.5 * image_side_score),
+        "appearance_score": float(candidate.get("candidate_semantic_score", 0.0) or 0.0),
+        "language_score": 0.0,
+        "geometry_score": float(candidate.get("candidate_geometry_score", 0.0) or 0.0),
+        "memory_similarity_score": float(candidate.get("memory_best_similarity", 0.0) or 0.0),
+    }
+
+
 def house_lookup_from_config(houses_config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
     houses = houses_config.get("houses", []) if isinstance(houses_config, dict) else []
     lookup: Dict[str, Dict[str, Any]] = {}
@@ -321,6 +405,8 @@ def update_entry_search_memory_from_fusion(
     *,
     houses_config: Dict[str, Any],
     fusion_result: Dict[str, Any],
+    state: Optional[Dict[str, Any]] = None,
+    yolo_result: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     store = EntrySearchMemoryStore()
     store.load()
@@ -347,9 +433,28 @@ def update_entry_search_memory_from_fusion(
         house_name=str(house_meta.get("name", "") or target_house_id),
         house_status=str(house_meta.get("status", "UNSEARCHED") or "UNSEARCHED"),
     )
+    house_mission = state.get("house_mission", {}) if isinstance(state, dict) and isinstance(state.get("house_mission"), dict) else {}
+    pose = state.get("pose", {}) if isinstance(state, dict) and isinstance(state.get("pose"), dict) else {}
+    current_house_id = str(
+        house_mission.get("current_house_id")
+        or target_context.get("current_house_id")
+        or ""
+    ).strip()
+    observation_id = str(state.get("observation_id") or "") if isinstance(state, dict) else ""
+    observation_time = str(state.get("observation_time") or "") if isinstance(state, dict) else ""
+    frame_id = build_observation_frame_id(state, observation_id)
+    last_action = str(state.get("last_action") or "") if isinstance(state, dict) else ""
+    store.update_working_memory(
+        target_house_id,
+        {
+            "target_house_id": target_house_id,
+            "current_house_id": current_house_id,
+        },
+    )
 
     target_conditioned_state = str(fusion_result.get("target_conditioned_state", "") or "")
     target_conditioned_subgoal = str(fusion_result.get("target_conditioned_subgoal", "") or "")
+    target_conditioned_action = str(fusion_result.get("target_conditioned_action_hint", "") or "")
     sector_id = infer_target_sector_id(target_context)
     entry_search_status = infer_entry_search_status(
         target_house_id=target_house_id,
@@ -357,6 +462,96 @@ def update_entry_search_memory_from_fusion(
         target_conditioned_subgoal=target_conditioned_subgoal,
     )
     store.set_entry_search_status(target_house_id, entry_search_status)
+    store.append_recent_target_decision(
+        target_house_id,
+        {
+            "target_conditioned_state": target_conditioned_state,
+            "target_conditioned_subgoal": target_conditioned_subgoal,
+            "target_conditioned_action_hint": target_conditioned_action,
+            "target_reason": str(fusion_result.get("target_conditioned_reason") or ""),
+            "timestamp": observation_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
+    if last_action:
+        store.append_recent_action(target_house_id, last_action)
+
+    detections = yolo_result.get("detections", []) if isinstance(yolo_result, dict) and isinstance(yolo_result.get("detections"), list) else []
+    if detections:
+        perception_candidates: List[Dict[str, Any]] = []
+        for rank, detection in enumerate(detections[:3]):
+            if not isinstance(detection, dict):
+                continue
+            det_xyxy = detection.get("xyxy", []) if isinstance(detection.get("xyxy"), list) else []
+            bbox_payload: Dict[str, Any] = {}
+            if len(det_xyxy) == 4:
+                bbox_payload = {
+                    "x1": float(det_xyxy[0]),
+                    "y1": float(det_xyxy[1]),
+                    "x2": float(det_xyxy[2]),
+                    "y2": float(det_xyxy[3]),
+                    "width": float(det_xyxy[2]) - float(det_xyxy[0]),
+                    "height": float(det_xyxy[3]) - float(det_xyxy[1]),
+                }
+            perception_candidates.append(
+                {
+                    "candidate_id": str(detection.get("candidate_id") or rank),
+                    "class_name": str(detection.get("class_name") or ""),
+                    "confidence": float(detection.get("confidence", 0.0) or 0.0),
+                    "bbox": bbox_payload,
+                    "xyxy": [float(v) for v in det_xyxy] if len(det_xyxy) == 4 else [],
+                }
+            )
+        store.append_perception_frame(
+            target_house_id,
+            {
+                "frame_id": observation_id or f"obs_{int(datetime.now().timestamp())}",
+                "source_frame_id": frame_id,
+                "time": observation_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "pose": {
+                    "x": float(pose.get("x", 0.0) or 0.0),
+                    "y": float(pose.get("y", 0.0) or 0.0),
+                    "z": float(pose.get("z", 0.0) or 0.0),
+                    "yaw": float(pose.get("task_yaw", 0.0) or 0.0),
+                },
+                "detections": perception_candidates,
+                "target_house_id": target_house_id,
+                "current_house_id": current_house_id,
+            },
+        )
+
+    candidate_target_scores = fusion_result.get("candidate_target_scores", [])
+    if isinstance(candidate_target_scores, list) and candidate_target_scores:
+        top_candidates: List[Dict[str, Any]] = []
+        for item in candidate_target_scores[:3]:
+            if not isinstance(item, dict):
+                continue
+            item_xyxy = item.get("xyxy", []) if isinstance(item.get("xyxy"), list) else []
+            bbox_payload: Dict[str, Any] = {}
+            if len(item_xyxy) == 4:
+                bbox_payload = {
+                    "x1": float(item_xyxy[0]),
+                    "y1": float(item_xyxy[1]),
+                    "x2": float(item_xyxy[2]),
+                    "y2": float(item_xyxy[3]),
+                    "width": float(item_xyxy[2]) - float(item_xyxy[0]),
+                    "height": float(item_xyxy[3]) - float(item_xyxy[1]),
+                }
+            top_candidates.append(
+                {
+                    "candidate_id": str(item.get("candidate_id", "") or ""),
+                    "class_name": str(item.get("class_name", "") or ""),
+                    "confidence": float(item.get("confidence", 0.0) or 0.0),
+                    "bbox": bbox_payload,
+                    "target_match_score": float(item.get("candidate_target_match_score", 0.0) or 0.0),
+                    "association_confidence": float(item.get("candidate_total_score", 0.0) or 0.0),
+                    "center_x_norm": item.get("center_x_norm"),
+                    "entry_distance_cm": float(item.get("entry_distance_cm", 0.0) or 0.0),
+                    "sector": sector_id,
+                    "is_target_house_entry": bool(item.get("candidate_is_target_house_entry", False)),
+                }
+            )
+        if top_candidates:
+            store.set_top_candidates(target_house_id, top_candidates)
 
     if bool(target_context.get("target_house_in_fov", False)):
         store.update_sector(
@@ -373,24 +568,57 @@ def update_entry_search_memory_from_fusion(
     candidate_id = ""
     if candidate_id_value is not None:
         candidate_id = str(candidate_id_value).strip()
+    planner_patch: Dict[str, Any] = {
+        "target_house_id": target_house_id,
+        "current_house_id": current_house_id,
+        "current_best_entry_id": candidate_id,
+        "decision_hint": target_conditioned_subgoal,
+    }
     if candidate_id:
         memory = store.get_house_memory(target_house_id, ensure=True) or {}
         existing_attempt_count = 0
         semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
         existing_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
         for entry in existing_entries:
-            if isinstance(entry, dict) and str(entry.get("candidate_id", "") or "") == candidate_id:
+            if isinstance(entry, dict) and str(entry.get("entry_id") or entry.get("candidate_id") or "") == candidate_id:
                 try:
                     existing_attempt_count = int(entry.get("attempt_count", 0) or 0)
                 except Exception:
                     existing_attempt_count = 0
                 break
+        house_center_x = float(house_meta.get("center_x", 0.0) or 0.0)
+        house_center_y = float(house_meta.get("center_y", 0.0) or 0.0)
+        association_evidence = build_association_evidence(best_target_candidate)
         store.upsert_candidate_entry(
             target_house_id,
             {
+                "entry_id": candidate_id,
                 "candidate_id": candidate_id,
+                "entry_type": best_target_candidate.get("class_name"),
                 "semantic_class": best_target_candidate.get("class_name"),
+                "source_frames": [frame_id] if frame_id else [],
+                "bbox_history": [
+                    build_bbox_history_payload(
+                        best_target_candidate,
+                        frame_id=frame_id,
+                        observation_time=observation_time,
+                    )
+                ],
                 "target_match_score": float(best_target_candidate.get("candidate_target_match_score", 0.0) or 0.0),
+                "association_confidence": float(best_target_candidate.get("candidate_total_score", 0.0) or best_target_candidate.get("candidate_target_match_score", 0.0) or 0.0),
+                "association_evidence": association_evidence,
+                "associated_house_id": target_house_id,
+                "world_position": {
+                    "x": house_center_x,
+                    "y": house_center_y,
+                    "z": 0.0,
+                    "source": "associated_house_center_proxy",
+                },
+                "sector": sector_id,
+                "entry_state": infer_candidate_entry_status(
+                    candidate=best_target_candidate,
+                    target_conditioned_state=target_conditioned_state,
+                ),
                 "distance_cm": float(best_target_candidate.get("entry_distance_cm", 0.0) or 0.0),
                 "opening_width_cm": float(best_target_candidate.get("opening_width_cm", 0.0) or 0.0),
                 "center_x_norm": best_target_candidate.get("center_x_norm"),
@@ -399,11 +627,58 @@ def update_entry_search_memory_from_fusion(
                     candidate=best_target_candidate,
                     target_conditioned_state=target_conditioned_state,
                 ),
+                "is_best_candidate": True,
+                "is_searched": target_conditioned_subgoal == "cross_target_entry",
+                "is_entered": target_conditioned_subgoal == "cross_target_entry",
+                "observation_increment": 1,
                 "attempt_count": existing_attempt_count + 1,
                 "last_checked_time": datetime.now().timestamp(),
+                "last_seen_time": observation_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
         store.update_semantic_memory(target_house_id, {"last_best_entry_id": candidate_id})
+    store.set_planner_context(planner_patch)
+
+    store.append_episodic_event(
+        target_house_id,
+        {
+            "event_type": "fusion_decision",
+            "house_id": target_house_id,
+            "entry_id": candidate_id or "",
+            "sector": sector_id,
+            "details": {
+                "target_conditioned_state": target_conditioned_state,
+                "target_conditioned_subgoal": target_conditioned_subgoal,
+                "target_conditioned_action_hint": target_conditioned_action,
+                "last_action": last_action,
+                "best_candidate_id": candidate_id or "",
+                "best_candidate_class": str(best_target_candidate.get("class_name") or ""),
+                "best_candidate_status": infer_candidate_entry_status(
+                    candidate=best_target_candidate,
+                    target_conditioned_state=target_conditioned_state,
+                ) if candidate_id else "",
+                "best_candidate_target_match_score": float(best_target_candidate.get("candidate_target_match_score", 0.0) or 0.0),
+                "best_candidate_association_confidence": float(
+                    best_target_candidate.get("candidate_total_score", 0.0)
+                    or best_target_candidate.get("candidate_target_match_score", 0.0)
+                    or 0.0
+                ),
+                "association_evidence": build_association_evidence(best_target_candidate) if candidate_id else {
+                    "distance_score": 0.0,
+                    "view_consistency_score": 0.0,
+                    "appearance_score": 0.0,
+                    "language_score": 0.0,
+                    "geometry_score": 0.0,
+                    "memory_similarity_score": 0.0,
+                },
+                "bbox_history_item": build_bbox_history_payload(
+                    best_target_candidate,
+                    frame_id=frame_id,
+                    observation_time=observation_time,
+                ) if candidate_id else {},
+            },
+        },
+    )
 
     store.save()
     updated_memory = store.get_house_memory(target_house_id, ensure=True) or {}
@@ -413,6 +688,8 @@ def update_entry_search_memory_from_fusion(
         "house_id": target_house_id,
         "sector_id": sector_id if bool(target_context.get("target_house_in_fov", False)) else None,
         "entry_search_status": entry_search_status,
+        "house_registry_entry": copy.deepcopy(store.to_dict().get("house_registry", {}).get(target_house_id, {})),
+        "planner_context": copy.deepcopy(store.to_dict().get("planner_context", {})),
         "semantic_memory": copy.deepcopy(updated_memory.get("semantic_memory", {})),
     }
 
@@ -511,6 +788,7 @@ def score_candidate_for_target_house(
         "class_name_normalized": normalized_name,
         "confidence": float(detection.get("confidence", 0.0)),
         "xyxy": [float(v) for v in detection.get("xyxy", [])] if isinstance(detection.get("xyxy"), list) else [],
+        "bbox": bbox_from_xyxy(detection.get("xyxy", [])),
         "center_x_norm": center_x_norm,
         "candidate_image_side": image_side,
         "candidate_target_match_score": target_match_score,
@@ -2121,6 +2399,8 @@ def run_phase2_fusion_analysis(
         entry_search_memory = update_entry_search_memory_from_fusion(
             houses_config=houses_cfg,
             fusion_result=fusion,
+            state=state,
+            yolo_result=yolo_result,
         )
     except Exception as exc:
         entry_search_memory = {

@@ -23,6 +23,9 @@ DEFAULT_RECENT_ACTIONS_LIMIT = 5
 DEFAULT_RECENT_DECISIONS_LIMIT = 5
 DEFAULT_TOP_CANDIDATES_LIMIT = 3
 DEFAULT_EPISODIC_LIMIT = 64
+DEFAULT_PERCEPTION_BUFFER_LIMIT = 5
+DEFAULT_BBOX_HISTORY_LIMIT = 6
+DEFAULT_SOURCE_FRAMES_LIMIT = 8
 DEFAULT_SECTOR_IDS = [
     "front_left",
     "front_center",
@@ -45,11 +48,65 @@ def _deep_merge_dict(dst: Dict[str, Any], src: Dict[str, Any]) -> Dict[str, Any]
     return dst
 
 
+def _as_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _merge_recent_unique_strings(existing: Any, incoming: Any, limit: int) -> List[str]:
+    merged: List[str] = []
+    for item in _as_list(existing) + _as_list(incoming):
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text in merged:
+            merged.remove(text)
+        merged.append(text)
+    return merged[-max(1, int(limit)) :]
+
+
+def _merge_recent_dict_history(existing: Any, incoming: Any, limit: int) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    keys: List[str] = []
+    for item in _as_list(existing) + _as_list(incoming):
+        if not isinstance(item, dict) or not item:
+            continue
+        payload = copy.deepcopy(item)
+        key = str(payload.get("frame_id") or payload.get("source_frame") or "").strip()
+        if not key:
+            try:
+                key = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                key = str(payload)
+        if key in keys:
+            index = keys.index(key)
+            del keys[index]
+            del merged[index]
+        keys.append(key)
+        merged.append(payload)
+    return merged[-max(1, int(limit)) :]
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
 def _default_working_memory() -> Dict[str, Any]:
     return {
         "target_house_id": "",
         "current_house_id": "",
         "last_best_entry_id": "",
+        "perception_buffer": {
+            "max_frames": DEFAULT_PERCEPTION_BUFFER_LIMIT,
+            "frames": [],
+        },
         "recent_actions": [],
         "recent_target_decisions": [],
         "top_candidates": [],
@@ -82,12 +139,46 @@ def _default_semantic_memory() -> Dict[str, Any]:
     }
 
 
+def _default_house_registry_entry(
+    house_id: str,
+    *,
+    house_name: str = "",
+    house_status: str = "UNSEARCHED",
+) -> Dict[str, Any]:
+    return {
+        "house_id": str(house_id),
+        "house_name": str(house_name or house_id),
+        "house_status": str(house_status or "UNSEARCHED"),
+        "mission_status": "NOT_TARGET",
+        "search_status": "UNSEARCHED",
+        "entry_search_status": "not_started",
+        "candidate_entry_count": 0,
+        "best_entry_id": "",
+        "best_target_match_score": 0.0,
+        "searched": False,
+        "updated_at": _now_text(),
+    }
+
+
+def _default_planner_context() -> Dict[str, Any]:
+    return {
+        "target_house_id": "",
+        "current_house_id": "",
+        "current_best_entry_id": "",
+        "unsearched_houses": [],
+        "decision_hint": "",
+        "updated_at": _now_text(),
+    }
+
+
 def _default_house_memory(house_id: str, house_name: str = "", house_status: str = "UNSEARCHED") -> Dict[str, Any]:
     timestamp = _now_text()
     return {
         "house_id": str(house_id),
         "house_name": str(house_name or house_id),
         "house_status": str(house_status or "UNSEARCHED"),
+        "mission_status": "NOT_TARGET",
+        "search_status": "UNSEARCHED",
         "target_match_active": False,
         "created_at": timestamp,
         "updated_at": timestamp,
@@ -116,6 +207,8 @@ class EntrySearchMemoryStore:
             "version": DEFAULT_VERSION,
             "updated_at": _now_text(),
             "current_target_house_id": "",
+            "house_registry": {},
+            "planner_context": _default_planner_context(),
             "memories": {},
         }
 
@@ -125,6 +218,8 @@ class EntrySearchMemoryStore:
                 "version": DEFAULT_VERSION,
                 "updated_at": _now_text(),
                 "current_target_house_id": "",
+                "house_registry": {},
+                "planner_context": _default_planner_context(),
                 "memories": {},
             }
             return self.data
@@ -134,11 +229,17 @@ class EntrySearchMemoryStore:
         self.data.setdefault("version", DEFAULT_VERSION)
         self.data.setdefault("updated_at", _now_text())
         self.data.setdefault("current_target_house_id", "")
+        house_registry = self.data.get("house_registry")
+        self.data["house_registry"] = house_registry if isinstance(house_registry, dict) else {}
+        planner_context = self.data.get("planner_context")
+        self.data["planner_context"] = planner_context if isinstance(planner_context, dict) else _default_planner_context()
         memories = self.data.get("memories")
         self.data["memories"] = memories if isinstance(memories, dict) else {}
+        self._normalize_root()
         return self.data
 
     def save(self) -> str:
+        self._normalize_root()
         self.data["updated_at"] = _now_text()
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as fh:
@@ -146,6 +247,7 @@ class EntrySearchMemoryStore:
         return self.path
 
     def to_dict(self) -> Dict[str, Any]:
+        self._normalize_root()
         return copy.deepcopy(self.data)
 
     def set_current_target_house(self, house_id: str) -> None:
@@ -155,6 +257,7 @@ class EntrySearchMemoryStore:
             if isinstance(memory, dict):
                 memory["target_match_active"] = memory_house_id == target_house_id
                 memory["updated_at"] = _now_text()
+        self._normalize_root()
 
     @property
     def memories(self) -> Dict[str, Dict[str, Any]]:
@@ -212,6 +315,7 @@ class EntrySearchMemoryStore:
         current_target_id = str(raw.get("current_target_id", "") or "")
         if current_target_id:
             self.set_current_target_house(current_target_id)
+        self._normalize_root()
         return self.memories
 
     def get_house_memory(self, house_id: str, *, ensure: bool = False) -> Optional[Dict[str, Any]]:
@@ -226,6 +330,25 @@ class EntrySearchMemoryStore:
             return self.ensure_house(hid)
         return None
 
+    @property
+    def house_registry(self) -> Dict[str, Dict[str, Any]]:
+        registry = self.data.setdefault("house_registry", {})
+        return registry if isinstance(registry, dict) else {}
+
+    def set_planner_context(self, patch: Dict[str, Any], *, deep_merge: bool = True) -> Dict[str, Any]:
+        planner_context = self.data.setdefault("planner_context", _default_planner_context())
+        if not isinstance(planner_context, dict):
+            planner_context = _default_planner_context()
+            self.data["planner_context"] = planner_context
+        if deep_merge:
+            _deep_merge_dict(planner_context, patch)
+        else:
+            for key, value in patch.items():
+                planner_context[key] = copy.deepcopy(value)
+        planner_context["updated_at"] = _now_text()
+        self._normalize_root()
+        return planner_context
+
     def update_working_memory(self, house_id: str, patch: Dict[str, Any], *, deep_merge: bool = True) -> Dict[str, Any]:
         memory = self.ensure_house(house_id)
         working_memory = memory["working_memory"]
@@ -236,6 +359,7 @@ class EntrySearchMemoryStore:
                 working_memory[key] = copy.deepcopy(value)
         self._normalize_working_memory(memory)
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def update_semantic_memory(self, house_id: str, patch: Dict[str, Any], *, deep_merge: bool = True) -> Dict[str, Any]:
@@ -248,6 +372,33 @@ class EntrySearchMemoryStore:
                 semantic_memory[key] = copy.deepcopy(value)
         self._normalize_semantic_memory(memory)
         memory["updated_at"] = _now_text()
+        self._normalize_root()
+        return memory
+
+    def append_perception_frame(self, house_id: str, frame_payload: Dict[str, Any]) -> Dict[str, Any]:
+        memory = self.ensure_house(house_id)
+        working_memory = memory["working_memory"]
+        perception_buffer = working_memory.setdefault(
+            "perception_buffer",
+            {"max_frames": DEFAULT_PERCEPTION_BUFFER_LIMIT, "frames": []},
+        )
+        if not isinstance(perception_buffer, dict):
+            perception_buffer = {"max_frames": DEFAULT_PERCEPTION_BUFFER_LIMIT, "frames": []}
+            working_memory["perception_buffer"] = perception_buffer
+        frames = perception_buffer.get("frames", [])
+        if not isinstance(frames, list):
+            frames = []
+            perception_buffer["frames"] = frames
+        payload = copy.deepcopy(frame_payload)
+        payload.setdefault("timestamp", _now_text())
+        payload.setdefault("house_id", str(house_id))
+        frames.append(payload)
+        max_frames = max(1, int(perception_buffer.get("max_frames", DEFAULT_PERCEPTION_BUFFER_LIMIT) or DEFAULT_PERCEPTION_BUFFER_LIMIT))
+        if len(frames) > max_frames:
+            del frames[:-max_frames]
+        perception_buffer["max_frames"] = max_frames
+        memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def append_recent_action(self, house_id: str, action_name: str) -> Dict[str, Any]:
@@ -260,6 +411,7 @@ class EntrySearchMemoryStore:
         if len(recent_actions) > self.recent_actions_limit:
             del recent_actions[:-self.recent_actions_limit]
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def append_recent_target_decision(self, house_id: str, decision: Dict[str, Any]) -> Dict[str, Any]:
@@ -274,6 +426,7 @@ class EntrySearchMemoryStore:
         if len(recent_decisions) > self.recent_decisions_limit:
             del recent_decisions[:-self.recent_decisions_limit]
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def set_top_candidates(self, house_id: str, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -287,6 +440,7 @@ class EntrySearchMemoryStore:
         self._normalize_working_memory(memory)
         self._normalize_semantic_memory(memory)
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def set_entry_search_status(self, house_id: str, status: str) -> Dict[str, Any]:
@@ -294,6 +448,7 @@ class EntrySearchMemoryStore:
         memory["semantic_memory"]["entry_search_status"] = str(status or "not_started")
         self._normalize_semantic_memory(memory)
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def update_sector(
@@ -335,6 +490,7 @@ class EntrySearchMemoryStore:
             sector["best_target_match_score"] = float(best_target_match_score)
         self._normalize_semantic_memory(memory)
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def upsert_candidate_entry(self, house_id: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
@@ -343,25 +499,105 @@ class EntrySearchMemoryStore:
         if not isinstance(entries, list):
             entries = []
             memory["semantic_memory"]["candidate_entries"] = entries
-        candidate_id = str(candidate.get("candidate_id", "") or "").strip()
+        candidate_id = str(candidate.get("entry_id") or candidate.get("candidate_id") or "").strip()
         if not candidate_id:
-            raise ValueError("candidate_id is required for candidate entry upsert")
+            raise ValueError("entry_id/candidate_id is required for candidate entry upsert")
         payload = copy.deepcopy(candidate)
+        payload["entry_id"] = candidate_id
         payload["candidate_id"] = candidate_id
+        payload.setdefault("entry_type", str(payload.get("semantic_class") or payload.get("class_name") or ""))
+        payload.setdefault("semantic_class", str(payload.get("entry_type") or payload.get("class_name") or ""))
+        payload.setdefault("source_frames", [])
+        payload.setdefault("bbox_history", [])
+        payload.setdefault("first_seen_time", _now_text())
+        payload["last_seen_time"] = str(payload.get("last_seen_time") or _now_text())
+        payload.setdefault("observation_count", 0)
+        payload.setdefault("sector", "")
+        payload.setdefault("associated_house_id", str(house_id))
+        payload.setdefault("target_match_score", 0.0)
+        payload.setdefault("association_confidence", float(payload.get("candidate_total_score", payload.get("target_match_score", 0.0)) or 0.0))
+        payload.setdefault(
+            "association_evidence",
+            {
+                "distance_score": 0.0,
+                "view_consistency_score": 0.0,
+                "appearance_score": 0.0,
+                "language_score": 0.0,
+            },
+        )
+        payload.setdefault("entry_state", str(payload.get("status") or "unverified"))
+        payload.setdefault("status", str(payload.get("entry_state") or "unverified"))
+        payload.setdefault("is_best_candidate", False)
+        payload.setdefault("is_searched", False)
+        payload.setdefault("is_entered", False)
+        payload.setdefault("world_position", {"x": None, "y": None, "z": None, "source": ""})
+        payload.setdefault("attempt_count", 0)
+        incoming_source_frames = payload.pop("source_frames", [])
+        incoming_bbox_history = payload.pop("bbox_history", [])
+        requested_best = _truthy(payload.get("is_best_candidate", False))
         existing_index = next(
-            (index for index, item in enumerate(entries) if isinstance(item, dict) and str(item.get("candidate_id", "") or "") == candidate_id),
+            (
+                index
+                for index, item in enumerate(entries)
+                if isinstance(item, dict)
+                and str(item.get("entry_id") or item.get("candidate_id") or "") == candidate_id
+            ),
             None,
         )
         if existing_index is None:
+            payload["observation_count"] = max(1, int(payload.get("observation_count", 0) or 0))
+            payload["source_frames"] = _merge_recent_unique_strings(
+                [],
+                incoming_source_frames,
+                DEFAULT_SOURCE_FRAMES_LIMIT,
+            )
+            payload["bbox_history"] = _merge_recent_dict_history(
+                [],
+                incoming_bbox_history,
+                DEFAULT_BBOX_HISTORY_LIMIT,
+            )
             entries.append(payload)
         else:
             merged = entries[existing_index]
             if not isinstance(merged, dict):
                 merged = {}
+            existing_observation_count = int(merged.get("observation_count", 0) or 0)
+            existing_first_seen_time = str(merged.get("first_seen_time") or "")
+            payload_observation_count = int(payload.get("observation_count", 0) or 0)
+            observation_increment = int(payload.pop("observation_increment", 1) or 1)
             _deep_merge_dict(merged, payload)
+            merged["entry_id"] = candidate_id
+            merged["candidate_id"] = candidate_id
+            merged["first_seen_time"] = str(existing_first_seen_time or payload.get("first_seen_time") or _now_text())
+            merged["last_seen_time"] = str(payload.get("last_seen_time") or _now_text())
+            merged["observation_count"] = max(existing_observation_count + max(1, observation_increment), payload_observation_count, 1)
+            merged["entry_state"] = str(merged.get("entry_state") or merged.get("status") or "unverified")
+            merged["status"] = str(merged.get("status") or merged.get("entry_state") or "unverified")
+            merged["associated_house_id"] = str(merged.get("associated_house_id") or house_id)
+            merged["source_frames"] = _merge_recent_unique_strings(
+                merged.get("source_frames", []),
+                incoming_source_frames,
+                DEFAULT_SOURCE_FRAMES_LIMIT,
+            )
+            merged["bbox_history"] = _merge_recent_dict_history(
+                merged.get("bbox_history", []),
+                incoming_bbox_history,
+                DEFAULT_BBOX_HISTORY_LIMIT,
+            )
+            if bool(merged.get("is_entered", False)):
+                merged["is_searched"] = True
             entries[existing_index] = merged
+        if requested_best:
+            memory["working_memory"]["last_best_entry_id"] = candidate_id
+            memory["semantic_memory"]["last_best_entry_id"] = candidate_id
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                entry_id = str(entry.get("entry_id") or entry.get("candidate_id") or "").strip()
+                entry["is_best_candidate"] = entry_id == candidate_id
         self._normalize_semantic_memory(memory)
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
 
     def append_episodic_snapshot(self, house_id: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -392,7 +628,152 @@ class EntrySearchMemoryStore:
         if len(episodic_memory) > self.episodic_limit:
             del episodic_memory[:-self.episodic_limit]
         memory["updated_at"] = _now_text()
+        self._normalize_root()
         return memory
+
+    def append_episodic_event(self, house_id: str, event_payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload = copy.deepcopy(event_payload)
+        payload.setdefault("event_id", f"evt_{int(datetime.now().timestamp() * 1000)}")
+        payload.setdefault("time", _now_text())
+        payload.setdefault("house_id", str(house_id))
+        payload.setdefault("timestamp", datetime.now().timestamp())
+        return self.append_episodic_snapshot(house_id, payload)
+
+    def _derive_search_status(self, memory: Dict[str, Any]) -> str:
+        semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
+        working_memory = memory.get("working_memory", {}) if isinstance(memory.get("working_memory"), dict) else {}
+        search_summary = semantic_memory.get("search_summary", {}) if isinstance(semantic_memory.get("search_summary"), dict) else {}
+        candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
+        entry_search_status = str(semantic_memory.get("entry_search_status", "") or "").strip()
+        latest_decision = working_memory.get("recent_target_decisions", [])
+        latest_subgoal = ""
+        if isinstance(latest_decision, list) and latest_decision:
+            latest = latest_decision[-1]
+            if isinstance(latest, dict):
+                latest_subgoal = str(latest.get("target_conditioned_subgoal") or latest.get("subgoal") or "").strip()
+
+        if any(bool(entry.get("is_entered", False)) for entry in candidate_entries if isinstance(entry, dict)):
+            return "ENTERED"
+        if entry_search_status in {"entered_house"}:
+            return "ENTERED"
+        if latest_subgoal in {"approach_target_entry", "align_target_entry", "cross_target_entry"}:
+            return "APPROACHING_ENTRY"
+        if any(float(entry.get("association_confidence", 0.0) or 0.0) >= 0.7 for entry in candidate_entries if isinstance(entry, dict)):
+            return "ENTRY_ASSOCIATED"
+        if any(isinstance(entry, dict) for entry in candidate_entries):
+            return "ENTRY_CANDIDATE_FOUND"
+        if int(search_summary.get("observed_sector_count", 0) or 0) > 0:
+            return "OBSERVING"
+        if str(memory.get("house_status", "") or "").strip() in {"EXPLORED", "PERSON_FOUND"}:
+            return "SEARCHED"
+        return "UNSEARCHED"
+
+    def _derive_mission_status(self, memory: Dict[str, Any]) -> str:
+        house_status = str(memory.get("house_status", "") or "").strip()
+        working_memory = memory.get("working_memory", {}) if isinstance(memory.get("working_memory"), dict) else {}
+        observed_sector_count = (
+            memory.get("semantic_memory", {}).get("search_summary", {}).get("observed_sector_count", 0)
+            if isinstance(memory.get("semantic_memory"), dict)
+            else 0
+        )
+        if house_status in {"EXPLORED", "PERSON_FOUND"}:
+            return "COMPLETED"
+        if bool(memory.get("target_match_active", False)):
+            return "TARGET_ACTIVE"
+        if str(working_memory.get("current_house_id", "") or "").strip() == str(memory.get("house_id", "") or "").strip():
+            return "IN_PROGRESS"
+        if int(observed_sector_count or 0) > 0:
+            return "IN_PROGRESS"
+        return "NOT_TARGET"
+
+    def _normalize_root(self) -> None:
+        self.data.setdefault("house_registry", {})
+        if not isinstance(self.data.get("house_registry"), dict):
+            self.data["house_registry"] = {}
+        if not isinstance(self.data.get("planner_context"), dict):
+            self.data["planner_context"] = _default_planner_context()
+        for house_id, memory in self.memories.items():
+            if isinstance(memory, dict):
+                self._normalize_house_memory(memory)
+                self._refresh_house_registry_entry(house_id, memory)
+        self._refresh_planner_context()
+
+    def _refresh_house_registry_entry(self, house_id: str, memory: Dict[str, Any]) -> None:
+        entry = self.house_registry.get(house_id)
+        if not isinstance(entry, dict):
+            entry = _default_house_registry_entry(
+                house_id,
+                house_name=str(memory.get("house_name", "") or house_id),
+                house_status=str(memory.get("house_status", "UNSEARCHED") or "UNSEARCHED"),
+            )
+            self.house_registry[house_id] = entry
+        search_status = self._derive_search_status(memory)
+        mission_status = self._derive_mission_status(memory)
+        semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
+        candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
+        best_entry_id = str(semantic_memory.get("last_best_entry_id") or memory.get("working_memory", {}).get("last_best_entry_id") or "").strip()
+        best_target_match_score = 0.0
+        for candidate in candidate_entries:
+            if not isinstance(candidate, dict):
+                continue
+            if best_entry_id and str(candidate.get("entry_id") or candidate.get("candidate_id") or "") == best_entry_id:
+                best_target_match_score = float(candidate.get("target_match_score", 0.0) or 0.0)
+                break
+        if not best_target_match_score:
+            for candidate in candidate_entries:
+                if isinstance(candidate, dict):
+                    best_target_match_score = max(best_target_match_score, float(candidate.get("target_match_score", 0.0) or 0.0))
+        entry.update(
+            {
+                "house_id": str(house_id),
+                "house_name": str(memory.get("house_name", "") or house_id),
+                "house_status": str(memory.get("house_status", "UNSEARCHED") or "UNSEARCHED"),
+                "mission_status": mission_status,
+                "search_status": search_status,
+                "entry_search_status": str(semantic_memory.get("entry_search_status", "") or "not_started"),
+                "candidate_entry_count": len(candidate_entries),
+                "best_entry_id": best_entry_id,
+                "best_target_match_score": round(float(best_target_match_score), 4),
+                "searched": bool(search_status in {"SEARCHED", "ENTERED"}) or str(memory.get("house_status", "") or "").strip() in {"EXPLORED", "PERSON_FOUND"},
+                "updated_at": _now_text(),
+            }
+        )
+        memory["mission_status"] = mission_status
+        memory["search_status"] = search_status
+
+    def _refresh_planner_context(self) -> None:
+        planner_context = self.data.setdefault("planner_context", _default_planner_context())
+        target_house_id = str(self.data.get("current_target_house_id", "") or "").strip()
+        target_memory = self.memories.get(target_house_id, {}) if target_house_id else {}
+        target_working = target_memory.get("working_memory", {}) if isinstance(target_memory, dict) and isinstance(target_memory.get("working_memory"), dict) else {}
+        target_recent_decisions = target_working.get("recent_target_decisions", []) if isinstance(target_working.get("recent_target_decisions"), list) else []
+        decision_hint = ""
+        if target_recent_decisions:
+            latest = target_recent_decisions[-1]
+            if isinstance(latest, dict):
+                decision_hint = str(latest.get("target_conditioned_subgoal") or latest.get("subgoal") or latest.get("decision_hint") or "").strip()
+        planner_context.update(
+            {
+                "target_house_id": target_house_id,
+                "current_house_id": str(target_working.get("current_house_id", "") or ""),
+                "current_best_entry_id": str(
+                    (
+                        target_memory.get("semantic_memory", {}).get("last_best_entry_id")
+                        if isinstance(target_memory, dict) and isinstance(target_memory.get("semantic_memory"), dict)
+                        else ""
+                    )
+                    or target_working.get("last_best_entry_id")
+                    or ""
+                ),
+                "unsearched_houses": [
+                    hid
+                    for hid, item in sorted(self.house_registry.items())
+                    if isinstance(item, dict) and not bool(item.get("searched", False))
+                ],
+                "decision_hint": decision_hint,
+                "updated_at": _now_text(),
+            }
+        )
 
     def _normalize_house_memory(self, memory: Dict[str, Any]) -> None:
         if not isinstance(memory.get("working_memory"), dict):
@@ -411,6 +792,16 @@ class EntrySearchMemoryStore:
             memory["working_memory"] = working_memory
         for key, value in _default_working_memory().items():
             working_memory.setdefault(key, copy.deepcopy(value))
+        perception_buffer = working_memory.get("perception_buffer", {})
+        if not isinstance(perception_buffer, dict):
+            perception_buffer = {"max_frames": DEFAULT_PERCEPTION_BUFFER_LIMIT, "frames": []}
+            working_memory["perception_buffer"] = perception_buffer
+        perception_buffer["max_frames"] = max(
+            1,
+            int(perception_buffer.get("max_frames", DEFAULT_PERCEPTION_BUFFER_LIMIT) or DEFAULT_PERCEPTION_BUFFER_LIMIT),
+        )
+        frames = perception_buffer.get("frames", [])
+        perception_buffer["frames"] = list(frames)[-perception_buffer["max_frames"] :] if isinstance(frames, list) else []
         recent_actions = working_memory.get("recent_actions", [])
         working_memory["recent_actions"] = list(recent_actions)[-self.recent_actions_limit :] if isinstance(recent_actions, list) else []
         recent_decisions = working_memory.get("recent_target_decisions", [])
@@ -445,12 +836,50 @@ class EntrySearchMemoryStore:
         approachable_entry_count = 0
         blocked_entry_count = 0
         rejected_entry_count = 0
+        best_entry_id = str(
+            semantic_memory.get("last_best_entry_id")
+            or memory.get("working_memory", {}).get("last_best_entry_id")
+            or ""
+        ).strip()
+        if not best_entry_id:
+            best_entries = [
+                str(entry.get("entry_id") or entry.get("candidate_id") or "").strip()
+                for entry in semantic_memory["candidate_entries"]
+                if isinstance(entry, dict) and _truthy(entry.get("is_best_candidate", False))
+            ]
+            if best_entries:
+                best_entry_id = best_entries[-1]
+                semantic_memory["last_best_entry_id"] = best_entry_id
+                memory["working_memory"]["last_best_entry_id"] = best_entry_id
         for sector in searched_sectors.values():
             if isinstance(sector, dict) and bool(sector.get("observed", False)):
                 observed_sector_count += 1
         for entry in semantic_memory["candidate_entries"]:
             if not isinstance(entry, dict):
                 continue
+            entry_id = str(entry.get("entry_id") or entry.get("candidate_id") or "").strip()
+            entry["entry_id"] = entry_id
+            entry["candidate_id"] = entry_id
+            entry["entry_type"] = str(entry.get("entry_type") or entry.get("semantic_class") or entry.get("class_name") or "")
+            entry["semantic_class"] = str(entry.get("semantic_class") or entry.get("entry_type") or entry.get("class_name") or "")
+            entry["associated_house_id"] = str(entry.get("associated_house_id") or memory.get("house_id") or "")
+            entry["entry_state"] = str(entry.get("entry_state") or entry.get("status") or "unverified")
+            entry["status"] = str(entry.get("status") or entry.get("entry_state") or "unverified")
+            entry["first_seen_time"] = str(entry.get("first_seen_time") or _now_text())
+            entry["last_seen_time"] = str(entry.get("last_seen_time") or entry["first_seen_time"])
+            entry["observation_count"] = max(1, int(entry.get("observation_count", 0) or 0))
+            entry["source_frames"] = list(entry.get("source_frames", []))[-DEFAULT_SOURCE_FRAMES_LIMIT:] if isinstance(entry.get("source_frames"), list) else []
+            entry["bbox_history"] = list(entry.get("bbox_history", []))[-DEFAULT_BBOX_HISTORY_LIMIT:] if isinstance(entry.get("bbox_history"), list) else []
+            entry["is_best_candidate"] = bool(best_entry_id and entry_id == best_entry_id)
+            if not isinstance(entry.get("association_evidence"), dict):
+                entry["association_evidence"] = {
+                    "distance_score": 0.0,
+                    "view_consistency_score": 0.0,
+                    "appearance_score": 0.0,
+                    "language_score": 0.0,
+                }
+            if not isinstance(entry.get("world_position"), dict):
+                entry["world_position"] = {"x": None, "y": None, "z": None, "source": ""}
             status = str(entry.get("status", "") or "")
             if status == "approachable":
                 approachable_entry_count += 1

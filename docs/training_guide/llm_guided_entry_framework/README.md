@@ -47,6 +47,8 @@
 29. [`28_memory_architecture_diagram_zh.md`](28_memory_architecture_diagram_zh.md)
 30. [`29_v5_training_improvement_plan_zh.md`](29_v5_training_improvement_plan_zh.md)
 31. [`30_memory_function_test_checklist_zh.md`](30_memory_function_test_checklist_zh.md)
+32. [`31_memory_collection_validation_and_training_handoff_zh.md`](31_memory_collection_validation_and_training_handoff_zh.md)
+33. [`32_memory_aware_llm_teacher_prompt_and_data_collection_zh.md`](32_memory_aware_llm_teacher_prompt_and_data_collection_zh.md)
 
 ## 这条路线的核心思想
 
