@@ -70,3 +70,4 @@ phase4_takeover_logs
 phase6_prompt_logs
 runs
 door_or_window_dataset
+.ultralytics_test

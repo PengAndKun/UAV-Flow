@@ -811,11 +811,15 @@ llm_teacher_response.json
 llm_teacher_label.json
 ```
 
-当前已经实现第一步 prompt builder：
+当前已经实现 prompt builder 与 teacher label validator：
 
 ```text
 phase2_multimodal_fusion_analysis/memory_aware_llm_teacher_prompt_builder.py
 phase2_multimodal_fusion_analysis/run_memory_aware_llm_teacher_prompt_builder.py
+phase2_multimodal_fusion_analysis/memory_aware_llm_teacher_batch.py
+phase2_multimodal_fusion_analysis/run_memory_aware_llm_teacher_batch.py
+phase2_multimodal_fusion_analysis/memory_aware_llm_teacher_label_validator.py
+phase2_multimodal_fusion_analysis/run_memory_aware_llm_teacher_label_validator.py
 ```
 
 单个 capture 生成 prompt：
@@ -840,6 +844,31 @@ python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_memory_aware_llm
 labeling/llm_teacher_prompt.json
 ```
 
+生成 prompt 后，可以先 dry-run 检查哪些样本会访问 LLM：
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_memory_aware_llm_teacher_batch.py `
+  --session_dir E:\github\UAV-Flow\captures_remote\memory_collection_sessions\<episode> `
+  --model <model_name> `
+  --dry_run
+```
+
+确认无误后再真正调用 LLM：
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_memory_aware_llm_teacher_batch.py `
+  --session_dir E:\github\UAV-Flow\captures_remote\memory_collection_sessions\<episode> `
+  --model <model_name>
+```
+
+默认行为：
+
+1. 使用 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_AUTH_TOKEN`
+2. 已经存在 `llm_teacher_label_validated.json` 的样本会自动跳过
+3. 每个样本会写入 `llm_teacher_response.json`
+4. 每个样本会写入 `llm_teacher_label.json`
+5. 默认自动调用 validator 生成 `llm_teacher_label_validated.json`
+
 其中：
 
 ### `llm_teacher_prompt.json`
@@ -852,7 +881,15 @@ labeling/llm_teacher_prompt.json
 
 ### `llm_teacher_label.json`
 
-保存解析、校验、规范化后的 teacher label。
+保存 LLM 解析后的 teacher label。
+
+通过 validator 后，建议额外生成：
+
+```text
+labeling/llm_teacher_label_validated.json
+```
+
+这个文件保存规范化标签、错误、警告、fallback label 和验证上下文，更适合作为后续 dataset exporter 的入口。
 
 建议结构：
 
@@ -880,7 +917,14 @@ labeling/llm_teacher_prompt.json
 
 ## 12. Teacher 验证规则
 
-LLM 输出后必须做 validator。
+LLM 输出后必须做 validator。现在已经实现：
+
+```text
+phase2_multimodal_fusion_analysis/memory_aware_llm_teacher_label_validator.py
+phase2_multimodal_fusion_analysis/run_memory_aware_llm_teacher_label_validator.py
+```
+
+它的作用不是重新替代 LLM，而是把 LLM 输出变成可训练、可追踪、可回退的 teacher label。
 
 至少检查：
 
@@ -893,14 +937,96 @@ LLM 输出后必须做 validator。
 7. 如果 `target_house_not_in_view`，是否错误输出 `approach_target_entry`
 8. 如果 memory best entry 很强，LLM 是否无理由改选其他候选
 
-如果 LLM 输出不合法，应回退到 rule-based fusion label，并记录：
+单个 capture 验证：
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_memory_aware_llm_teacher_label_validator.py `
+  --labeling_dir E:\github\UAV-Flow\captures_remote\memory_collection_sessions\<episode>\memory_fusion_captures\<capture>\labeling `
+  --write_validated
+```
+
+指定 prompt 与 label 验证：
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_memory_aware_llm_teacher_label_validator.py `
+  --prompt_json E:\github\UAV-Flow\captures_remote\memory_collection_sessions\<episode>\memory_fusion_captures\<capture>\labeling\llm_teacher_prompt.json `
+  --label_json E:\github\UAV-Flow\captures_remote\memory_collection_sessions\<episode>\memory_fusion_captures\<capture>\labeling\llm_teacher_label.json `
+  --write_validated
+```
+
+整个 episode 批量验证：
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_memory_aware_llm_teacher_label_validator.py `
+  --session_dir E:\github\UAV-Flow\captures_remote\memory_collection_sessions\<episode> `
+  --write_validated
+```
+
+生成结果：
+
+```text
+labeling/llm_teacher_label_validated.json
+```
+
+如果 LLM 输出不合法，validator 会回退到 rule-based fusion label，并记录：
 
 ```json
 {
-  "llm_valid": false,
-  "fallback_source": "fusion_rule_teacher"
+  "valid": false,
+  "status": "FAIL",
+  "fallback_label": {
+    "target_conditioned_state": "...",
+    "target_conditioned_subgoal": "...",
+    "target_conditioned_action_hint": "...",
+    "target_candidate_id": "..."
+  },
+  "errors": [],
+  "warnings": []
 }
 ```
+
+其中 `FAIL` 样本不建议直接进入训练集；`WARN` 样本可以进入人工抽查队列。
+
+### 12.1 接入 distillation dataset exporter
+
+当前 dataset exporter 已支持读取 `llm_teacher_label_validated.json`。
+
+默认推荐使用 `auto` 模式：
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_distillation_dataset_export.py `
+  --results_root E:\github\UAV-Flow\captures_remote\memory_collection_sessions `
+  --export_name phase2_5_memory_llm_distillation_dataset `
+  --llm_teacher_mode auto
+```
+
+`auto` 模式含义：
+
+1. 如果样本里存在 `llm_teacher_label_validated.json` 且状态为 `PASS/WARN`，优先使用 LLM validated label 覆盖 `target_conditioned_*` teacher 字段
+2. 如果没有 LLM validated label，则继续使用旧的 `teacher_output.json/teacher_validation.json`
+3. 如果二者都没有，则该样本不会进入训练集
+
+如果只想导出已经完成 LLM teacher 验证的样本，可以使用：
+
+```powershell
+python E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_distillation_dataset_export.py `
+  --results_root E:\github\UAV-Flow\captures_remote\memory_collection_sessions `
+  --export_name phase2_5_memory_llm_distillation_dataset `
+  --llm_teacher_mode require
+```
+
+导出后的 `train.jsonl/val.jsonl` 会额外包含：
+
+```text
+llm_teacher_available
+llm_teacher_status
+teacher_source_priority
+entry_association
+memory_decision
+llm_teacher_validated_path
+```
+
+同时，导出副本中的 `entry_state.json` 也会同步更新 `teacher_targets.target_conditioned_*` 字段，确保训练端读取的是 LLM teacher 后的 target-conditioned 标签。
 
 ---
 
@@ -941,11 +1067,11 @@ teacher_confidence
 建议按下面顺序推进：
 
 1. 按本文采集更多 `PASS` memory sessions
-2. 更新 LLM teacher prompt builder
-3. 让 LLM 读取 `fusion_result + memory snapshot`
-4. 保存 `llm_teacher_prompt/response/label`
-5. 写 LLM teacher validator
-6. 将合格 LLM teacher label 接入 dataset exporter
+2. 使用 prompt builder 生成 `llm_teacher_prompt.json`
+3. 让 LLM 读取 `YOLO + Depth + Fusion + Memory + Target Context`
+4. 保存 `llm_teacher_response.json` 与 `llm_teacher_label.json`
+5. 使用 teacher label validator 生成 `llm_teacher_label_validated.json`
+6. 将 `PASS/WARN` 的 LLM teacher label 接入 dataset exporter
 7. 训练 V5-B memory-aware representation distillation
 
 ---

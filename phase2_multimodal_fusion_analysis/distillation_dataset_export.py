@@ -13,10 +13,21 @@ from typing import Any, Dict, List, Optional, Tuple
 RESULTS_ROOT = Path(__file__).resolve().parent / "results"
 EXPORTS_ROOT = Path(__file__).resolve().parent / "exports"
 DEFAULT_EXPORT_NAME = "phase2_5_distillation_dataset"
+DEFAULT_LLM_VALIDATED_NAME = "llm_teacher_label_validated.json"
 
 
 def _read_json(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _read_optional_json(path: Path) -> Dict[str, Any]:
+    try:
+        if path.exists():
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+            return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+    return {}
 
 
 def _write_json(path: Path, payload: Dict[str, Any]) -> None:
@@ -25,12 +36,36 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
 
 def _discover_labeling_dirs(results_root: Path) -> List[Path]:
     output: List[Path] = []
+    seen = set()
+
+    def _add(labeling_dir: Path) -> None:
+        if not labeling_dir.is_dir():
+            return
+        resolved = str(labeling_dir.resolve())
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        output.append(labeling_dir)
+
+    if results_root.name == "labeling":
+        _add(results_root)
+
+    if (results_root / "labeling").is_dir():
+        _add(results_root / "labeling")
+
+    captures_root = results_root / "memory_fusion_captures"
+    if captures_root.is_dir():
+        for capture_dir in sorted(captures_root.iterdir()):
+            _add(capture_dir / "labeling")
+
     for child in sorted(results_root.iterdir()):
-        if not child.is_dir():
-            continue
-        labeling_dir = child / "labeling"
-        if labeling_dir.is_dir():
-            output.append(labeling_dir)
+        if child.is_dir():
+            _add(child / "labeling")
+
+    for labeling_dir in sorted(results_root.glob("memory_episode*/memory_fusion_captures/*/labeling")):
+        _add(labeling_dir)
+
+    output.sort(key=lambda path: str(path))
     return output
 
 
@@ -48,26 +83,151 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
-def _load_sample_record(labeling_dir: Path) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _normalise_status(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _is_llm_validation_accepted(
+    llm_validation: Dict[str, Any],
+    *,
+    allow_llm_warn: bool,
+) -> bool:
+    status = _normalise_status(llm_validation.get("status")).upper()
+    if status == "PASS":
+        return True
+    if status == "WARN" and allow_llm_warn:
+        return True
+    return False
+
+
+def _candidate_id_to_int(value: Any) -> int:
+    if value is None:
+        return -1
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "-1"}:
+        return -1
+    return _safe_int(text, -1)
+
+
+def _overlay_llm_teacher_targets(
+    teacher_targets: Dict[str, Any],
+    llm_validation: Dict[str, Any],
+    *,
+    llm_validated_path: Path,
+) -> Dict[str, Any]:
+    normalized = (
+        llm_validation.get("normalized_label", {})
+        if isinstance(llm_validation.get("normalized_label"), dict)
+        else {}
+    )
+    if not normalized:
+        return dict(teacher_targets)
+
+    updated = dict(teacher_targets)
+    confidence = _safe_float(normalized.get("confidence"), 0.0)
+    updated.update(
+        {
+            "llm_teacher_available": 1,
+            "llm_teacher_status": _normalise_status(llm_validation.get("status")),
+            "llm_teacher_source_path": str(llm_validated_path),
+            "teacher_source_priority": "llm_teacher_validated",
+            "target_conditioned_teacher_available": 1,
+            "target_conditioned_state": str(normalized.get("target_conditioned_state") or ""),
+            "target_conditioned_subgoal": str(normalized.get("target_conditioned_subgoal") or ""),
+            "target_conditioned_action_hint": str(normalized.get("target_conditioned_action_hint") or ""),
+            "target_conditioned_target_candidate_id": _candidate_id_to_int(normalized.get("target_candidate_id")),
+            "target_conditioned_reason_text": str(normalized.get("reason") or ""),
+            "target_conditioned_reason_embedding": [],
+            "target_conditioned_confidence": round(max(0.0, min(1.0, confidence)), 6),
+            "entry_association": str(normalized.get("entry_association") or ""),
+            "memory_decision": str(normalized.get("memory_decision") or ""),
+        }
+    )
+    if _safe_int(updated.get("teacher_available"), 0) != 1:
+        updated["confidence"] = round(max(0.0, min(1.0, confidence)), 6)
+    return updated
+
+
+def _ensure_entry_state(labeling_dir: Path, *, build_missing_entry_state: bool) -> Optional[str]:
+    entry_state_path = labeling_dir / "entry_state.json"
+    if entry_state_path.exists():
+        return None
+    if not build_missing_entry_state:
+        return "missing_entry_state"
+    try:
+        from entry_state_builder import build_entry_state_for_labeling_dir
+
+        build_entry_state_for_labeling_dir(labeling_dir)
+    except Exception as exc:
+        return f"entry_state_build_error:{exc}"
+    if not entry_state_path.exists():
+        return "entry_state_build_missing_output"
+    return None
+
+
+def _load_sample_record(
+    labeling_dir: Path,
+    *,
+    build_missing_entry_state: bool,
+    llm_teacher_mode: str,
+    llm_validated_name: str,
+    allow_llm_warn: bool,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    build_error = _ensure_entry_state(labeling_dir, build_missing_entry_state=build_missing_entry_state)
+    if build_error:
+        return None, build_error
+
     entry_state_path = labeling_dir / "entry_state.json"
     teacher_output_path = labeling_dir / "teacher_output.json"
     teacher_validation_path = labeling_dir / "teacher_validation.json"
+    llm_validated_path = labeling_dir / llm_validated_name
 
     if not entry_state_path.exists():
         return None, "missing_entry_state"
-    if not teacher_output_path.exists():
-        return None, "missing_teacher_output"
-    if not teacher_validation_path.exists():
-        return None, "missing_teacher_validation"
 
     try:
         entry_state = _read_json(entry_state_path)
-        teacher_output = _read_json(teacher_output_path)
-        teacher_validation = _read_json(teacher_validation_path)
+        teacher_output = _read_optional_json(teacher_output_path)
+        teacher_validation = _read_optional_json(teacher_validation_path)
+        llm_teacher_validation = _read_optional_json(llm_validated_path)
     except Exception as exc:
         return None, f"json_read_error:{exc}"
 
     teacher_targets = entry_state.get("teacher_targets", {}) if isinstance(entry_state.get("teacher_targets"), dict) else {}
+    llm_teacher_mode = str(llm_teacher_mode or "auto").strip().lower()
+    llm_available = False
+    if llm_teacher_mode != "off" and llm_teacher_validation:
+        llm_available = _is_llm_validation_accepted(
+            llm_teacher_validation,
+            allow_llm_warn=bool(allow_llm_warn),
+        )
+        if llm_available:
+            teacher_targets = _overlay_llm_teacher_targets(
+                teacher_targets,
+                llm_teacher_validation,
+                llm_validated_path=llm_validated_path,
+            )
+            entry_state = dict(entry_state)
+            entry_state["teacher_targets"] = teacher_targets
+        elif llm_teacher_mode == "require":
+            return None, f"llm_teacher_not_accepted:{llm_teacher_validation.get('status', 'missing_status')}"
+    elif llm_teacher_mode == "require":
+        return None, "missing_llm_teacher_validated"
+
+    if not teacher_output:
+        teacher_output = {
+            "teacher_family": "memory_aware_llm_teacher" if llm_available else "missing_teacher_output",
+            "teacher_output": llm_teacher_validation.get("normalized_label", {}) if llm_available else {},
+        }
+    if not teacher_validation:
+        teacher_validation = {
+            "status": "valid" if llm_available else "missing",
+            "score": _safe_float(teacher_targets.get("target_conditioned_confidence"), 0.0) if llm_available else 0.0,
+            "normalized_teacher_output": {},
+            "errors": [],
+            "warnings": [],
+        }
+
     normalized = teacher_validation.get("normalized_teacher_output", {}) if isinstance(teacher_validation.get("normalized_teacher_output"), dict) else {}
     metadata = entry_state.get("metadata", {}) if isinstance(entry_state.get("metadata"), dict) else {}
     global_state = entry_state.get("global_state", {}) if isinstance(entry_state.get("global_state"), dict) else {}
@@ -80,9 +240,12 @@ def _load_sample_record(labeling_dir: Path) -> Tuple[Optional[Dict[str, Any]], O
         "entry_state_path": str(entry_state_path),
         "teacher_output_path": str(teacher_output_path),
         "teacher_validation_path": str(teacher_validation_path),
+        "llm_teacher_validated_path": str(llm_validated_path) if llm_validated_path.exists() else "",
         "entry_state": entry_state,
         "teacher_output": teacher_output,
         "teacher_validation": teacher_validation,
+        "llm_teacher_validation": llm_teacher_validation,
+        "llm_teacher_available": int(bool(llm_available)),
         "teacher_targets": teacher_targets,
         "normalized_teacher_output": normalized,
         "metadata": metadata,
@@ -104,16 +267,23 @@ def _filter_sample(
     teacher_targets = sample.get("teacher_targets", {})
     confidence = _safe_float(teacher_targets.get("confidence"), 0.0)
     teacher_available = _safe_int(teacher_targets.get("teacher_available"), 0)
+    target_teacher_available = _safe_int(teacher_targets.get("target_conditioned_teacher_available"), 0)
+    llm_teacher_available = _safe_int(teacher_targets.get("llm_teacher_available"), 0)
+    llm_status = str(teacher_targets.get("llm_teacher_status") or "").strip().upper()
+    target_confidence = _safe_float(teacher_targets.get("target_conditioned_confidence"), 0.0)
+    effective_confidence = max(confidence, target_confidence if target_teacher_available else 0.0)
 
-    if teacher_available != 1:
+    if teacher_available != 1 and target_teacher_available != 1:
         return False, "teacher_unavailable"
-    if status == "invalid":
+    if llm_teacher_available == 1 and llm_status == "FAIL":
+        return False, "llm_teacher_invalid"
+    if teacher_available == 1 and status == "invalid":
         return False, "teacher_invalid"
-    if status == "weak_valid" and not allow_weak_valid:
+    if teacher_available == 1 and status == "weak_valid" and not allow_weak_valid:
         return False, "teacher_weak_valid_excluded"
-    if confidence < float(min_teacher_confidence):
+    if effective_confidence < float(min_teacher_confidence):
         return False, "teacher_confidence_too_low"
-    if score <= 0.0:
+    if teacher_available == 1 and score <= 0.0 and llm_teacher_available != 1:
         return False, "teacher_score_nonpositive"
     return True, "accepted"
 
@@ -198,7 +368,17 @@ def _make_export_record(sample: Dict[str, Any], sample_dir: Path, split: str) ->
         "entry_state_path": str(sample_dir / "entry_state.json"),
         "teacher_output_path": str(sample_dir / "teacher_output.json"),
         "teacher_validation_path": str(sample_dir / "teacher_validation.json"),
+        "llm_teacher_validated_path": (
+            str(sample_dir / "llm_teacher_label_validated.json")
+            if sample.get("llm_teacher_validation")
+            else ""
+        ),
         "metadata_path": str(sample_dir / "metadata.json"),
+        "teacher_source_priority": str(teacher_targets.get("teacher_source_priority") or "legacy_teacher"),
+        "llm_teacher_available": _safe_int(teacher_targets.get("llm_teacher_available"), 0),
+        "llm_teacher_status": str(teacher_targets.get("llm_teacher_status") or ""),
+        "entry_association": str(teacher_targets.get("entry_association") or ""),
+        "memory_decision": str(teacher_targets.get("memory_decision") or ""),
         "teacher_available": _safe_int(teacher_targets.get("teacher_available"), 0),
         "target_candidate_id": _safe_int(teacher_targets.get("target_candidate_id"), -1),
         "entry_state": str(teacher_targets.get("entry_state") or ""),
@@ -249,6 +429,10 @@ def export_distillation_dataset(
     val_ratio: float,
     min_teacher_confidence: float,
     allow_weak_valid: bool,
+    llm_teacher_mode: str,
+    llm_validated_name: str,
+    allow_llm_warn: bool,
+    build_missing_entry_state: bool,
 ) -> Dict[str, Any]:
     results_root = results_root.resolve()
     output_root = output_root.resolve()
@@ -268,7 +452,13 @@ def export_distillation_dataset(
     for idx, labeling_dir in enumerate(labeling_dirs, start=1):
         sample_name = labeling_dir.parent.name
         print(f"[{idx}/{len(labeling_dirs)}] inspect -> {sample_name}")
-        sample, error_reason = _load_sample_record(labeling_dir)
+        sample, error_reason = _load_sample_record(
+            labeling_dir,
+            build_missing_entry_state=bool(build_missing_entry_state),
+            llm_teacher_mode=str(llm_teacher_mode),
+            llm_validated_name=str(llm_validated_name),
+            allow_llm_warn=bool(allow_llm_warn),
+        )
         if sample is None:
             skipped_counter[error_reason or "unknown_load_error"] += 1
             print(f"[{idx}/{len(labeling_dirs)}] skip -> {sample_name} ({error_reason})")
@@ -310,6 +500,8 @@ def export_distillation_dataset(
     memory_available_count = 0
     memory_feature_available_count = 0
     memory_source_counts: Counter[str] = Counter()
+    llm_teacher_available_count = 0
+    teacher_source_priority_counts: Counter[str] = Counter()
     missing_target_conditioned_fields = {
         "target_conditioned_state": _missing_teacher_field_count(
             loaded_samples, "target_conditioned_state"
@@ -329,6 +521,8 @@ def export_distillation_dataset(
         _write_json(sample_dir / "entry_state.json", sample["entry_state"])
         _write_json(sample_dir / "teacher_output.json", sample["teacher_output"])
         _write_json(sample_dir / "teacher_validation.json", sample["teacher_validation"])
+        if sample.get("llm_teacher_validation"):
+            _write_json(sample_dir / "llm_teacher_label_validated.json", sample["llm_teacher_validation"])
         _write_json(
             sample_dir / "metadata.json",
             {
@@ -348,13 +542,17 @@ def export_distillation_dataset(
                 "memory_source": sample.get("entry_state", {}).get("memory_context", {}).get("source", ""),
                 "memory_snapshot_before_path": sample.get("entry_state", {}).get("memory_context", {}).get("snapshot_before_path", ""),
                 "memory_snapshot_after_path": sample.get("entry_state", {}).get("memory_context", {}).get("snapshot_after_path", ""),
+                "llm_teacher_available": sample.get("llm_teacher_available", 0),
+                "llm_teacher_validated_path": sample.get("llm_teacher_validated_path", ""),
             },
         )
         split = "val" if sample["sample_id"] in val_sample_ids else "train"
         record = _make_export_record(sample, sample_dir, split)
         memory_available_count += _safe_int(record.get("memory_available"), 0)
         memory_feature_available_count += _safe_int(record.get("memory_feature_available"), 0)
+        llm_teacher_available_count += _safe_int(record.get("llm_teacher_available"), 0)
         memory_source_counts[str(record.get("memory_source") or "none")] += 1
+        teacher_source_priority_counts[str(record.get("teacher_source_priority") or "legacy_teacher")] += 1
         if split == "train":
             train_records.append(record)
         else:
@@ -380,6 +578,9 @@ def export_distillation_dataset(
         "memory_available_count": memory_available_count,
         "memory_feature_available_count": memory_feature_available_count,
         "memory_source_counts": dict(sorted(memory_source_counts.items(), key=lambda pair: pair[0])),
+        "llm_teacher_mode": str(llm_teacher_mode),
+        "llm_teacher_available_count": llm_teacher_available_count,
+        "teacher_source_priority_counts": dict(sorted(teacher_source_priority_counts.items(), key=lambda pair: pair[0])),
     }
     _write_json(export_dir / "quality_report.json", quality_report)
 
@@ -401,6 +602,9 @@ def export_distillation_dataset(
         "memory_available_count": memory_available_count,
         "memory_feature_available_count": memory_feature_available_count,
         "memory_source_counts": dict(sorted(memory_source_counts.items(), key=lambda pair: pair[0])),
+        "llm_teacher_mode": str(llm_teacher_mode),
+        "llm_teacher_available_count": llm_teacher_available_count,
+        "teacher_source_priority_counts": dict(sorted(teacher_source_priority_counts.items(), key=lambda pair: pair[0])),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     _write_json(export_dir / "manifest.json", manifest)
@@ -421,6 +625,9 @@ def export_distillation_dataset(
         "memory_available_count": memory_available_count,
         "memory_feature_available_count": memory_feature_available_count,
         "memory_source_counts": dict(sorted(memory_source_counts.items(), key=lambda pair: pair[0])),
+        "llm_teacher_mode": str(llm_teacher_mode),
+        "llm_teacher_available_count": llm_teacher_available_count,
+        "teacher_source_priority_counts": dict(sorted(teacher_source_priority_counts.items(), key=lambda pair: pair[0])),
         "skipped_counts": quality_report["skipped_counts"],
     }
 
@@ -435,6 +642,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val_ratio", type=float, default=0.2)
     parser.add_argument("--min_teacher_confidence", type=float, default=0.55)
     parser.add_argument("--allow_weak_valid", action="store_true")
+    parser.add_argument(
+        "--llm_teacher_mode",
+        choices=("auto", "off", "require"),
+        default="auto",
+        help="auto overlays llm_teacher_label_validated.json when present; require skips samples without it.",
+    )
+    parser.add_argument("--llm_validated_name", type=str, default=DEFAULT_LLM_VALIDATED_NAME)
+    parser.add_argument(
+        "--allow_llm_warn",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow WARN LLM teacher labels to enter the export.",
+    )
+    parser.add_argument(
+        "--build_missing_entry_state",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Build entry_state.json on the fly when a labeling directory is missing it.",
+    )
     return parser
 
 
@@ -447,10 +673,15 @@ def main() -> None:
         val_ratio=float(args.val_ratio),
         min_teacher_confidence=float(args.min_teacher_confidence),
         allow_weak_valid=bool(args.allow_weak_valid),
+        llm_teacher_mode=str(args.llm_teacher_mode),
+        llm_validated_name=str(args.llm_validated_name),
+        allow_llm_warn=bool(args.allow_llm_warn),
+        build_missing_entry_state=bool(args.build_missing_entry_state),
     )
     print(
         f"[dataset-export] done: exported={summary['total_exported']} "
-        f"train={summary['train_count']} val={summary['val_count']}"
+        f"train={summary['train_count']} val={summary['val_count']} "
+        f"llm_teacher={summary['llm_teacher_available_count']}"
     )
     print(f"[dataset-export] manifest -> {summary['manifest_path']}")
     print(f"[dataset-export] quality_report -> {summary['quality_report_path']}")
