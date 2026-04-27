@@ -50,6 +50,8 @@
 32. [`31_memory_collection_validation_and_training_handoff_zh.md`](31_memory_collection_validation_and_training_handoff_zh.md)
 33. [`32_memory_aware_llm_teacher_prompt_and_data_collection_zh.md`](32_memory_aware_llm_teacher_prompt_and_data_collection_zh.md)
 34. [`33_memory_aware_representation_next_stage_plan_zh.md`](33_memory_aware_representation_next_stage_plan_zh.md)
+35. [`34_memory_aware_representation_experiment_report_zh.md`](34_memory_aware_representation_experiment_report_zh.md)
+36. [`35_memory_ablation_experiment_report_zh.md`](35_memory_ablation_experiment_report_zh.md)
 
 ## 这条路线的核心思想
 

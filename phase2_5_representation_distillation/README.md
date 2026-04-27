@@ -32,6 +32,8 @@ Current modules:
   - exports the distilled `z_entry` vectors, predictions, probabilities, and sample metadata
 - `analyze_representation_embeddings.py`
   - analyzes exported embeddings with centroid distances, nearest neighbors, no-entry separation, and episode consistency checks
+- `evaluate_representation_ablation.py`
+  - evaluates the same checkpoint with selected input features ablated, e.g. zeroed memory features
 
 The implementation order follows:
 
@@ -44,6 +46,7 @@ The implementation order follows:
 7. evaluator
 8. embedding exporter
 9. embedding analyzer
+10. ablation evaluator
 
 Basic training usage:
 
@@ -108,4 +111,18 @@ $env:MPLBACKEND='Agg'
 python E:\github\UAV-Flow\phase2_5_representation_distillation\analyze_representation_embeddings.py `
   --embedding_dir E:\github\UAV-Flow\phase2_5_representation_distillation\embeddings\memory_aware_v5_pilot_20260427 `
   --nearest_k 5
+```
+
+Run memory ablation:
+
+```powershell
+$env:KMP_DUPLICATE_LIB_OK='TRUE'
+python E:\github\UAV-Flow\phase2_5_representation_distillation\evaluate_representation_ablation.py `
+  --checkpoint_path E:\github\UAV-Flow\phase2_5_representation_distillation\runs\memory_aware_v5_pilot_20260427\checkpoints\best.pt `
+  --export_dir E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\exports\phase2_5_memory_aware_dataset_v3_20260427_20260427_141237 `
+  --run_name memory_aware_v5_pilot_20260427_val_memory_ablation `
+  --split val `
+  --ablations none zero_memory zero_candidates zero_memory_and_candidates `
+  --device cpu `
+  --batch_size 32
 ```
