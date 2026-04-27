@@ -64,6 +64,14 @@ E:\github\UAV-Flow\phase2_5_representation_distillation\evaluate_representation_
 或 10 个不同随机 train/val split
 ```
 
+当前已经进一步完成这两类正式实验，并将结果汇总在本文件第 10 节。
+
+自动化脚本：
+
+```text
+E:\github\UAV-Flow\phase2_5_representation_distillation\run_formal_ablation_experiments.py
+```
+
 ---
 
 ## 3. 实验命令
@@ -316,3 +324,111 @@ val no_entry_margin >= 0.70
 zero_memory 后 no_entry_margin 明显下降
 approachable / blocked 支持数 >= 5 each in val
 ```
+
+---
+
+## 10. 正式 10 Seed / 10 Random Split 实验
+
+上面的 10 次重复是同一 checkpoint 的确定性推理消融，因此方差约等于 0。
+
+为了满足正式实验要求，已经额外完成：
+
+```text
+seed_retrain: 10 个不同训练 seed，固定原始 split
+random_split: 10 个不同随机 split，固定训练 seed
+```
+
+运行命令：
+
+```powershell
+$env:KMP_DUPLICATE_LIB_OK='TRUE'
+python E:\github\UAV-Flow\phase2_5_representation_distillation\run_formal_ablation_experiments.py `
+  --base_export_dir E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\exports\phase2_5_memory_aware_dataset_v3_20260427_20260427_141237 `
+  --experiment_name memory_aware_v5_formal_ablation_10seed_10split `
+  --num_repeats 10 `
+  --start_seed 202604270 `
+  --experiment_modes seed_retrain random_split `
+  --inference_repeats 1
+```
+
+输出目录：
+
+```text
+E:\github\UAV-Flow\phase2_5_representation_distillation\ablations\memory_aware_v5_formal_ablation_10seed_10split_20260427_171221
+```
+
+核心文件：
+
+```text
+formal_ablation_summary.json
+formal_ablation_runs.jsonl
+formal_ablation_table.csv
+```
+
+同时生成：
+
+```text
+10 个 seed_retrain checkpoint
+10 个 random_split checkpoint
+10 个 random split dataset
+```
+
+### 10.1 不同训练 Seed，固定 Split
+
+| Mode | State Acc Mean | State Acc Std | Subgoal Mean | Subgoal Std | No-entry Margin Mean | No-entry Margin Std | True Low Mean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `none` | 0.8760 | 0.0605 | 0.8960 | 0.0599 | 0.9826 | 0.0110 | 0.0 |
+| `zero_memory` | 0.6160 | 0.0480 | 0.6080 | 0.0711 | 0.0523 | 0.1234 | 4.5 |
+| `zero_candidates` | 0.7120 | 0.1647 | 0.7200 | 0.1486 | 0.9798 | 0.0137 | 0.0 |
+| `zero_memory_and_candidates` | 0.2360 | 0.1368 | 0.2640 | 0.1592 | 0.0791 | 0.1959 | 4.1 |
+
+相对完整输入的平均下降：
+
+| Ablation | State Delta Mean | State Delta Std | Subgoal Delta Mean | Subgoal Delta Std | No-entry Margin Delta Mean | No-entry Margin Delta Std |
+|---|---:|---:|---:|---:|---:|---:|
+| `zero_memory` | -0.2600 | 0.0881 | -0.2880 | 0.0909 | -0.9304 | 0.1272 |
+| `zero_candidates` | -0.1640 | 0.1245 | -0.1760 | 0.1148 | -0.0028 | 0.0053 |
+| `zero_memory_and_candidates` | -0.6400 | 0.1649 | -0.6320 | 0.1695 | -0.9035 | 0.2039 |
+
+结论：
+
+```text
+在固定 split 下，换 10 个训练 seed 后，zero_memory 仍然让 no-entry margin 平均下降 0.9304。
+candidate ablation 对 no-entry margin 的影响接近 0。
+```
+
+### 10.2 不同 Random Split，固定训练 Seed
+
+| Mode | State Acc Mean | State Acc Std | Subgoal Mean | Subgoal Std | No-entry Margin Mean | No-entry Margin Std | True Low Mean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `none` | 0.9760 | 0.0265 | 0.9640 | 0.0120 | 0.9649 | 0.0242 | 0.0 |
+| `zero_memory` | 0.7920 | 0.0392 | 0.7800 | 0.0447 | 0.1623 | 0.1531 | 4.1 |
+| `zero_candidates` | 0.9280 | 0.0531 | 0.9160 | 0.0418 | 0.9667 | 0.0244 | 0.0 |
+| `zero_memory_and_candidates` | 0.5920 | 0.0909 | 0.6080 | 0.0891 | 0.0612 | 0.2018 | 4.5 |
+
+相对完整输入的平均下降：
+
+| Ablation | State Delta Mean | State Delta Std | Subgoal Delta Mean | Subgoal Delta Std | No-entry Margin Delta Mean | No-entry Margin Delta Std |
+|---|---:|---:|---:|---:|---:|---:|
+| `zero_memory` | -0.1840 | 0.0480 | -0.1840 | 0.0367 | -0.8026 | 0.1456 |
+| `zero_candidates` | -0.0480 | 0.0431 | -0.0480 | 0.0431 | 0.0018 | 0.0089 |
+| `zero_memory_and_candidates` | -0.3840 | 0.0824 | -0.3560 | 0.0809 | -0.9037 | 0.1925 |
+
+结论：
+
+```text
+在 10 个不同 random split 下，zero_memory 仍然让 no-entry margin 平均下降 0.8026。
+zero_candidates 对 no-entry margin 不造成稳定下降。
+```
+
+### 10.3 正式重复实验结论
+
+两组正式重复实验共同支持：
+
+```text
+memory 是 no-entry full-coverage 判断的必要信息源。
+candidate features 更主要服务于当前帧入口候选与局部子目标。
+该结论对训练 seed 和 random split 都比较稳定。
+```
+
+这比单次消融更适合作为论文实验结果。

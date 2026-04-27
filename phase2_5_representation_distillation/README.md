@@ -34,6 +34,8 @@ Current modules:
   - analyzes exported embeddings with centroid distances, nearest neighbors, no-entry separation, and episode consistency checks
 - `evaluate_representation_ablation.py`
   - evaluates the same checkpoint with selected input features ablated, e.g. zeroed memory features
+- `run_formal_ablation_experiments.py`
+  - trains repeated checkpoints for seed and random-split ablation experiments, then aggregates mean/variance/std
 
 The implementation order follows:
 
@@ -47,6 +49,7 @@ The implementation order follows:
 8. embedding exporter
 9. embedding analyzer
 10. ablation evaluator
+11. formal repeated ablation runner
 
 Basic training usage:
 
@@ -126,4 +129,17 @@ python E:\github\UAV-Flow\phase2_5_representation_distillation\evaluate_represen
   --device cpu `
   --batch_size 32 `
   --repeats 10
+```
+
+Run formal repeated ablation experiments:
+
+```powershell
+$env:KMP_DUPLICATE_LIB_OK='TRUE'
+python E:\github\UAV-Flow\phase2_5_representation_distillation\run_formal_ablation_experiments.py `
+  --base_export_dir E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\exports\phase2_5_memory_aware_dataset_v3_20260427_20260427_141237 `
+  --experiment_name memory_aware_v5_formal_ablation_10seed_10split `
+  --num_repeats 10 `
+  --start_seed 202604270 `
+  --experiment_modes seed_retrain random_split `
+  --inference_repeats 1
 ```

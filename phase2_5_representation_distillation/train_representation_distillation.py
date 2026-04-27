@@ -59,6 +59,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--representation_dim", type=int, default=None)
     parser.add_argument("--stage1_epochs", type=int, default=None)
     parser.add_argument("--stage2_epochs", type=int, default=None)
+    parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--save_every_epoch", action="store_true")
     return parser
 
@@ -110,6 +111,7 @@ def main() -> None:
         ),
         stage1_epochs=int(args.stage1_epochs if args.stage1_epochs is not None else file_cfg.get("stage1_epochs", 5)),
         stage2_epochs=int(args.stage2_epochs if args.stage2_epochs is not None else file_cfg.get("stage2_epochs", 12)),
+        seed=int(args.seed if args.seed is not None else file_cfg.get("seed", 0)),
         save_every_epoch=bool(args.save_every_epoch or file_cfg.get("save_every_epoch", False)),
     )
     summary = train_representation_distillation(config)

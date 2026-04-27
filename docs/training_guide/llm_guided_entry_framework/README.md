@@ -52,6 +52,7 @@
 34. [`33_memory_aware_representation_next_stage_plan_zh.md`](33_memory_aware_representation_next_stage_plan_zh.md)
 35. [`34_memory_aware_representation_experiment_report_zh.md`](34_memory_aware_representation_experiment_report_zh.md)
 36. [`35_memory_ablation_experiment_report_zh.md`](35_memory_ablation_experiment_report_zh.md)
+37. [`36_v6_data_collection_and_retraining_plan_zh.md`](36_v6_data_collection_and_retraining_plan_zh.md)
 
 ## 这条路线的核心思想
 

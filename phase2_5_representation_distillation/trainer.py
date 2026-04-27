@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +46,17 @@ def _write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _set_random_seed(seed: int) -> None:
+    _require_torch()
+    value = int(seed)
+    if value <= 0:
+        return
+    random.seed(value)
+    torch.manual_seed(value)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(value)
+
+
 @dataclass(frozen=True)
 class DistillationTrainerConfig:
     export_dir: str
@@ -66,6 +78,7 @@ class DistillationTrainerConfig:
     save_every_epoch: bool = False
     stage1_epochs: int = 5
     stage2_epochs: int = 12
+    seed: int = 0
 
 
 if torch is not None:
@@ -379,6 +392,7 @@ def _save_checkpoint(
 
 def train_representation_distillation(config: DistillationTrainerConfig) -> Dict[str, Any]:
     _require_torch()
+    _set_random_seed(int(config.seed))
     export_dir = Path(config.export_dir).resolve()
     output_root = Path(config.output_root).resolve()
     output_dir = output_root / str(config.run_name)
@@ -399,6 +413,10 @@ def train_representation_distillation(config: DistillationTrainerConfig) -> Dict
     model_config = _infer_model_config(train_examples, config)
     device = torch.device(str(config.device))
     model = EntryRepresentationStudent(model_config).to(device)
+    train_generator = None
+    if int(config.seed) > 0:
+        train_generator = torch.Generator()
+        train_generator.manual_seed(int(config.seed))
 
     train_loader = DataLoader(
         TensorizedTrainingDataset(train_examples),
@@ -406,6 +424,7 @@ def train_representation_distillation(config: DistillationTrainerConfig) -> Dict
         shuffle=True,
         num_workers=int(config.num_workers),
         collate_fn=_collate_examples,
+        generator=train_generator,
     )
     val_loader = DataLoader(
         TensorizedTrainingDataset(val_examples),
