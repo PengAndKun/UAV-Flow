@@ -28,6 +28,10 @@ Current modules:
   - validation metrics, per-class reports, and confusion matrix export
 - `evaluate_representation_distillation.py`
   - command-line entry for checkpoint evaluation
+- `export_representation_embeddings.py`
+  - exports the distilled `z_entry` vectors, predictions, probabilities, and sample metadata
+- `analyze_representation_embeddings.py`
+  - analyzes exported embeddings with centroid distances, nearest neighbors, no-entry separation, and episode consistency checks
 
 The implementation order follows:
 
@@ -38,6 +42,8 @@ The implementation order follows:
 5. loss builder
 6. trainer
 7. evaluator
+8. embedding exporter
+9. embedding analyzer
 
 Basic training usage:
 
@@ -79,4 +85,27 @@ python E:\github\UAV-Flow\phase2_5_representation_distillation\train_representat
   --stage2_epochs 12 `
   --epochs 20 `
   --run_name pilot_distill_v2
+```
+
+Export memory-aware representations:
+
+```powershell
+$env:KMP_DUPLICATE_LIB_OK='TRUE'
+python E:\github\UAV-Flow\phase2_5_representation_distillation\export_representation_embeddings.py `
+  --checkpoint_path E:\github\UAV-Flow\phase2_5_representation_distillation\runs\memory_aware_v5_pilot_20260427\checkpoints\best.pt `
+  --export_dir E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\exports\phase2_5_memory_aware_dataset_v3_20260427_20260427_141237 `
+  --run_name memory_aware_v5_pilot_20260427 `
+  --split all `
+  --device cpu `
+  --batch_size 32
+```
+
+Analyze exported representations:
+
+```powershell
+$env:KMP_DUPLICATE_LIB_OK='TRUE'
+$env:MPLBACKEND='Agg'
+python E:\github\UAV-Flow\phase2_5_representation_distillation\analyze_representation_embeddings.py `
+  --embedding_dir E:\github\UAV-Flow\phase2_5_representation_distillation\embeddings\memory_aware_v5_pilot_20260427 `
+  --nearest_k 5
 ```

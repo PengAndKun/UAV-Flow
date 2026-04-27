@@ -63,6 +63,7 @@ phase2_multimodal_fusion_analysis/results
 phase2_door_or_window_yolo26_training
 phase2_5_representation_distillation/evals
 phase2_5_representation_distillation/runs
+phase2_5_representation_distillation/embeddings
 phase3_dataset_export
 phase3_online_eval
 phase4_search_logs

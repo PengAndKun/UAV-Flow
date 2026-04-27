@@ -152,7 +152,7 @@ yaw_left / yaw_right / right / forward
 
 ### 4.1 任务一：导出 representation embedding
 
-需要新增一个导出脚本：
+已实现导出脚本：
 
 ```text
 E:\github\UAV-Flow\phase2_5_representation_distillation\export_representation_embeddings.py
@@ -184,6 +184,17 @@ E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\exports\phase2_5_memory_awa
 
 ```text
 E:\github\UAV-Flow\phase2_5_representation_distillation\embeddings\memory_aware_v5_pilot_20260427
+```
+
+当前已完成一次导出：
+
+```text
+sample_count = 130
+embedding_dim = 128
+split_counts.train = 105
+split_counts.val = 25
+mean_no_entry_prob_when_true = 0.9715
+mean_no_entry_prob_when_false = 0.0057
 ```
 
 ### 4.2 embedding 输出格式
@@ -476,7 +487,7 @@ target_house_no_entry_after_full_coverage = 27
 
 ### 7.1 第一步：写 embedding exporter
 
-新增：
+已实现：
 
 ```text
 phase2_5_representation_distillation/export_representation_embeddings.py
@@ -500,7 +511,7 @@ no_entry_completion_prob 可以被统计
 
 ### 7.2 第二步：写 representation analyzer
 
-新增：
+已实现：
 
 ```text
 phase2_5_representation_distillation/analyze_representation_embeddings.py
@@ -520,6 +531,20 @@ nearest_neighbors.jsonl
 no_entry_probability_report.json
 episode_temporal_consistency_report.json
 embedding_projection.png
+```
+
+当前已生成：
+
+```text
+E:\github\UAV-Flow\phase2_5_representation_distillation\embeddings\memory_aware_v5_pilot_20260427\analysis
+```
+
+关键结果：
+
+```text
+no_entry_separation_margin_mean = 0.9658
+temporal_warning_count = 0
+projection_written = true
 ```
 
 ### 7.3 第三步：决定是否补采 v4 数据
@@ -636,4 +661,3 @@ export_representation_embeddings.py
 -> 根据表示质量决定补采 v4 数据
 -> 再进入 policy state interface 和 action 训练
 ```
-
