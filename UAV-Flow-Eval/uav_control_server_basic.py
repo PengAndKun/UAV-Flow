@@ -54,6 +54,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(EVAL_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 DEFAULT_HOUSES_CONFIG = os.path.join(EVAL_DIR, "houses_config.json")
+MEMORY_ACTION_LOG_LIMIT = 2000
 
 from phase2_multimodal_fusion_analysis import (  # noqa: E402
     DEFAULT_ENTRY_SEARCH_MEMORY_PATH,
@@ -154,6 +155,9 @@ class BasicUAVControlBackend:
         self.memory_collection_dir = ""
         self.memory_collection_step_index = 0
         self.memory_collection_snapshot_count = 0
+        self.memory_collection_action_log: List[Dict[str, Any]] = []
+        self.memory_collection_actions_since_capture: List[Dict[str, Any]] = []
+        self.memory_collection_action_log_path = ""
         self.last_memory_snapshot_before_path = ""
         self.last_memory_snapshot_after_path = ""
         self.last_memory_snapshot_time = ""
@@ -733,10 +737,79 @@ class BasicUAVControlBackend:
             self.memory_store.update_working_memory(house_id, patch)
         return mission
 
-    def _record_memory_action(self, action_name: str, *, increment_step: bool = True) -> None:
+    def _pose_list_to_dict(self, pose: Optional[List[float]]) -> Dict[str, Any]:
+        if not isinstance(pose, (list, tuple)) or len(pose) < 4:
+            return {}
+        return {
+            "x": float(pose[0]),
+            "y": float(pose[1]),
+            "z": float(pose[2]),
+            "task_yaw": float(pose[3]),
+            "uav_yaw": float(pose[3]),
+        }
+
+    def _write_memory_action_log(self) -> None:
+        if not self.memory_collection_dir:
+            return
+        if not self.memory_collection_action_log_path:
+            self.memory_collection_action_log_path = os.path.join(self.memory_collection_dir, "memory_action_log.json")
+        os.makedirs(os.path.dirname(self.memory_collection_action_log_path), exist_ok=True)
+        payload = {
+            "episode_id": str(self.memory_collection_episode_id or ""),
+            "episode_label": str(self.memory_collection_episode_label or ""),
+            "collection_dir": str(self.memory_collection_dir or ""),
+            "updated_at": now_timestamp(),
+            "current_step_index": int(self.memory_collection_step_index),
+            "action_count": int(len(self.memory_collection_action_log)),
+            "actions_since_last_capture": int(len(self.memory_collection_actions_since_capture)),
+            "actions": self.memory_collection_action_log,
+        }
+        with open(self.memory_collection_action_log_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+
+    def _append_memory_collection_action(
+        self,
+        action_name: str,
+        *,
+        step_before: int,
+        step_after: int,
+        pose_before: Optional[List[float]] = None,
+        pose_after: Optional[List[float]] = None,
+        movement: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self.memory_collection_active:
+            return
+        event = {
+            "event_type": "movement_action",
+            "action_index": int(len(self.memory_collection_action_log) + 1),
+            "action_time": now_timestamp(),
+            "episode_id": str(self.memory_collection_episode_id or ""),
+            "step_before": int(step_before),
+            "step_after": int(step_after),
+            "action_name": str(action_name or ""),
+            "pose_before": self._pose_list_to_dict(pose_before),
+            "pose_after": self._pose_list_to_dict(pose_after),
+            "movement": dict(movement) if isinstance(movement, dict) else {},
+        }
+        self.memory_collection_action_log.append(event)
+        if len(self.memory_collection_action_log) > MEMORY_ACTION_LOG_LIMIT:
+            self.memory_collection_action_log = self.memory_collection_action_log[-MEMORY_ACTION_LOG_LIMIT:]
+        self.memory_collection_actions_since_capture.append(event)
+        self._write_memory_action_log()
+
+    def _record_memory_action(
+        self,
+        action_name: str,
+        *,
+        increment_step: bool = True,
+        pose_before: Optional[List[float]] = None,
+        pose_after: Optional[List[float]] = None,
+        movement: Optional[Dict[str, Any]] = None,
+    ) -> None:
         mission = self._sync_memory_runtime_context()
         target_house_id = str(mission.get("target_house_id", "") or "").strip()
         current_house_id = str(mission.get("current_house_id", "") or "").strip()
+        step_before = int(self.memory_collection_step_index)
         touched_ids: List[str] = []
         for house_id in (target_house_id, current_house_id):
             if house_id and house_id not in touched_ids:
@@ -744,7 +817,16 @@ class BasicUAVControlBackend:
         for house_id in touched_ids:
             self.memory_store.append_recent_action(house_id, action_name)
         if self.memory_collection_active and increment_step:
-            self.memory_collection_step_index = int(self.memory_collection_step_index) + 1
+            self.memory_collection_step_index = step_before + 1
+        step_after = int(self.memory_collection_step_index)
+        self._append_memory_collection_action(
+            action_name,
+            step_before=step_before,
+            step_after=step_after,
+            pose_before=pose_before,
+            pose_after=pose_after,
+            movement=movement,
+        )
         self.memory_store.save()
 
     def _build_memory_collection_state(self) -> Dict[str, Any]:
@@ -769,6 +851,9 @@ class BasicUAVControlBackend:
             "last_capture_label": str(self.last_memory_capture_label or ""),
             "last_capture_source": str(self.last_memory_capture_source or ""),
             "last_capture_time": str(self.last_memory_capture_time or ""),
+            "action_count": int(len(self.memory_collection_action_log)),
+            "actions_since_last_capture": int(len(self.memory_collection_actions_since_capture)),
+            "action_log_path": str(self.memory_collection_action_log_path or ""),
         }
 
     def _reset_memory_store(self) -> None:
@@ -834,6 +919,9 @@ class BasicUAVControlBackend:
             self.memory_collection_dir = collection_dir
             self.memory_collection_step_index = 0
             self.memory_collection_snapshot_count = 0
+            self.memory_collection_action_log = []
+            self.memory_collection_actions_since_capture = []
+            self.memory_collection_action_log_path = os.path.join(collection_dir, "memory_action_log.json")
             self.last_memory_snapshot_before_path = ""
             self.last_memory_snapshot_after_path = ""
             self.last_memory_snapshot_time = ""
@@ -851,6 +939,7 @@ class BasicUAVControlBackend:
                 "episode_start",
                 note="Memory collection started.",
             )
+            self._write_memory_action_log()
             logger.info(
                 "Memory collection started episode=%s dir=%s reset_store=%s",
                 episode_id,
@@ -868,6 +957,7 @@ class BasicUAVControlBackend:
                     "episode_stop",
                     note="Memory collection stopped.",
                 )
+                self._write_memory_action_log()
             episode_id = self.memory_collection_episode_id
             self.memory_collection_active = False
             self.memory_collection_episode_label = self.memory_collection_episode_label
@@ -886,6 +976,14 @@ class BasicUAVControlBackend:
             self.last_memory_capture_label = ""
             self.last_memory_capture_source = ""
             self.last_memory_capture_time = ""
+            self.memory_collection_action_log = []
+            self.memory_collection_actions_since_capture = []
+            self.memory_collection_action_log_path = (
+                os.path.join(self.memory_collection_dir, "memory_action_log.json")
+                if self.memory_collection_dir
+                else ""
+            )
+            self._write_memory_action_log()
             logger.info("Memory store reset path=%s", self.memory_store_path)
             return self.get_state(message="Memory store reset.")
 
@@ -923,6 +1021,8 @@ class BasicUAVControlBackend:
                 raise RuntimeError("No synchronized RGB/depth frame available for memory capture.")
 
             step_index = int(self.memory_collection_step_index)
+            action_history_since_capture = [dict(item) for item in self.memory_collection_actions_since_capture]
+            action_count_since_capture = int(len(action_history_since_capture))
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_label = sanitize_fragment(label)
             safe_source = sanitize_fragment(capture_source) or "manual"
@@ -933,6 +1033,7 @@ class BasicUAVControlBackend:
             run_dir = os.path.join(capture_root, run_name)
             labeling_dir = os.path.join(run_dir, "labeling")
             os.makedirs(labeling_dir, exist_ok=True)
+            action_history_path = os.path.join(labeling_dir, "action_history_since_last_capture.json")
 
             step_note = str(note or "").strip()
             state = self.get_state()
@@ -950,6 +1051,8 @@ class BasicUAVControlBackend:
                 "requested_label": str(label or ""),
                 "note": step_note,
                 "run_dir": run_dir,
+                "action_count_since_last_capture": action_count_since_capture,
+                "action_history_since_last_capture_path": action_history_path,
             }
             before_snapshot_path = os.path.join(labeling_dir, "entry_search_memory_snapshot_before.json")
             self.last_memory_snapshot_before_path = self._save_memory_snapshot_file(
@@ -1020,23 +1123,46 @@ class BasicUAVControlBackend:
                 "memory_snapshot_after_path": str(self.last_memory_snapshot_after_path or ""),
                 "target_house_id": target_house_id,
                 "current_house_id": current_house_id,
+                "action_count_since_last_capture": action_count_since_capture,
+                "action_history_since_last_capture_path": str(action_history_path),
             }
+            capture_time = now_timestamp()
             temporal_context = {
                 "episode_id": str(self.memory_collection_episode_id or ""),
                 "step_index": step_index,
                 "previous_action": str(self.last_action or ""),
                 "capture_source": safe_source,
-                "capture_time": now_timestamp(),
+                "capture_time": capture_time,
                 "current_target_house_id": target_house_id,
                 "current_house_id": current_house_id,
                 "memory_snapshot_before_path": str(self.last_memory_snapshot_before_path or ""),
                 "memory_snapshot_after_path": str(self.last_memory_snapshot_after_path or ""),
                 "memory_store_path": str(self.memory_store_path),
+                "action_count_since_last_capture": action_count_since_capture,
+                "action_history_since_last_capture_path": str(action_history_path),
+                "previous_actions": [
+                    str(item.get("action_name", "") or "")
+                    for item in action_history_since_capture
+                ],
+                "actions_since_last_capture": action_history_since_capture,
             }
+            action_history_payload = {
+                "episode_id": str(self.memory_collection_episode_id or ""),
+                "episode_label": str(self.memory_collection_episode_label or ""),
+                "capture_step_index": step_index,
+                "capture_source": safe_source,
+                "capture_time": capture_time,
+                "action_count": action_count_since_capture,
+                "actions": action_history_since_capture,
+            }
+            with open(action_history_path, "w", encoding="utf-8") as fh:
+                json.dump(action_history_payload, fh, indent=2, ensure_ascii=False)
             with open(os.path.join(labeling_dir, "sample_metadata.json"), "w", encoding="utf-8") as fh:
                 json.dump(sample_metadata, fh, indent=2, ensure_ascii=False)
             with open(os.path.join(labeling_dir, "temporal_context.json"), "w", encoding="utf-8") as fh:
                 json.dump(temporal_context, fh, indent=2, ensure_ascii=False)
+            self.memory_collection_actions_since_capture = []
+            self._write_memory_action_log()
 
             self.last_memory_capture_run_dir = str(run_dir)
             self.last_memory_capture_label = str(label or "")
@@ -1449,6 +1575,7 @@ class BasicUAVControlBackend:
             if not self.movement_enabled:
                 return self.get_state(status="disabled", message="Basic movement is disabled. Enable it first.")
             x, y, z, task_yaw_deg = self.get_task_pose()
+            pose_before = [float(x), float(y), float(z), float(task_yaw_deg)]
             actual_uav_yaw_before = float(task_yaw_deg)
             move_yaw_deg = float(actual_uav_yaw_before)
             theta = np.radians(move_yaw_deg)
@@ -1464,9 +1591,10 @@ class BasicUAVControlBackend:
                 self.set_task_yaw_absolute(target_task_yaw)
             self.last_action = str(action_name or "custom")
             self.refresh_observations()
-            self.command_task_yaw_deg = float(self.get_task_pose()[3])
-            actual_task_yaw_after = self.get_task_pose()[3]
-            actual_uav_yaw_after = self.get_task_pose()[3]
+            pose_after = self.get_task_pose()
+            self.command_task_yaw_deg = float(pose_after[3])
+            actual_task_yaw_after = pose_after[3]
+            actual_uav_yaw_after = pose_after[3]
             logger.info(
                 "Basic move action=%s local=(fwd=%.1f,right=%.1f,up=%.1f,yaw=%.1f) world=(dx=%.1f,dy=%.1f,dz=%.1f) "
                 "pos=(%.1f, %.1f, %.1f) move_yaw=%.1f command_yaw=%.1f actual_task_yaw=%.1f actual_uav_yaw=%.1f",
@@ -1486,7 +1614,24 @@ class BasicUAVControlBackend:
                 float(actual_task_yaw_after),
                 float(actual_uav_yaw_after),
             )
-            self._record_memory_action(self.last_action)
+            movement_payload = {
+                "action_type": "move_relative",
+                "forward_cm": float(forward_cm),
+                "right_cm": float(right_cm),
+                "up_cm": float(up_cm),
+                "yaw_delta_deg": float(yaw_delta_deg),
+                "world_delta_x": float(delta_x),
+                "world_delta_y": float(delta_y),
+                "world_delta_z": float(up_cm),
+                "yaw_before_deg": float(actual_uav_yaw_before),
+                "yaw_after_deg": float(actual_uav_yaw_after),
+            }
+            self._record_memory_action(
+                self.last_action,
+                pose_before=pose_before,
+                pose_after=pose_after,
+                movement=movement_payload,
+            )
             return self.get_state(message=f"Executed {self.last_action}.")
 
     def set_task_label(self, task_label: str) -> Dict[str, Any]:
@@ -1498,6 +1643,7 @@ class BasicUAVControlBackend:
 
     def set_manual_pose(self, pose_payload: Dict[str, Any]) -> Dict[str, Any]:
         with self.lock:
+            pose_before = self.get_task_pose()
             x = float(pose_payload["x"])
             y = float(pose_payload["y"])
             z = float(pose_payload["z"])
@@ -1507,17 +1653,29 @@ class BasicUAVControlBackend:
             self.set_task_yaw_absolute(target_task_yaw, tolerance_deg=1.0, attempts=8)
             self.last_action = "set_pose"
             self.refresh_observations()
-            self.command_task_yaw_deg = float(self.get_task_pose()[3])
+            pose_after = self.get_task_pose()
+            self.command_task_yaw_deg = float(pose_after[3])
             logger.info(
                 "Manual pose set -> pos=(%.1f, %.1f, %.1f) target_task_yaw=%.1f actual_task_yaw=%.1f actual_uav_yaw=%.1f",
                 x,
                 y,
                 z,
                 target_task_yaw,
-                float(self.get_task_pose()[3]),
-                float(self.get_task_pose()[3]),
+                float(pose_after[3]),
+                float(pose_after[3]),
             )
-            self._record_memory_action("set_pose")
+            self._record_memory_action(
+                "set_pose",
+                pose_before=pose_before,
+                pose_after=pose_after,
+                movement={
+                    "action_type": "set_pose",
+                    "requested_x": float(x),
+                    "requested_y": float(y),
+                    "requested_z": float(z),
+                    "requested_yaw_deg": float(target_task_yaw),
+                },
+            )
             return self.get_state(message="Manual pose applied.")
 
     def get_frame_jpeg(self) -> bytes:

@@ -418,12 +418,17 @@ def validate_label(
             "strong_best_entry_not_selected",
             f"Memory has strong best entry {best_id}, but label selected {candidate_id}.",
         )
-    if best_strong and subgoal in {"keep_search_target_house", "ignore_non_target_entry"}:
+    if (
+        best_strong
+        and traversable
+        and state != "target_house_entry_blocked"
+        and subgoal in {"keep_search_target_house", "ignore_non_target_entry"}
+    ):
         add_issue(
             warnings,
             "WARN",
             "strong_best_entry_ignored",
-            "Memory has a strong door-like best entry, but label keeps searching or ignores entry.",
+            "Memory has a strong traversable door-like best entry, but label keeps searching or ignores entry.",
         )
     if confidence < 0.45:
         add_issue(warnings, "WARN", "low_confidence", f"LLM teacher confidence is low: {confidence:.2f}")

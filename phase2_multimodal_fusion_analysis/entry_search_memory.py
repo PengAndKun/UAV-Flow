@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -26,6 +27,20 @@ DEFAULT_EPISODIC_LIMIT = 64
 DEFAULT_PERCEPTION_BUFFER_LIMIT = 5
 DEFAULT_BBOX_HISTORY_LIMIT = 6
 DEFAULT_SOURCE_FRAMES_LIMIT = 8
+DEFAULT_PERIMETER_BIN_IDS = [
+    "east",
+    "north_east",
+    "north",
+    "north_west",
+    "west",
+    "south_west",
+    "south",
+    "south_east",
+]
+NO_ENTRY_MIN_VISITED_COVERAGE_RATIO = 0.75
+NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO = 0.50
+NO_ENTRY_MIN_TOTAL_OBSERVATIONS = 8
+RELIABLE_ENTRY_ASSOCIATION_THRESHOLD = 0.65
 DEFAULT_SECTOR_IDS = [
     "front_left",
     "front_center",
@@ -98,6 +113,79 @@ def _truthy(value: Any) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _normalize_angle_360(angle_deg: float) -> float:
+    return float(angle_deg) % 360.0
+
+
+def _perimeter_bin_from_angle(angle_deg: float) -> str:
+    normalized = _normalize_angle_360(float(angle_deg))
+    index = int(((normalized + 22.5) % 360.0) // 45.0)
+    return DEFAULT_PERIMETER_BIN_IDS[index]
+
+
+def _default_perimeter_bin() -> Dict[str, Any]:
+    return {
+        "visited": False,
+        "observed": False,
+        "visit_count": 0,
+        "visual_observation_count": 0,
+        "last_visit_time": None,
+        "last_viewpoint_angle_deg": None,
+        "last_target_bearing_deg": None,
+        "last_distance_cm": None,
+    }
+
+
+def _default_perimeter_coverage() -> Dict[str, Any]:
+    return {
+        "bin_count": len(DEFAULT_PERIMETER_BIN_IDS),
+        "visited_bin_count": 0,
+        "observed_bin_count": 0,
+        "visited_coverage_ratio": 0.0,
+        "observed_coverage_ratio": 0.0,
+        "total_observations": 0,
+        "visual_observation_count": 0,
+        "closed_loop_score": 0.0,
+        "last_viewpoint_angle_deg": None,
+        "last_viewpoint_bin": "",
+        "last_target_bearing_deg": None,
+        "last_distance_cm": None,
+        "bins": {bin_id: _default_perimeter_bin() for bin_id in DEFAULT_PERIMETER_BIN_IDS},
+    }
+
+
+def _default_search_completion_evidence() -> Dict[str, Any]:
+    return {
+        "no_entry_after_full_coverage": False,
+        "full_coverage_ready": False,
+        "has_reliable_entry": False,
+        "visited_coverage_ratio": 0.0,
+        "observed_coverage_ratio": 0.0,
+        "total_observations": 0,
+        "candidate_entry_count": 0,
+        "rejected_entry_count": 0,
+        "approachable_entry_count": 0,
+        "blocked_entry_count": 0,
+        "reasons": [],
+        "thresholds": {
+            "min_visited_coverage_ratio": NO_ENTRY_MIN_VISITED_COVERAGE_RATIO,
+            "min_observed_coverage_ratio": NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO,
+            "min_total_observations": NO_ENTRY_MIN_TOTAL_OBSERVATIONS,
+            "reliable_entry_association_threshold": RELIABLE_ENTRY_ASSOCIATION_THRESHOLD,
+        },
+        "updated_at": _now_text(),
+    }
+
+
 def _default_working_memory() -> Dict[str, Any]:
     return {
         "target_house_id": "",
@@ -124,6 +212,8 @@ def _default_semantic_memory() -> Dict[str, Any]:
             "blocked_entry_count": 0,
             "rejected_entry_count": 0,
         },
+        "perimeter_coverage": _default_perimeter_coverage(),
+        "search_completion_evidence": _default_search_completion_evidence(),
         "searched_sectors": {
             sector_id: {
                 "observed": False,
@@ -493,6 +583,77 @@ class EntrySearchMemoryStore:
         self._normalize_root()
         return memory
 
+    def update_perimeter_coverage(
+        self,
+        house_id: str,
+        target_context: Dict[str, Any],
+        *,
+        visit_time: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        memory = self.ensure_house(house_id)
+        semantic_memory = memory["semantic_memory"]
+        coverage = semantic_memory.setdefault("perimeter_coverage", _default_perimeter_coverage())
+        if not isinstance(coverage, dict):
+            coverage = _default_perimeter_coverage()
+            semantic_memory["perimeter_coverage"] = coverage
+        bins = coverage.setdefault("bins", {})
+        if not isinstance(bins, dict):
+            bins = {}
+            coverage["bins"] = bins
+        for bin_id in DEFAULT_PERIMETER_BIN_IDS:
+            bin_payload = bins.get(bin_id)
+            if not isinstance(bin_payload, dict):
+                bins[bin_id] = _default_perimeter_bin()
+
+        target_context = target_context if isinstance(target_context, dict) else {}
+        center = target_context.get("target_house_center_world", {})
+        pose = target_context.get("uav_pose_world", {})
+        center = center if isinstance(center, dict) else {}
+        pose = pose if isinstance(pose, dict) else {}
+        house_x = _safe_float(center.get("x"), None)
+        house_y = _safe_float(center.get("y"), None)
+        uav_x = _safe_float(pose.get("x"), None)
+        uav_y = _safe_float(pose.get("y"), None)
+        if None in (house_x, house_y, uav_x, uav_y):
+            self._normalize_semantic_memory(memory)
+            memory["updated_at"] = _now_text()
+            self._normalize_root()
+            return memory
+
+        viewpoint_angle = _normalize_angle_360(math.degrees(math.atan2(float(uav_y) - float(house_y), float(uav_x) - float(house_x))))
+        bin_id = _perimeter_bin_from_angle(viewpoint_angle)
+        target_bearing = _safe_float(target_context.get("target_house_bearing_deg"), None)
+        distance_cm = _safe_float(target_context.get("target_house_distance_cm"), None)
+        if distance_cm is None:
+            distance_cm = float(math.hypot(float(uav_x) - float(house_x), float(uav_y) - float(house_y)))
+        visually_observed = bool(target_context.get("target_house_in_fov", False))
+        if target_bearing is not None and abs(float(target_bearing)) <= 75.0:
+            visually_observed = True
+
+        bin_payload = bins.setdefault(bin_id, _default_perimeter_bin())
+        bin_payload["visited"] = True
+        bin_payload["visit_count"] = int(bin_payload.get("visit_count", 0) or 0) + 1
+        if visually_observed:
+            bin_payload["observed"] = True
+            bin_payload["visual_observation_count"] = int(bin_payload.get("visual_observation_count", 0) or 0) + 1
+        bin_payload["last_visit_time"] = visit_time if visit_time is not None else datetime.now().timestamp()
+        bin_payload["last_viewpoint_angle_deg"] = round(float(viewpoint_angle), 3)
+        bin_payload["last_target_bearing_deg"] = None if target_bearing is None else round(float(target_bearing), 3)
+        bin_payload["last_distance_cm"] = None if distance_cm is None else round(float(distance_cm), 3)
+
+        coverage["last_viewpoint_angle_deg"] = round(float(viewpoint_angle), 3)
+        coverage["last_viewpoint_bin"] = bin_id
+        coverage["last_target_bearing_deg"] = None if target_bearing is None else round(float(target_bearing), 3)
+        coverage["last_distance_cm"] = None if distance_cm is None else round(float(distance_cm), 3)
+        coverage["total_observations"] = int(coverage.get("total_observations", 0) or 0) + 1
+        if visually_observed:
+            coverage["visual_observation_count"] = int(coverage.get("visual_observation_count", 0) or 0) + 1
+
+        self._normalize_semantic_memory(memory)
+        memory["updated_at"] = _now_text()
+        self._normalize_root()
+        return memory
+
     def upsert_candidate_entry(self, house_id: str, candidate: Dict[str, Any]) -> Dict[str, Any]:
         memory = self.ensure_house(house_id)
         entries = memory["semantic_memory"].setdefault("candidate_entries", [])
@@ -656,6 +817,8 @@ class EntrySearchMemoryStore:
             return "ENTERED"
         if entry_search_status in {"entered_house"}:
             return "ENTERED"
+        if entry_search_status == "no_entry_found_after_full_coverage":
+            return "NO_ENTRY_FOUND"
         if latest_subgoal in {"approach_target_entry", "align_target_entry", "cross_target_entry"}:
             return "APPROACHING_ENTRY"
         if any(float(entry.get("association_confidence", 0.0) or 0.0) >= 0.7 for entry in candidate_entries if isinstance(entry, dict)):
@@ -677,6 +840,13 @@ class EntrySearchMemoryStore:
             else 0
         )
         if house_status in {"EXPLORED", "PERSON_FOUND"}:
+            return "COMPLETED"
+        entry_search_status = (
+            memory.get("semantic_memory", {}).get("entry_search_status", "")
+            if isinstance(memory.get("semantic_memory"), dict)
+            else ""
+        )
+        if str(entry_search_status or "").strip() == "no_entry_found_after_full_coverage":
             return "COMPLETED"
         if bool(memory.get("target_match_active", False)):
             return "TARGET_ACTIVE"
@@ -711,6 +881,12 @@ class EntrySearchMemoryStore:
         mission_status = self._derive_mission_status(memory)
         semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
         candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
+        coverage = semantic_memory.get("perimeter_coverage", {}) if isinstance(semantic_memory.get("perimeter_coverage"), dict) else {}
+        completion_evidence = (
+            semantic_memory.get("search_completion_evidence", {})
+            if isinstance(semantic_memory.get("search_completion_evidence"), dict)
+            else {}
+        )
         best_entry_id = str(semantic_memory.get("last_best_entry_id") or memory.get("working_memory", {}).get("last_best_entry_id") or "").strip()
         best_target_match_score = 0.0
         for candidate in candidate_entries:
@@ -734,7 +910,10 @@ class EntrySearchMemoryStore:
                 "candidate_entry_count": len(candidate_entries),
                 "best_entry_id": best_entry_id,
                 "best_target_match_score": round(float(best_target_match_score), 4),
-                "searched": bool(search_status in {"SEARCHED", "ENTERED"}) or str(memory.get("house_status", "") or "").strip() in {"EXPLORED", "PERSON_FOUND"},
+                "searched": bool(search_status in {"SEARCHED", "ENTERED", "NO_ENTRY_FOUND"}) or str(memory.get("house_status", "") or "").strip() in {"EXPLORED", "PERSON_FOUND"},
+                "visited_coverage_ratio": round(float(coverage.get("visited_coverage_ratio", 0.0) or 0.0), 4),
+                "observed_coverage_ratio": round(float(coverage.get("observed_coverage_ratio", 0.0) or 0.0), 4),
+                "no_entry_after_full_coverage": bool(completion_evidence.get("no_entry_after_full_coverage", False)),
                 "updated_at": _now_text(),
             }
         )
@@ -810,6 +989,137 @@ class EntrySearchMemoryStore:
         )
         top_candidates = working_memory.get("top_candidates", [])
         working_memory["top_candidates"] = list(top_candidates)[: self.top_candidates_limit] if isinstance(top_candidates, list) else []
+
+    def _refresh_perimeter_coverage(self, semantic_memory: Dict[str, Any]) -> Dict[str, Any]:
+        coverage = semantic_memory.get("perimeter_coverage", {})
+        if not isinstance(coverage, dict):
+            coverage = _default_perimeter_coverage()
+            semantic_memory["perimeter_coverage"] = coverage
+        defaults = _default_perimeter_coverage()
+        for key, value in defaults.items():
+            coverage.setdefault(key, copy.deepcopy(value))
+        bins = coverage.get("bins", {})
+        if not isinstance(bins, dict):
+            bins = {}
+            coverage["bins"] = bins
+        visited_bin_count = 0
+        observed_bin_count = 0
+        total_observations = 0
+        visual_observation_count = 0
+        for bin_id in DEFAULT_PERIMETER_BIN_IDS:
+            bin_payload = bins.get(bin_id)
+            if not isinstance(bin_payload, dict):
+                bin_payload = _default_perimeter_bin()
+                bins[bin_id] = bin_payload
+            for key, value in _default_perimeter_bin().items():
+                bin_payload.setdefault(key, copy.deepcopy(value))
+            bin_payload["visit_count"] = max(0, int(bin_payload.get("visit_count", 0) or 0))
+            bin_payload["visual_observation_count"] = max(0, int(bin_payload.get("visual_observation_count", 0) or 0))
+            bin_payload["visited"] = bool(bin_payload.get("visited", False) or bin_payload["visit_count"] > 0)
+            bin_payload["observed"] = bool(bin_payload.get("observed", False) or bin_payload["visual_observation_count"] > 0)
+            if bin_payload["visited"]:
+                visited_bin_count += 1
+            if bin_payload["observed"]:
+                observed_bin_count += 1
+            total_observations += bin_payload["visit_count"]
+            visual_observation_count += bin_payload["visual_observation_count"]
+        bin_count = max(1, len(DEFAULT_PERIMETER_BIN_IDS))
+        coverage["bin_count"] = bin_count
+        coverage["visited_bin_count"] = visited_bin_count
+        coverage["observed_bin_count"] = observed_bin_count
+        coverage["visited_coverage_ratio"] = round(float(visited_bin_count) / float(bin_count), 4)
+        coverage["observed_coverage_ratio"] = round(float(observed_bin_count) / float(bin_count), 4)
+        coverage["total_observations"] = max(int(coverage.get("total_observations", 0) or 0), total_observations)
+        coverage["visual_observation_count"] = max(int(coverage.get("visual_observation_count", 0) or 0), visual_observation_count)
+        coverage["closed_loop_score"] = round(min(float(coverage["visited_coverage_ratio"]), 1.0), 4)
+        coverage["visited_bins"] = [bin_id for bin_id in DEFAULT_PERIMETER_BIN_IDS if bins[bin_id].get("visited")]
+        coverage["observed_bins"] = [bin_id for bin_id in DEFAULT_PERIMETER_BIN_IDS if bins[bin_id].get("observed")]
+        return coverage
+
+    def _entry_is_reliable_target_entry(self, entry: Dict[str, Any]) -> bool:
+        status = str(entry.get("status") or entry.get("entry_state") or "").strip()
+        entry_type = str(entry.get("entry_type") or entry.get("semantic_class") or "").strip().lower()
+        if "window" in entry_type or status in {"window_rejected", "non_target"}:
+            return False
+        if bool(entry.get("is_entered", False)):
+            return True
+        if status in {"approachable", "blocked_confirmed"}:
+            return True
+        try:
+            association_confidence = float(entry.get("association_confidence", 0.0) or 0.0)
+        except Exception:
+            association_confidence = 0.0
+        try:
+            target_match_score = float(entry.get("target_match_score", 0.0) or 0.0)
+        except Exception:
+            target_match_score = 0.0
+        return association_confidence >= RELIABLE_ENTRY_ASSOCIATION_THRESHOLD and target_match_score >= 0.45
+
+    def _refresh_search_completion_evidence(self, memory: Dict[str, Any]) -> None:
+        semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
+        search_summary = semantic_memory.get("search_summary", {}) if isinstance(semantic_memory.get("search_summary"), dict) else {}
+        coverage = semantic_memory.get("perimeter_coverage", {}) if isinstance(semantic_memory.get("perimeter_coverage"), dict) else {}
+        candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
+        candidate_count = len(candidate_entries)
+        rejected_count = int(search_summary.get("rejected_entry_count", 0) or 0)
+        approachable_count = int(search_summary.get("approachable_entry_count", 0) or 0)
+        blocked_count = int(search_summary.get("blocked_entry_count", 0) or 0)
+        visited_ratio = float(coverage.get("visited_coverage_ratio", 0.0) or 0.0)
+        observed_ratio = float(coverage.get("observed_coverage_ratio", 0.0) or 0.0)
+        total_observations = int(coverage.get("total_observations", 0) or 0)
+        has_reliable_entry = any(
+            self._entry_is_reliable_target_entry(entry)
+            for entry in candidate_entries
+            if isinstance(entry, dict)
+        )
+        full_coverage_ready = (
+            visited_ratio >= NO_ENTRY_MIN_VISITED_COVERAGE_RATIO
+            and observed_ratio >= NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO
+            and total_observations >= NO_ENTRY_MIN_TOTAL_OBSERVATIONS
+        )
+        all_candidates_rejected_or_none = candidate_count == 0 or rejected_count >= candidate_count
+        no_entry_after_full_coverage = bool(
+            full_coverage_ready
+            and not has_reliable_entry
+            and approachable_count == 0
+            and all_candidates_rejected_or_none
+        )
+        reasons: List[str] = []
+        if full_coverage_ready:
+            reasons.append("perimeter_coverage_ready")
+        else:
+            reasons.append("perimeter_coverage_incomplete")
+        if has_reliable_entry:
+            reasons.append("reliable_entry_present")
+        else:
+            reasons.append("no_reliable_entry")
+        if all_candidates_rejected_or_none:
+            reasons.append("all_candidates_rejected_or_no_candidate")
+        else:
+            reasons.append("unrejected_candidates_remain")
+        if approachable_count > 0:
+            reasons.append("approachable_entry_present")
+        evidence = _default_search_completion_evidence()
+        evidence.update(
+            {
+                "no_entry_after_full_coverage": no_entry_after_full_coverage,
+                "full_coverage_ready": full_coverage_ready,
+                "has_reliable_entry": has_reliable_entry,
+                "visited_coverage_ratio": round(visited_ratio, 4),
+                "observed_coverage_ratio": round(observed_ratio, 4),
+                "total_observations": total_observations,
+                "candidate_entry_count": candidate_count,
+                "rejected_entry_count": rejected_count,
+                "approachable_entry_count": approachable_count,
+                "blocked_entry_count": blocked_count,
+                "reasons": reasons,
+                "updated_at": _now_text(),
+            }
+        )
+        semantic_memory["search_completion_evidence"] = evidence
+        current_status = str(semantic_memory.get("entry_search_status") or "").strip()
+        if no_entry_after_full_coverage and current_status not in {"entry_found", "entered_house"}:
+            semantic_memory["entry_search_status"] = "no_entry_found_after_full_coverage"
 
     def _normalize_semantic_memory(self, memory: Dict[str, Any]) -> None:
         semantic_memory = memory.get("semantic_memory", {})
@@ -894,11 +1204,14 @@ class EntrySearchMemoryStore:
             "blocked_entry_count": blocked_entry_count,
             "rejected_entry_count": rejected_entry_count,
         }
+        self._refresh_perimeter_coverage(semantic_memory)
+        self._refresh_search_completion_evidence(memory)
 
 
 __all__ = [
     "DEFAULT_ENTRY_SEARCH_MEMORY_PATH",
     "DEFAULT_HOUSES_CONFIG_PATH",
+    "DEFAULT_PERIMETER_BIN_IDS",
     "DEFAULT_SECTOR_IDS",
     "EntrySearchMemoryStore",
 ]

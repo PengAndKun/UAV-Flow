@@ -637,6 +637,11 @@ def update_entry_search_memory_from_fusion(
             },
         )
         store.update_semantic_memory(target_house_id, {"last_best_entry_id": candidate_id})
+    store.update_perimeter_coverage(
+        target_house_id,
+        target_context,
+        visit_time=datetime.now().timestamp(),
+    )
     store.set_planner_context(planner_patch)
 
     store.append_episodic_event(

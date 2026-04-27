@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Dict, List, Optional
@@ -41,6 +42,7 @@ MOVE_COMMANDS: Dict[str, Dict[str, Any]] = {
     "e": {"forward_cm": 0.0, "right_cm": 0.0, "up_cm": 0.0, "yaw_delta_deg": 30.0, "action_name": "yaw_right"},
     "x": {"forward_cm": 0.0, "right_cm": 0.0, "up_cm": 0.0, "yaw_delta_deg": 0.0, "action_name": "hold"},
 }
+YAW_IMMEDIATE_CAPTURE_SYMBOLS = {"q", "e"}
 
 TARGET_CONDITIONED_STATE_OPTIONS: List[str] = [
     "target_house_not_in_view",
@@ -200,6 +202,7 @@ class Panel:
         self.memory_auto_seconds_var = tk.StringVar(value="5")
         self.memory_auto_steps_var = tk.StringVar(value="3")
         self.memory_auto_status_var = tk.StringVar(value="Auto Capture: off")
+        self.memory_auto_next_var = tk.StringVar(value="Next Auto: off")
         self.phase1_settle_var = tk.StringVar(value="0.20")
         self.sequence_var = tk.StringVar(value="")
         self.sequence_delay_var = tk.StringVar(value="260")
@@ -367,12 +370,19 @@ class Panel:
         tk.Entry(memory, textvariable=self.memory_auto_steps_var, width=12).grid(row=5, column=1, sticky="w", padx=6, pady=(0, 6))
         tk.Button(memory, text="Start Auto Capture", command=self.on_memory_auto_capture_start).grid(row=5, column=2, padx=6, pady=(0, 6), sticky="ew")
         tk.Button(memory, text="Stop Auto Capture", command=self.on_memory_auto_capture_stop).grid(row=5, column=3, padx=6, pady=(0, 6), sticky="ew")
+        tk.Label(memory, text="Next Auto In").grid(row=6, column=0, sticky="w", padx=6, pady=(0, 6))
+        tk.Label(
+            memory,
+            textvariable=self.memory_auto_next_var,
+            anchor="w",
+            justify="left",
+        ).grid(row=6, column=1, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
         tk.Label(
             memory,
             textvariable=self.memory_auto_status_var,
             anchor="w",
             justify="left",
-        ).grid(row=6, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
+        ).grid(row=7, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
 
         fusion = tk.LabelFrame(left, text="Phase2 Fusion")
         fusion.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -1358,20 +1368,42 @@ class Panel:
         current_step = int(memory_collection.get("step_index", 0) or 0)
         episode_id = str(memory_collection.get("episode_id", "") or "")
         if not self.memory_auto_enabled:
+            self.memory_auto_next_var.set("Next Auto: off")
             self.memory_auto_status_var.set(
                 f"Auto Capture: off | mode={mode} | episode={episode_id or 'none'} | step={current_step}"
             )
             return
+        next_text = "Next Auto: n/a"
         if mode == "time":
-            rule_text = f"every {self.memory_auto_seconds_var.get().strip() or '0'}s"
+            interval_text = self.memory_auto_seconds_var.get().strip() or "0"
+            rule_text = f"every {interval_text}s"
             last_text = datetime.fromtimestamp(float(self.memory_auto_last_capture_time)).strftime("%H:%M:%S") if self.memory_auto_last_capture_time else "n/a"
+            try:
+                interval_s = max(1.0, float(interval_text))
+                elapsed_s = max(0.0, time.time() - float(self.memory_auto_last_capture_time or time.time()))
+                remaining_s = max(0.0, interval_s - elapsed_s)
+                next_text = f"Next Auto: {remaining_s:.1f}s"
+            except ValueError:
+                next_text = "Next Auto: invalid time interval"
         elif mode == "step":
-            rule_text = f"every {self.memory_auto_steps_var.get().strip() or '0'} step(s)"
+            interval_text = self.memory_auto_steps_var.get().strip() or "0"
+            rule_text = f"every {interval_text} step(s)"
             last_text = f"step {int(self.memory_auto_last_capture_step)}"
+            try:
+                step_interval = max(1, int(float(interval_text)))
+                steps_since = max(0, current_step - int(self.memory_auto_last_capture_step))
+                remaining_steps = max(0, step_interval - steps_since)
+                next_text = f"Next Auto: {remaining_steps} step(s) remaining ({steps_since}/{step_interval})"
+            except ValueError:
+                next_text = "Next Auto: invalid step interval"
         else:
             rule_text = "mode=off"
             last_text = "n/a"
+            next_text = "Next Auto: off"
         state_text = "capturing" if self.memory_capture_inflight else "running"
+        if self.memory_capture_inflight:
+            next_text = "Next Auto: capturing now"
+        self.memory_auto_next_var.set(next_text)
         self.memory_auto_status_var.set(
             f"Auto Capture: {state_text} | mode={mode} | rule={rule_text} | episode={episode_id or 'none'} | step={current_step} | last={last_text}"
         )
@@ -1491,6 +1523,10 @@ class Panel:
         lines.append(f"mode: {self.memory_auto_mode_var.get().strip() or 'off'}")
         lines.append(f"time_seconds: {self.memory_auto_seconds_var.get().strip() or '0'}")
         lines.append(f"step_interval: {self.memory_auto_steps_var.get().strip() or '0'}")
+        lines.append(f"next_auto: {self.memory_auto_next_var.get()}")
+        lines.append(f"server_action_count: {int(memory_collection.get('action_count', 0) or 0)}")
+        lines.append(f"server_actions_since_last_capture: {int(memory_collection.get('actions_since_last_capture', 0) or 0)}")
+        lines.append(f"server_action_log_path: {memory_collection.get('action_log_path', '')}")
         lines.append("")
         lines.append("=== Mission Context ===")
         lines.append(f"target_house_id: {house_mission.get('target_house_id', '')}")
@@ -1687,6 +1723,7 @@ class Panel:
 
     def schedule_memory_auto_capture(self) -> None:
         self._maybe_trigger_memory_auto_capture()
+        self._refresh_memory_auto_status()
         self.root.after(500, self.schedule_memory_auto_capture)
 
     def _run_memory_capture_analyze(self, *, capture_source: str, note: str, update_status: bool) -> bool:
@@ -2047,6 +2084,28 @@ class Panel:
             self.root.after(0, lambda: self.apply_state(response))
             self.refresh_map_async()
 
+    def _should_immediate_memory_capture_after_move(self, symbol: str) -> bool:
+        if not self.memory_auto_enabled or self.memory_capture_inflight:
+            return False
+        if symbol.lower() not in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return False
+        mode = self.memory_auto_mode_var.get().strip().lower()
+        if mode not in {"time", "step"}:
+            return False
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        return bool(memory_collection.get("active", False))
+
+    def _trigger_yaw_memory_capture_after_move(self, symbol: str, action_name: str) -> None:
+        self.status_var.set(f"Yaw {symbol.lower()} detected, triggering immediate memory capture.")
+        threading.Thread(
+            target=lambda: self._run_memory_capture_analyze(
+                capture_source="auto_yaw",
+                note=f"auto_yaw immediate trigger symbol={symbol.lower()} action={action_name}; reset auto counter",
+                update_status=False,
+            ),
+            daemon=True,
+        ).start()
+
     def _execute_move(self, symbol: str, *, from_sequence: bool = False) -> bool:
         payload = MOVE_COMMANDS.get(symbol.lower())
         if payload is None: return False
@@ -2056,6 +2115,9 @@ class Panel:
             if isinstance(resp, dict):
                 self.root.after(0, lambda: self.apply_state(resp)); self.refresh_map_async()
                 if from_sequence: self.root.after(0, lambda s=symbol: self.status_var.set(f"Sequence sent: {s}"))
+                if self._should_immediate_memory_capture_after_move(symbol):
+                    action_name = str(payload.get("action_name", symbol.lower()) or symbol.lower())
+                    self.root.after(0, lambda s=symbol, a=action_name: self._trigger_yaw_memory_capture_after_move(s, a))
                 return True
             return False
         finally:

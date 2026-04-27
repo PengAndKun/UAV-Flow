@@ -262,6 +262,8 @@ def summarize_memory(memory_root: Dict[str, Any], target_house_id: str) -> Dict[
     registry = get_registry_entry(memory_root, target_house_id)
     entries = get_candidate_entries(memory_root, target_house_id)
     best_entry = choose_best_entry(entries, registry)
+    house_memory = get_house_memory(memory_root, target_house_id)
+    semantic_memory = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
     return {
         "search_status": str(registry.get("search_status") or ""),
         "entry_search_status": str(registry.get("entry_search_status") or ""),
@@ -269,6 +271,12 @@ def summarize_memory(memory_root: Dict[str, Any], target_house_id: str) -> Dict[
         "best_entry_id": str(registry.get("best_entry_id") or ""),
         "best_entry": summarize_entry(best_entry) if best_entry else {},
         "candidate_entries": [summarize_entry(entry) for entry in entries[:8]],
+        "perimeter_coverage": semantic_memory.get("perimeter_coverage", {})
+        if isinstance(semantic_memory.get("perimeter_coverage"), dict)
+        else {},
+        "search_completion_evidence": semantic_memory.get("search_completion_evidence", {})
+        if isinstance(semantic_memory.get("search_completion_evidence"), dict)
+        else {},
         "planner_context": memory_root.get("planner_context", {}) if isinstance(memory_root.get("planner_context"), dict) else {},
     }
 
@@ -277,12 +285,64 @@ def summarize_temporal(labeling_dir: Path) -> Dict[str, Any]:
     temporal = read_json(labeling_dir / "temporal_context.json")
     sample = read_json(labeling_dir / "sample_metadata.json")
     state = read_json(labeling_dir / "state.json")
+    actions = temporal.get("actions_since_last_capture")
+    if not isinstance(actions, list):
+        action_history_path = str(
+            temporal.get("action_history_since_last_capture_path")
+            or sample.get("action_history_since_last_capture_path")
+            or ""
+        )
+        if action_history_path:
+            history = read_json(Path(action_history_path))
+            actions = history.get("actions") if isinstance(history.get("actions"), list) else []
+    if not isinstance(actions, list):
+        actions = []
+
+    def compact_action(item: Any) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        pose_before = item.get("pose_before", {}) if isinstance(item.get("pose_before"), dict) else {}
+        pose_after = item.get("pose_after", {}) if isinstance(item.get("pose_after"), dict) else {}
+        movement = item.get("movement", {}) if isinstance(item.get("movement"), dict) else {}
+        return {
+            "action_name": str(item.get("action_name") or ""),
+            "step_before": safe_int(item.get("step_before")),
+            "step_after": safe_int(item.get("step_after")),
+            "pose_before": {
+                "x": round_float(pose_before.get("x"), 2),
+                "y": round_float(pose_before.get("y"), 2),
+                "yaw": round_float(pose_before.get("task_yaw", pose_before.get("uav_yaw")), 2),
+            },
+            "pose_after": {
+                "x": round_float(pose_after.get("x"), 2),
+                "y": round_float(pose_after.get("y"), 2),
+                "yaw": round_float(pose_after.get("task_yaw", pose_after.get("uav_yaw")), 2),
+            },
+            "movement": {
+                "forward_cm": round_float(movement.get("forward_cm"), 2),
+                "right_cm": round_float(movement.get("right_cm"), 2),
+                "yaw_delta_deg": round_float(movement.get("yaw_delta_deg"), 2),
+            },
+        }
+
     return {
         "episode_id": str(sample.get("episode_id") or temporal.get("episode_id") or ""),
         "episode_label": str(sample.get("episode_label") or ""),
         "step_index": safe_int(sample.get("memory_step_index", temporal.get("step_index"))),
         "capture_source": str(sample.get("capture_source") or temporal.get("capture_source") or ""),
         "previous_action": str(temporal.get("previous_action") or state.get("last_action") or ""),
+        "action_count_since_last_capture": safe_int(
+            sample.get("action_count_since_last_capture", temporal.get("action_count_since_last_capture"))
+        ),
+        "previous_actions": [
+            str(item or "")
+            for item in as_list(temporal.get("previous_actions"))[:12]
+        ],
+        "movement_trajectory": [
+            action
+            for action in (compact_action(item) for item in actions[-12:])
+            if action
+        ],
         "target_house_id": str(sample.get("target_house_id") or temporal.get("current_target_house_id") or ""),
         "current_house_id": str(sample.get("current_house_id") or temporal.get("current_house_id") or ""),
     }
