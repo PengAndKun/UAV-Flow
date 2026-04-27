@@ -36,7 +36,8 @@ ENTRY_SEARCH_STATUS_TO_ID = {
     "entry_found": 2,
     "entered_house": 3,
     "entry_search_exhausted": 4,
-    "unknown": 5,
+    "no_entry_found_after_full_coverage": 5,
+    "unknown": 6,
 }
 CANDIDATE_MEMORY_STATUS_TO_ID = {
     "": 0,
@@ -109,6 +110,16 @@ def _house_id_to_int(value: Any) -> int:
     if match:
         return int(match.group(1))
     return -1
+
+
+def _normalize_house_id_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(\d+)$", text)
+    if match:
+        return match.group(1).zfill(3)
+    return text
 
 
 def _yaw_to_sincos(yaw_deg: float) -> Tuple[float, float]:
@@ -608,12 +619,12 @@ def _build_memory_context(
 
     snapshot_payload: Dict[str, Any] = {}
     memory_source = "none"
-    if before_path.exists():
-        snapshot_payload = _read_optional_json(before_path)
-        memory_source = "before_snapshot"
-    elif after_path.exists():
+    if after_path.exists():
         snapshot_payload = _read_optional_json(after_path)
         memory_source = "after_snapshot"
+    elif before_path.exists():
+        snapshot_payload = _read_optional_json(before_path)
+        memory_source = "before_snapshot"
     elif single_path.exists():
         snapshot_payload = _read_optional_json(single_path)
         memory_source = "single_snapshot"
@@ -632,18 +643,41 @@ def _build_memory_context(
             }
             memory_source = "fusion_embedded_after"
 
+    memory_root = snapshot_payload.get("memory") if isinstance(snapshot_payload.get("memory"), dict) else snapshot_payload
+    memories = memory_root.get("memories", {}) if isinstance(memory_root.get("memories"), dict) else {}
+    target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+    house_id_candidates = [
+        sample_metadata.get("target_house_id"),
+        target_context.get("target_house_id"),
+        memory_root.get("current_target_house_id"),
+        (snapshot_payload.get("house_mission", {}) if isinstance(snapshot_payload.get("house_mission"), dict) else {}).get("current_target_house_id"),
+        sample_metadata.get("current_house_id"),
+        target_context.get("current_house_id"),
+    ]
+    selected_house_memory: Dict[str, Any] = {}
+    for house_id_value in house_id_candidates:
+        house_id = _normalize_house_id_text(house_id_value)
+        if house_id and isinstance(memories.get(house_id), dict):
+            selected_house_memory = memories[house_id]
+            break
     semantic_memory = (
-        snapshot_payload.get("semantic_memory", {})
+        selected_house_memory.get("semantic_memory", {})
+        if isinstance(selected_house_memory.get("semantic_memory"), dict)
+        else snapshot_payload.get("semantic_memory", {})
         if isinstance(snapshot_payload.get("semantic_memory"), dict)
         else {}
     )
     working_memory = (
-        snapshot_payload.get("working_memory", {})
+        selected_house_memory.get("working_memory", {})
+        if isinstance(selected_house_memory.get("working_memory"), dict)
+        else snapshot_payload.get("working_memory", {})
         if isinstance(snapshot_payload.get("working_memory"), dict)
         else {}
     )
     episodic_memory = (
-        snapshot_payload.get("episodic_memory", [])
+        selected_house_memory.get("episodic_memory", [])
+        if isinstance(selected_house_memory.get("episodic_memory"), list)
+        else snapshot_payload.get("episodic_memory", [])
         if isinstance(snapshot_payload.get("episodic_memory"), list)
         else []
     )
@@ -677,11 +711,24 @@ def _build_memory_context(
                 break
 
     summary = _compute_semantic_memory_summary(semantic_memory)
-    entry_search_status_text = str(
+    raw_entry_search_status_text = str(
         semantic_memory.get("entry_search_status")
         or (fusion.get("entry_search_memory") or {}).get("entry_search_status")
         or "not_started"
     ).strip()
+    search_completion_evidence = (
+        semantic_memory.get("search_completion_evidence", {})
+        if isinstance(semantic_memory.get("search_completion_evidence"), dict)
+        else {}
+    )
+    no_entry_after_full_coverage = bool(search_completion_evidence.get("no_entry_after_full_coverage", False))
+    full_coverage_ready = bool(search_completion_evidence.get("full_coverage_ready", False))
+    has_reliable_entry = bool(search_completion_evidence.get("has_reliable_entry", False))
+    entry_search_status_text = raw_entry_search_status_text
+    if raw_entry_search_status_text == "no_entry_found_after_full_coverage" and not no_entry_after_full_coverage:
+        entry_search_status_text = "entry_found" if has_reliable_entry else "searching_entry"
+    candidate_count_for_ratio = max(1, len(candidate_entries))
+    rejected_candidate_ratio = _clamp(summary["rejected_entry_count"] / candidate_count_for_ratio, 0.0, 1.0)
 
     previous_action = str(
         temporal_context.get("previous_action")
@@ -699,8 +746,20 @@ def _build_memory_context(
 
     memory_features = {
         "observed_sector_count": summary["observed_sector_count"],
+        "raw_entry_search_status": raw_entry_search_status_text,
         "entry_search_status": entry_search_status_text,
         "entry_search_status_id": _entry_search_status_to_id(entry_search_status_text),
+        "no_entry_after_full_coverage": int(no_entry_after_full_coverage),
+        "full_coverage_ready": int(full_coverage_ready),
+        "has_reliable_entry": int(has_reliable_entry),
+        "visited_coverage_ratio": round(
+            _clamp(_safe_float(search_completion_evidence.get("visited_coverage_ratio"), 0.0), 0.0, 1.0), 6
+        ),
+        "observed_coverage_ratio": round(
+            _clamp(_safe_float(search_completion_evidence.get("observed_coverage_ratio"), 0.0), 0.0, 1.0), 6
+        ),
+        "perimeter_total_observations": _safe_int(search_completion_evidence.get("total_observations"), 0),
+        "rejected_candidate_ratio": round(rejected_candidate_ratio, 6),
         "candidate_entry_count": len(candidate_entries),
         "approachable_entry_count": summary["approachable_entry_count"],
         "blocked_entry_count": summary["blocked_entry_count"],

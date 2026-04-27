@@ -23,16 +23,19 @@ Rules:
 7. If the best target-house entry is approachable but not crossing-ready, output approach_target_entry.
 8. If the entry is aligned and crossing-ready, output cross_target_entry.
 9. If only a non-target entry or window is visible, output non_target_house_entry_visible and ignore_non_target_entry.
-10. Return strict JSON only.
+10. Output target_house_no_entry_after_full_coverage only when memory.search_completion_evidence.no_entry_after_full_coverage is exactly true.
+11. If full_coverage_ready is true but no_entry_after_full_coverage is false, do not complete the search; continue observing, reject the visible non-entry, or handle the unresolved/blocked candidate.
+12. For no-entry completion, output complete_no_entry_search, switch_to_next_house, target_candidate_id=null, entry_association=no_valid_entry, and memory_decision=complete_no_entry_search.
+13. Return strict JSON only.
 """
 
 OUTPUT_SCHEMA = {
-    "target_conditioned_state": "target_house_entry_approachable",
-    "target_conditioned_subgoal": "approach_target_entry",
-    "target_conditioned_action_hint": "forward",
-    "target_candidate_id": "0",
-    "entry_association": "target_house_entry",
-    "memory_decision": "reuse_confirmed_best_entry",
+    "target_conditioned_state": "target_house_entry_visible",
+    "target_conditioned_subgoal": "keep_search_target_house",
+    "target_conditioned_action_hint": "yaw_left",
+    "target_candidate_id": None,
+    "entry_association": "uncertain_entry",
+    "memory_decision": "continue_observing",
     "confidence": 0.92,
     "reason": "Short evidence-based explanation.",
 }
@@ -44,6 +47,7 @@ ALLOWED_TARGET_CONDITIONED_STATES = [
     "target_house_entry_blocked",
     "non_target_house_entry_visible",
     "target_house_geometric_opening_needs_confirmation",
+    "target_house_no_entry_after_full_coverage",
 ]
 
 ALLOWED_TARGET_CONDITIONED_SUBGOALS = [
@@ -56,6 +60,7 @@ ALLOWED_TARGET_CONDITIONED_SUBGOALS = [
     "cross_target_entry",
     "ignore_non_target_entry",
     "backoff_and_reobserve",
+    "complete_no_entry_search",
 ]
 
 ALLOWED_ACTION_HINTS = [
@@ -66,6 +71,7 @@ ALLOWED_ACTION_HINTS = [
     "right",
     "backward",
     "hold",
+    "switch_to_next_house",
 ]
 
 ALLOWED_ENTRY_ASSOCIATIONS = [
@@ -74,6 +80,7 @@ ALLOWED_ENTRY_ASSOCIATIONS = [
     "window_or_non_entry",
     "uncertain_entry",
     "no_entry",
+    "no_valid_entry",
 ]
 
 ALLOWED_MEMORY_DECISIONS = [
@@ -84,6 +91,7 @@ ALLOWED_MEMORY_DECISIONS = [
     "reject_window",
     "reject_non_target_entry",
     "no_memory_available",
+    "complete_no_entry_search",
 ]
 
 

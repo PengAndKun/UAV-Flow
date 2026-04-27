@@ -15,6 +15,7 @@ TARGET_CONDITIONED_STATES = {
     "target_house_entry_blocked",
     "non_target_house_entry_visible",
     "target_house_geometric_opening_needs_confirmation",
+    "target_house_no_entry_after_full_coverage",
 }
 
 TARGET_CONDITIONED_SUBGOALS = {
@@ -27,9 +28,10 @@ TARGET_CONDITIONED_SUBGOALS = {
     "cross_target_entry",
     "ignore_non_target_entry",
     "backoff_and_reobserve",
+    "complete_no_entry_search",
 }
 
-ACTION_HINTS = {"forward", "yaw_left", "yaw_right", "left", "right", "backward", "hold"}
+ACTION_HINTS = {"forward", "yaw_left", "yaw_right", "left", "right", "backward", "hold", "switch_to_next_house"}
 
 ENTRY_ASSOCIATIONS = {
     "target_house_entry",
@@ -37,6 +39,7 @@ ENTRY_ASSOCIATIONS = {
     "window_or_non_entry",
     "uncertain_entry",
     "no_entry",
+    "no_valid_entry",
 }
 
 MEMORY_DECISIONS = {
@@ -47,11 +50,16 @@ MEMORY_DECISIONS = {
     "reject_window",
     "reject_non_target_entry",
     "no_memory_available",
+    "complete_no_entry_search",
 }
 
 DOORLIKE_CLASSES = {"door", "open door", "open_door", "close door", "close_door", "closed door", "closed_door"}
 WINDOW_CLASSES = {"window"}
 APPROACH_SUBGOALS = {"approach_target_entry", "align_target_entry", "cross_target_entry"}
+NO_ENTRY_COMPLETION_STATE = "target_house_no_entry_after_full_coverage"
+NO_ENTRY_COMPLETION_SUBGOAL = "complete_no_entry_search"
+NO_ENTRY_COMPLETION_ACTION = "switch_to_next_house"
+NO_ENTRY_COMPLETION_MEMORY_DECISION = "complete_no_entry_search"
 
 REQUIRED_FIELDS = [
     "target_conditioned_state",
@@ -190,6 +198,17 @@ def get_memory_evidence(prompt_payload: Dict[str, Any]) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def get_search_completion_evidence(prompt_payload: Dict[str, Any]) -> Dict[str, Any]:
+    memory = get_memory_evidence(prompt_payload)
+    value = memory.get("search_completion_evidence", {})
+    return value if isinstance(value, dict) else {}
+
+
+def no_entry_completion_ready(prompt_payload: Dict[str, Any]) -> bool:
+    evidence = get_search_completion_evidence(prompt_payload)
+    return truthy(evidence.get("no_entry_after_full_coverage"))
+
+
 def get_depth_evidence(prompt_payload: Dict[str, Any]) -> Dict[str, Any]:
     structured = get_structured_input(prompt_payload)
     value = structured.get("depth_evidence", {})
@@ -283,6 +302,17 @@ def normalize_label(label: Dict[str, Any]) -> Dict[str, Any]:
 def fallback_label_from_prompt(prompt_payload: Dict[str, Any], *, reason: str = "") -> Dict[str, Any]:
     rule = get_rule_reference(prompt_payload)
     memory = get_memory_evidence(prompt_payload)
+    if no_entry_completion_ready(prompt_payload):
+        return {
+            "target_conditioned_state": NO_ENTRY_COMPLETION_STATE,
+            "target_conditioned_subgoal": NO_ENTRY_COMPLETION_SUBGOAL,
+            "target_conditioned_action_hint": NO_ENTRY_COMPLETION_ACTION,
+            "target_candidate_id": None,
+            "entry_association": "no_valid_entry",
+            "memory_decision": NO_ENTRY_COMPLETION_MEMORY_DECISION,
+            "confidence": 0.9,
+            "reason": reason or "Memory indicates full perimeter coverage with no reliable target-house entry; complete this house search and switch to the next house.",
+        }
     best = best_memory_entry(prompt_payload)
     best_id = normalize_candidate_id(
         rule.get("best_target_candidate_id")
@@ -377,6 +407,7 @@ def validate_label(
     best_type = candidate_type(best)
     depth = get_depth_evidence(prompt_payload)
     target_context = get_target_context(prompt_payload)
+    completion_ready = no_entry_completion_ready(prompt_payload)
     traversable = truthy(depth.get("traversable"))
     crossing_ready = truthy(depth.get("crossing_ready"))
     front_obstacle = truthy(depth.get("front_obstacle_present"))
@@ -403,6 +434,36 @@ def validate_label(
         add_issue(warnings, "WARN", "target_in_fov_state_conflict", "Prompt says target_house_in_fov=true but label says not in view.")
     if state == "non_target_house_entry_visible" and entry_association == "target_house_entry":
         add_issue(errors, "FAIL", "non_target_state_target_association_conflict", "State says non-target entry but association says target_house_entry.")
+    if completion_ready:
+        if state != NO_ENTRY_COMPLETION_STATE:
+            add_issue(
+                errors,
+                "FAIL",
+                "completion_ready_state_mismatch",
+                f"Memory says no_entry_after_full_coverage=true, so state must be {NO_ENTRY_COMPLETION_STATE}.",
+            )
+        if subgoal != NO_ENTRY_COMPLETION_SUBGOAL:
+            add_issue(
+                errors,
+                "FAIL",
+                "completion_ready_subgoal_mismatch",
+                f"Memory says no_entry_after_full_coverage=true, so subgoal must be {NO_ENTRY_COMPLETION_SUBGOAL}.",
+            )
+        if action != NO_ENTRY_COMPLETION_ACTION:
+            add_issue(
+                errors,
+                "FAIL",
+                "completion_ready_action_mismatch",
+                f"Memory says no_entry_after_full_coverage=true, so action must be {NO_ENTRY_COMPLETION_ACTION}.",
+            )
+        if candidate_id is not None:
+            add_issue(errors, "FAIL", "completion_ready_candidate_conflict", "No-entry completion must not select a target candidate.")
+        if entry_association != "no_valid_entry":
+            add_issue(errors, "FAIL", "completion_ready_association_mismatch", "No-entry completion requires entry_association=no_valid_entry.")
+        if memory_decision != NO_ENTRY_COMPLETION_MEMORY_DECISION:
+            add_issue(errors, "FAIL", "completion_ready_memory_decision_mismatch", "No-entry completion requires memory_decision=complete_no_entry_search.")
+    elif state == NO_ENTRY_COMPLETION_STATE or subgoal == NO_ENTRY_COMPLETION_SUBGOAL or action == NO_ENTRY_COMPLETION_ACTION:
+        add_issue(errors, "FAIL", "completion_without_memory_evidence", "No-entry completion labels require memory no_entry_after_full_coverage=true.")
 
     best_strong = (
         best_id is not None
@@ -456,6 +517,7 @@ def validate_label(
             "depth_crossing_ready": crossing_ready,
             "front_obstacle_present": front_obstacle,
             "target_house_in_fov": target_in_fov,
+            "no_entry_after_full_coverage": completion_ready,
         },
     }
 

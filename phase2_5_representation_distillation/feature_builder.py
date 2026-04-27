@@ -33,6 +33,7 @@ ENTRY_SEARCH_STATUS_LABELS = (
     "entry_found",
     "entered_house",
     "entry_search_exhausted",
+    "no_entry_found_after_full_coverage",
     "unknown",
 )
 MEMORY_SECTOR_LABELS = (
@@ -53,7 +54,7 @@ MEMORY_CANDIDATE_STATUS_LABELS = (
     "entered",
     "unknown",
 )
-PREVIOUS_ACTION_LABELS = ACTION_HINT_LABELS + ("unknown",)
+PREVIOUS_ACTION_LABELS = ACTION_HINT_LABELS + ("set_pose", "unknown")
 PREVIOUS_SUBGOAL_LABELS = TARGET_CONDITIONED_SUBGOAL_LABELS + ("unknown",)
 
 
@@ -139,6 +140,13 @@ def build_memory_feature_vector(sample: Mapping[str, Any]) -> Dict[str, Any]:
         *memory_source_onehot,
         _normalize_small_count(memory_features.get("observed_sector_count"), 5.0),
         *entry_status_onehot,
+        _normalize_binary(memory_features.get("no_entry_after_full_coverage")),
+        _normalize_binary(memory_features.get("full_coverage_ready")),
+        _normalize_binary(memory_features.get("has_reliable_entry")),
+        _normalize_ratio(memory_features.get("visited_coverage_ratio")),
+        _normalize_ratio(memory_features.get("observed_coverage_ratio")),
+        _normalize_small_count(memory_features.get("perimeter_total_observations"), 80.0),
+        _normalize_ratio(memory_features.get("rejected_candidate_ratio")),
         _normalize_small_count(memory_features.get("candidate_entry_count"), 10.0),
         _normalize_small_count(memory_features.get("approachable_entry_count"), 5.0),
         _normalize_small_count(memory_features.get("blocked_entry_count"), 5.0),
@@ -169,7 +177,15 @@ def build_memory_feature_vector(sample: Mapping[str, Any]) -> Dict[str, Any]:
         "memory_entry_search_status_entry_found",
         "memory_entry_search_status_entered_house",
         "memory_entry_search_status_entry_search_exhausted",
+        "memory_entry_search_status_no_entry_found_after_full_coverage",
         "memory_entry_search_status_unknown",
+        "memory_no_entry_after_full_coverage",
+        "memory_full_coverage_ready",
+        "memory_has_reliable_entry",
+        "memory_visited_coverage_ratio",
+        "memory_observed_coverage_ratio",
+        "memory_perimeter_total_observations_norm",
+        "memory_rejected_candidate_ratio",
         "memory_candidate_entry_count_norm",
         "memory_approachable_entry_count_norm",
         "memory_blocked_entry_count_norm",
@@ -200,6 +216,8 @@ def build_memory_feature_vector(sample: Mapping[str, Any]) -> Dict[str, Any]:
         "memory_previous_action_right",
         "memory_previous_action_backward",
         "memory_previous_action_hold",
+        "memory_previous_action_switch_to_next_house",
+        "memory_previous_action_set_pose",
         "memory_previous_action_unknown",
         "memory_previous_subgoal_reorient_to_target_house",
         "memory_previous_subgoal_keep_search_target_house",
@@ -210,6 +228,7 @@ def build_memory_feature_vector(sample: Mapping[str, Any]) -> Dict[str, Any]:
         "memory_previous_subgoal_cross_target_entry",
         "memory_previous_subgoal_ignore_non_target_entry",
         "memory_previous_subgoal_backoff_and_reobserve",
+        "memory_previous_subgoal_complete_no_entry_search",
         "memory_previous_subgoal_unknown",
         "memory_episodic_snapshot_count_norm",
     ]

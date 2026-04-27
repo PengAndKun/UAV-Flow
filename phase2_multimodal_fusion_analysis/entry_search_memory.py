@@ -1120,6 +1120,11 @@ class EntrySearchMemoryStore:
         current_status = str(semantic_memory.get("entry_search_status") or "").strip()
         if no_entry_after_full_coverage and current_status not in {"entry_found", "entered_house"}:
             semantic_memory["entry_search_status"] = "no_entry_found_after_full_coverage"
+        elif current_status == "no_entry_found_after_full_coverage" and not no_entry_after_full_coverage:
+            if has_reliable_entry or approachable_count > 0 or blocked_count > 0:
+                semantic_memory["entry_search_status"] = "entry_found"
+            else:
+                semantic_memory["entry_search_status"] = "searching_entry"
 
     def _normalize_semantic_memory(self, memory: Dict[str, Any]) -> None:
         semantic_memory = memory.get("semantic_memory", {})

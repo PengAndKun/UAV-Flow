@@ -32,6 +32,7 @@ ACTION_HINT_LABELS: Tuple[str, ...] = (
     "right",
     "backward",
     "hold",
+    "switch_to_next_house",
 )
 
 TARGET_CONDITIONED_STATE_LABELS: Tuple[str, ...] = (
@@ -41,6 +42,7 @@ TARGET_CONDITIONED_STATE_LABELS: Tuple[str, ...] = (
     "target_house_entry_blocked",
     "non_target_house_entry_visible",
     "target_house_geometric_opening_needs_confirmation",
+    "target_house_no_entry_after_full_coverage",
 )
 
 TARGET_CONDITIONED_SUBGOAL_LABELS: Tuple[str, ...] = (
@@ -53,6 +55,7 @@ TARGET_CONDITIONED_SUBGOAL_LABELS: Tuple[str, ...] = (
     "cross_target_entry",
     "ignore_non_target_entry",
     "backoff_and_reobserve",
+    "complete_no_entry_search",
 )
 
 TARGET_CONDITIONED_ACTION_HINT_LABELS: Tuple[str, ...] = ACTION_HINT_LABELS
@@ -242,4 +245,3 @@ def validate_known_labels(labels: Iterable[str], space: LabelSpace) -> List[str]
         if value and value not in mapping:
             unknown.append(value)
     return unknown
-

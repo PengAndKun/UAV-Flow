@@ -329,8 +329,11 @@ def _missing_teacher_field_count(items: List[Dict[str, Any]], field: str) -> int
 
 def _group_key(sample: Dict[str, Any]) -> str:
     teacher_targets = sample.get("teacher_targets", {})
+    target_state = str(teacher_targets.get("target_conditioned_state") or "").strip()
+    if target_state:
+        return f"target:{target_state}"
     entry_state = str(teacher_targets.get("entry_state") or "").strip()
-    return entry_state or "unknown"
+    return f"legacy:{entry_state}" if entry_state else "unknown"
 
 
 def _split_samples(samples: List[Dict[str, Any]], val_ratio: float) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
