@@ -124,5 +124,6 @@ python E:\github\UAV-Flow\phase2_5_representation_distillation\evaluate_represen
   --split val `
   --ablations none zero_memory zero_candidates zero_memory_and_candidates `
   --device cpu `
-  --batch_size 32
+  --batch_size 32 `
+  --repeats 10
 ```

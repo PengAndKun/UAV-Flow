@@ -107,6 +107,24 @@ def _mean(values: Sequence[float]) -> float:
     return float(sum(float(value) for value in values) / len(values)) if values else 0.0
 
 
+def _variance(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    mean_value = _mean(values)
+    return float(sum((float(value) - mean_value) ** 2 for value in values) / len(values))
+
+
+def _metric_stats(values: Sequence[float]) -> Dict[str, Any]:
+    value_list = [float(value) for value in values]
+    variance = _variance(value_list)
+    return {
+        "mean": _mean(value_list),
+        "variance": variance,
+        "std": variance ** 0.5,
+        "values": value_list,
+    }
+
+
 def _copy_example(example: Mapping[str, Any]) -> Dict[str, Any]:
     copied = dict(example)
     copied["global_features"] = [float(value) for value in example.get("global_features", [])]
@@ -278,6 +296,93 @@ def _collect_metrics(
     }
 
 
+def _compute_deltas(results: Mapping[str, Any]) -> Dict[str, Any]:
+    baseline = results.get("none", {})
+    baseline_reports = baseline.get("reports", {}) if isinstance(baseline.get("reports"), dict) else {}
+    deltas: Dict[str, Any] = {}
+    for mode, payload in results.items():
+        if mode == "none":
+            continue
+        mode_reports = payload.get("reports", {}) if isinstance(payload.get("reports"), dict) else {}
+        deltas[str(mode)] = {}
+        for key in (
+            "target_conditioned_state",
+            "target_conditioned_subgoal",
+            "target_conditioned_action_hint",
+            "target_conditioned_target_candidate_id",
+        ):
+            base_acc = float(baseline_reports.get(key, {}).get("accuracy", 0.0))
+            mode_acc = float(mode_reports.get(key, {}).get("accuracy", 0.0))
+            deltas[str(mode)][f"{key}_accuracy_delta"] = mode_acc - base_acc
+        base_no_entry = baseline.get("no_entry", {}) if isinstance(baseline.get("no_entry"), dict) else {}
+        mode_no_entry = payload.get("no_entry", {}) if isinstance(payload.get("no_entry"), dict) else {}
+        deltas[str(mode)]["no_entry_separation_margin_delta"] = float(
+            mode_no_entry.get("separation_margin_mean", 0.0)
+        ) - float(base_no_entry.get("separation_margin_mean", 0.0))
+    return deltas
+
+
+def _extract_core_metrics(result: Mapping[str, Any]) -> Dict[str, float]:
+    reports = result.get("reports", {}) if isinstance(result.get("reports"), dict) else {}
+    no_entry = result.get("no_entry", {}) if isinstance(result.get("no_entry"), dict) else {}
+    return {
+        "target_conditioned_state_accuracy": float(
+            reports.get("target_conditioned_state", {}).get("accuracy", 0.0)
+        ),
+        "target_conditioned_subgoal_accuracy": float(
+            reports.get("target_conditioned_subgoal", {}).get("accuracy", 0.0)
+        ),
+        "target_conditioned_action_hint_accuracy": float(
+            reports.get("target_conditioned_action_hint", {}).get("accuracy", 0.0)
+        ),
+        "target_conditioned_target_candidate_id_accuracy": float(
+            reports.get("target_conditioned_target_candidate_id", {}).get("accuracy", 0.0)
+        ),
+        "no_entry_mean_prob_when_true": float(no_entry.get("mean_prob_when_true", 0.0)),
+        "no_entry_mean_prob_when_false": float(no_entry.get("mean_prob_when_false", 0.0)),
+        "no_entry_separation_margin": float(no_entry.get("separation_margin_mean", 0.0)),
+        "no_entry_false_high_prob_count": float(no_entry.get("false_high_prob_count", 0.0)),
+        "no_entry_true_low_prob_count": float(no_entry.get("true_low_prob_count", 0.0)),
+    }
+
+
+def _aggregate_repeat_results(
+    repeat_results: Sequence[Mapping[str, Any]],
+    ablations: Sequence[str],
+) -> Dict[str, Any]:
+    aggregate: Dict[str, Any] = {}
+    for mode in ablations:
+        metric_values: Dict[str, List[float]] = {}
+        for repeat in repeat_results:
+            results = repeat.get("results", {}) if isinstance(repeat.get("results"), dict) else {}
+            mode_result = results.get(mode, {}) if isinstance(results.get(mode), dict) else {}
+            for metric_name, value in _extract_core_metrics(mode_result).items():
+                metric_values.setdefault(metric_name, []).append(float(value))
+        aggregate[str(mode)] = {
+            metric_name: _metric_stats(values)
+            for metric_name, values in sorted(metric_values.items())
+        }
+    return aggregate
+
+
+def _aggregate_repeat_deltas(repeat_results: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    metric_values: Dict[str, Dict[str, List[float]]] = {}
+    for repeat in repeat_results:
+        deltas = repeat.get("deltas_vs_none", {}) if isinstance(repeat.get("deltas_vs_none"), dict) else {}
+        for mode, mode_deltas in deltas.items():
+            if not isinstance(mode_deltas, dict):
+                continue
+            for metric_name, value in mode_deltas.items():
+                metric_values.setdefault(str(mode), {}).setdefault(str(metric_name), []).append(float(value))
+    return {
+        mode: {
+            metric_name: _metric_stats(values)
+            for metric_name, values in sorted(metrics.items())
+        }
+        for mode, metrics in sorted(metric_values.items())
+    }
+
+
 def evaluate_representation_ablation(
     *,
     checkpoint_path: Path | str,
@@ -288,6 +393,7 @@ def evaluate_representation_ablation(
     batch_size: int = 32,
     device: str = "cpu",
     num_workers: int = 0,
+    repeats: int = 1,
 ) -> Dict[str, Any]:
     _require_torch()
     checkpoint_file = Path(checkpoint_path).resolve()
@@ -304,40 +410,33 @@ def evaluate_representation_ablation(
     model.eval()
 
     base_examples = _load_examples(export_root, str(split), top_k=int(model_config.top_k))
-    results: Dict[str, Any] = {}
-    for mode in ablations:
-        ablated_examples = [_apply_ablation(example, mode) for example in base_examples]
-        results[mode] = _collect_metrics(
-            model=model,
-            examples=ablated_examples,
-            device=run_device,
-            batch_size=int(batch_size),
-            num_workers=int(num_workers),
-            top_k=int(model_config.top_k),
+    repeat_count = max(1, int(repeats))
+    repeat_results: List[Dict[str, Any]] = []
+    for repeat_index in range(repeat_count):
+        results: Dict[str, Any] = {}
+        for mode in ablations:
+            ablated_examples = [_apply_ablation(example, mode) for example in base_examples]
+            results[str(mode)] = _collect_metrics(
+                model=model,
+                examples=ablated_examples,
+                device=run_device,
+                batch_size=int(batch_size),
+                num_workers=int(num_workers),
+                top_k=int(model_config.top_k),
+            )
+        repeat_results.append(
+            {
+                "repeat_index": repeat_index + 1,
+                "results": results,
+                "deltas_vs_none": _compute_deltas(results),
+            }
         )
 
-    baseline = results.get("none", {})
-    baseline_reports = baseline.get("reports", {}) if isinstance(baseline.get("reports"), dict) else {}
-    deltas: Dict[str, Any] = {}
-    for mode, payload in results.items():
-        if mode == "none":
-            continue
-        mode_reports = payload.get("reports", {}) if isinstance(payload.get("reports"), dict) else {}
-        deltas[mode] = {}
-        for key in (
-            "target_conditioned_state",
-            "target_conditioned_subgoal",
-            "target_conditioned_action_hint",
-            "target_conditioned_target_candidate_id",
-        ):
-            base_acc = float(baseline_reports.get(key, {}).get("accuracy", 0.0))
-            mode_acc = float(mode_reports.get(key, {}).get("accuracy", 0.0))
-            deltas[mode][f"{key}_accuracy_delta"] = mode_acc - base_acc
-        base_no_entry = baseline.get("no_entry", {}) if isinstance(baseline.get("no_entry"), dict) else {}
-        mode_no_entry = payload.get("no_entry", {}) if isinstance(payload.get("no_entry"), dict) else {}
-        deltas[mode]["no_entry_separation_margin_delta"] = float(
-            mode_no_entry.get("separation_margin_mean", 0.0)
-        ) - float(base_no_entry.get("separation_margin_mean", 0.0))
+    first_repeat = repeat_results[0]
+    results = first_repeat["results"]
+    deltas = first_repeat["deltas_vs_none"]
+    aggregate_results = _aggregate_repeat_results(repeat_results, ablations)
+    aggregate_deltas = _aggregate_repeat_deltas(repeat_results)
 
     summary = {
         "checkpoint_path": str(checkpoint_file),
@@ -345,10 +444,18 @@ def evaluate_representation_ablation(
         "output_dir": str(output_root),
         "split": str(split),
         "ablations": list(ablations),
+        "repeats": repeat_count,
+        "repeat_note": (
+            "This inference-time ablation is deterministic under model.eval(); "
+            "non-zero variance requires repeated training seeds or repeated random data splits."
+        ),
         "evaluated_at": datetime.now().isoformat(timespec="seconds"),
         "model_config": checkpoint.get("model_config", {}),
         "results": results,
         "deltas_vs_none": deltas,
+        "repeat_results": repeat_results,
+        "aggregate_results": aggregate_results,
+        "aggregate_deltas_vs_none": aggregate_deltas,
     }
     _write_json(output_root / "ablation_summary.json", summary)
     return summary
@@ -373,6 +480,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--repeats", type=int, default=1)
     return parser
 
 
@@ -388,17 +496,31 @@ def main() -> None:
         batch_size=int(args.batch_size),
         device=str(args.device),
         num_workers=int(args.num_workers),
+        repeats=int(args.repeats),
     )
 
-    none_result = summary["results"].get("none", {})
-    zero_memory = summary["results"].get("zero_memory", {})
-    none_state = none_result.get("reports", {}).get("target_conditioned_state", {}).get("accuracy", 0.0)
-    zero_state = zero_memory.get("reports", {}).get("target_conditioned_state", {}).get("accuracy", 0.0)
+    aggregate = summary.get("aggregate_results", {})
+    none_state = (
+        aggregate.get("none", {})
+        .get("target_conditioned_state_accuracy", {})
+        .get("mean", 0.0)
+    )
+    zero_state = (
+        aggregate.get("zero_memory", {})
+        .get("target_conditioned_state_accuracy", {})
+        .get("mean", 0.0)
+    )
+    zero_state_std = (
+        aggregate.get("zero_memory", {})
+        .get("target_conditioned_state_accuracy", {})
+        .get("std", 0.0)
+    )
     print(
         "[rep-distill-ablation] done: "
-        f"split={summary['split']} "
-        f"none_state_acc={float(none_state):.4f} "
-        f"zero_memory_state_acc={float(zero_state):.4f} "
+        f"split={summary['split']} repeats={summary['repeats']} "
+        f"none_state_acc_mean={float(none_state):.4f} "
+        f"zero_memory_state_acc_mean={float(zero_state):.4f} "
+        f"zero_memory_state_acc_std={float(zero_state_std):.4f} "
         f"output={summary['output_dir']}"
     )
 
