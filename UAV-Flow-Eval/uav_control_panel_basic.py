@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
+import shutil
 import sys
 import threading
 import time
@@ -70,6 +72,39 @@ LLM_CONTROL_OUTPUT_SCHEMA: Dict[str, Any] = {
 }
 LLM_ENTRY_REACHED_DISTANCE_CM = 300.0
 LLM_APPROACHABLE_DISTANCE_MARGIN_CM = 320.0
+LLM_ENTRY_REACHED_POSE_PROXY_CM = 350.0
+LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM = 520.0
+LLM_LARGE_ENTRY_BBOX_AREA_RATIO = 0.42
+LLM_LARGE_ENTRY_BBOX_HEIGHT_RATIO = 0.82
+LLM_LARGE_ENTRY_BBOX_WIDTH_RATIO = 0.68
+LLM_YAW_STEP_DEG = 30.0
+LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG = 18.0
+LLM_TARGET_REACQUIRE_MAX_YAW_STEPS = 12
+LLM_TARGET_REACQUIRE_DEFAULT_YAW_SYMBOL = "q"
+LLM_OBSTACLE_FRONT_MIN_BLOCK_CM = 120.0
+LLM_OBSTACLE_FRONT_MIN_BACKOFF_CM = 90.0
+LLM_OBSTACLE_DETOUR_SIDE_STEPS = 3
+LLM_OBSTACLE_DETOUR_MAX_STEPS = 10
+LLM_OBSTACLE_DEFAULT_DETOUR_SYMBOL = "a"
+LLM_TARGET_BOUNDARY_MARGIN_CM = 800.0
+LLM_TARGET_BOUNDARY_MIN_SEARCH_DISTANCE_CM = 1800.0
+LLM_TARGET_BOUNDARY_ALIGN_TOLERANCE_DEG = 18.0
+LLM_TARGET_TRANSIT_FRONT_MIN_FORWARD_CM = 160.0
+LLM_CONTROL_LABELING_INPUT_FILES = (
+    "fusion_result.json",
+    "sample_metadata.json",
+    "entry_search_memory_snapshot_after.json",
+    "temporal_context.json",
+    "action_history_since_last_capture.json",
+    "pose_history_summary.json",
+    "yolo_result.json",
+    "depth_result.json",
+    "fusion_summary.txt",
+    "labeling_summary.txt",
+    "yolo_summary.txt",
+    "depth_summary.txt",
+    "fusion_overlay.png",
+)
 LLM_TASK_PLAN_OUTPUT_SCHEMA: Dict[str, Any] = {
     "plan_id": "llm_task_plan_20260428_123000",
     "task_text": "先探索 house 1，再探索 house 3。",
@@ -85,6 +120,8 @@ LLM_TASK_PLAN_OUTPUT_SCHEMA: Dict[str, Any] = {
     ],
     "execution_policy": {
         "entry_reached_distance_cm": LLM_ENTRY_REACHED_DISTANCE_CM,
+        "entry_reached_pose_proxy_cm": LLM_ENTRY_REACHED_POSE_PROXY_CM,
+        "entry_reached_large_bbox_proxy_cm": LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM,
         "max_decisions_per_house": 40,
         "allow_no_entry_completion": True,
         "stop_on_needs_review": True,
@@ -363,6 +400,8 @@ class Panel:
         self.llm_task_plan_applied = False
         self.llm_task_current_index = 0
         self.llm_task_execution_trace: Dict[str, Any] = {}
+        self.llm_target_reacquire_lock: Dict[str, Any] = {}
+        self.llm_obstacle_detour_lock: Dict[str, Any] = {}
 
         self.eval_dir = os.path.dirname(os.path.abspath(__file__))
         self.houses_config_path = os.path.join(self.eval_dir, "houses_config.json")
@@ -2595,6 +2634,8 @@ class Panel:
             "unmatched_targets": unmatched,
             "execution_policy": {
                 "entry_reached_distance_cm": float(LLM_ENTRY_REACHED_DISTANCE_CM),
+                "entry_reached_pose_proxy_cm": float(LLM_ENTRY_REACHED_POSE_PROXY_CM),
+                "entry_reached_large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
                 "max_decisions_per_house": 40,
                 "allow_no_entry_completion": True,
                 "stop_on_needs_review": True,
@@ -2616,8 +2657,14 @@ class Panel:
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }
 
-    def _save_llm_task_plan_files(self) -> None:
-        session_dir = self._llm_control_session_dir_for_current_episode()
+    def _save_llm_task_plan_files(self, labeling_dir: str = "") -> None:
+        if str(labeling_dir or "").strip():
+            root = self._resolve_llm_control_capture_root(labeling_dir)
+            episode_id = self._resolve_llm_control_episode_id(labeling_dir)
+            session_dir = root / episode_id
+            session_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            session_dir = self._llm_control_session_dir_for_current_episode()
         self.llm_task_plan["updated_at"] = datetime.now().isoformat(timespec="seconds")
         self.llm_task_execution_trace["updated_at"] = datetime.now().isoformat(timespec="seconds")
         (session_dir / "task_plan.json").write_text(
@@ -2638,6 +2685,8 @@ class Panel:
             return
         self.llm_task_plan_applied = True
         self.llm_task_current_index = 0
+        self.llm_target_reacquire_lock = {}
+        self.llm_obstacle_detour_lock = {}
         targets = self.llm_task_plan.get("ordered_targets", []) if isinstance(self.llm_task_plan.get("ordered_targets"), list) else []
         for idx, item in enumerate(targets):
             if isinstance(item, dict):
@@ -2656,6 +2705,8 @@ class Panel:
         self.llm_task_plan_applied = False
         self.llm_task_current_index = 0
         self.llm_task_execution_trace = {}
+        self.llm_target_reacquire_lock = {}
+        self.llm_obstacle_detour_lock = {}
         self._refresh_llm_task_preview()
         self.llm_task_status_var.set("LLM Task: cleared.")
 
@@ -2806,6 +2857,8 @@ class Panel:
     def _llm_control_loop(self, *, max_steps: int) -> None:
         self.llm_control_running = True
         self.llm_control_decision_history = []
+        self.llm_target_reacquire_lock = {}
+        self.llm_obstacle_detour_lock = {}
         reuse_labeling_dir = ""
         self._set_llm_control_var(self.llm_control_status_var, "LLM Control: running")
         self._append_llm_control_log(f"Started LLM control loop with max_decisions={max_steps}.")
@@ -2963,6 +3016,8 @@ class Panel:
         if not self._select_target_house_for_llm_plan(house_id):
             self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: failed to select target {house_id}")
             return False
+        self.llm_target_reacquire_lock = {}
+        self.llm_obstacle_detour_lock = {}
         self._append_llm_task_event("target_started", house_id, {"reason": "llm_control_start"})
         self._save_llm_task_plan_files()
         self.root.after(0, self._refresh_llm_task_preview)
@@ -2971,6 +3026,7 @@ class Panel:
     def _advance_llm_task_plan_after_completion(self, completion: Dict[str, Any]) -> bool:
         house_id = str(completion.get("house_id", "") or "")
         finish_type = str(completion.get("finish_type", "") or "")
+        source_labeling_dir = str(completion.get("source_labeling_dir", "") or "")
         self._append_llm_control_log(f"House search finished: house={house_id} finish_type={finish_type} reason={completion.get('reason', '')}")
         if not self.llm_task_plan_applied:
             self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: house {house_id} finished")
@@ -2992,7 +3048,7 @@ class Panel:
         if next_index is None:
             self.llm_task_plan["status"] = "completed"
             self._append_llm_task_event("plan_completed", house_id, {"reason": "all_targets_done"})
-            self._save_llm_task_plan_files()
+            self._save_llm_task_plan_files(source_labeling_dir)
             self.root.after(0, self._refresh_llm_task_preview)
             self._set_llm_control_var(self.llm_control_status_var, "LLM Control: multi-house plan completed")
             self.llm_control_stop_event.set()
@@ -3009,8 +3065,10 @@ class Panel:
         if not self._select_target_house_for_llm_plan(next_house_id):
             self.llm_control_stop_event.set()
             return False
+        self.llm_target_reacquire_lock = {}
+        self.llm_obstacle_detour_lock = {}
         self._append_llm_task_event("target_started", next_house_id, {"reason": f"previous_finished:{finish_type}"})
-        self._save_llm_task_plan_files()
+        self._save_llm_task_plan_files(source_labeling_dir)
         self.root.after(0, self._refresh_llm_task_preview)
         self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: switched to house {next_house_id}")
         return True
@@ -3054,6 +3112,14 @@ class Panel:
                     return value
         return None
 
+    def _target_house_distance_cm(self, fusion: Dict[str, Any]) -> Optional[float]:
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        for key in ("target_house_distance_cm", "distance_to_target_cm", "target_distance_cm"):
+            value = self._as_float_or_none(target_context.get(key))
+            if value is not None and value > 0:
+                return value
+        return None
+
     def _semantic_class_name(self, fusion: Dict[str, Any]) -> str:
         semantic = fusion.get("semantic_detection", {}) if isinstance(fusion.get("semantic_detection"), dict) else {}
         return str(
@@ -3068,6 +3134,49 @@ class Panel:
         normalized = str(class_name or "").strip().lower().replace("_", " ")
         return normalized in {name.replace("_", " ") for name in DOORLIKE_CLASS_NAMES}
 
+    def _semantic_bbox_metrics(self, fusion: Dict[str, Any]) -> Dict[str, float]:
+        semantic = fusion.get("semantic_detection", {}) if isinstance(fusion.get("semantic_detection"), dict) else {}
+        xyxy = semantic.get("xyxy")
+        if not isinstance(xyxy, list) or len(xyxy) < 4:
+            return {}
+        try:
+            x1, y1, x2, y2 = [float(value) for value in xyxy[:4]]
+        except Exception:
+            return {}
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        image_width = max(1.0, float(target_context.get("image_width", 640) or 640))
+        image_height = max(1.0, float(target_context.get("image_height", 480) or 480))
+        width = max(0.0, x2 - x1)
+        height = max(0.0, y2 - y1)
+        area_ratio = (width * height) / max(1.0, image_width * image_height)
+        return {
+            "x1": x1,
+            "y1": y1,
+            "x2": x2,
+            "y2": y2,
+            "width_ratio": width / image_width,
+            "height_ratio": height / image_height,
+            "area_ratio": area_ratio,
+            "touches_left": 1.0 if x1 <= 4.0 else 0.0,
+            "touches_right": 1.0 if x2 >= image_width - 4.0 else 0.0,
+            "touches_top": 1.0 if y1 <= 8.0 else 0.0,
+            "touches_bottom": 1.0 if y2 >= image_height - 4.0 else 0.0,
+        }
+
+    def _is_large_near_entry_bbox(self, fusion: Dict[str, Any]) -> bool:
+        metrics = self._semantic_bbox_metrics(fusion)
+        if not metrics:
+            return False
+        area_ratio = float(metrics.get("area_ratio", 0.0) or 0.0)
+        height_ratio = float(metrics.get("height_ratio", 0.0) or 0.0)
+        width_ratio = float(metrics.get("width_ratio", 0.0) or 0.0)
+        touches_edge = bool(metrics.get("touches_left", 0.0) or metrics.get("touches_right", 0.0) or metrics.get("touches_bottom", 0.0))
+        return (
+            area_ratio >= LLM_LARGE_ENTRY_BBOX_AREA_RATIO
+            or height_ratio >= LLM_LARGE_ENTRY_BBOX_HEIGHT_RATIO
+            or (touches_edge and width_ratio >= LLM_LARGE_ENTRY_BBOX_WIDTH_RATIO)
+        )
+
     def _front_path_clear_for_approach(self, fusion: Dict[str, Any]) -> bool:
         if bool(fusion.get("front_blocked", False)):
             return False
@@ -3075,14 +3184,227 @@ class Panel:
         if isinstance(global_obstacle, dict):
             if bool(global_obstacle.get("present", False)):
                 severity = str(global_obstacle.get("severity", "") or "").lower()
-                return severity not in {"severe", "blocked", "critical"}
+                return severity not in {"high", "severe", "blocked", "critical"}
         elif bool(global_obstacle):
             return False
         assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
         if bool(assessment.get("front_obstacle_present", False)):
             severity = str(assessment.get("front_obstacle_severity", "") or "").lower()
-            return severity not in {"severe", "blocked", "critical"}
+            return severity not in {"high", "severe", "blocked", "critical"}
         return True
+
+    def _front_obstacle_status(self, fusion: Dict[str, Any]) -> Dict[str, Any]:
+        status: Dict[str, Any] = {
+            "present": bool(fusion.get("front_blocked", False)),
+            "severity": "",
+            "front_min_depth_cm": None,
+            "front_mean_depth_cm": None,
+            "blocking": False,
+            "too_close": False,
+        }
+        global_obstacle = fusion.get("global_front_obstacle", {}) if isinstance(fusion.get("global_front_obstacle"), dict) else {}
+        if global_obstacle:
+            status["present"] = bool(status["present"] or global_obstacle.get("present", False))
+            status["severity"] = str(global_obstacle.get("severity", "") or "").lower()
+            status["front_min_depth_cm"] = self._as_float_or_none(global_obstacle.get("front_min_depth_cm"))
+            status["front_mean_depth_cm"] = self._as_float_or_none(global_obstacle.get("front_mean_depth_cm"))
+        assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
+        if assessment:
+            status["present"] = bool(status["present"] or assessment.get("front_obstacle_present", False))
+            if not status["severity"]:
+                status["severity"] = str(assessment.get("front_obstacle_severity", "") or "").lower()
+            if status["front_min_depth_cm"] is None:
+                status["front_min_depth_cm"] = self._as_float_or_none(assessment.get("front_min_depth_cm"))
+        severity = str(status.get("severity", "") or "").lower()
+        front_min = self._as_float_or_none(status.get("front_min_depth_cm"))
+        severe = severity in {"high", "severe", "blocked", "critical"}
+        medium_close = severity == "medium" and front_min is not None and front_min <= LLM_OBSTACLE_FRONT_MIN_BLOCK_CM
+        too_close = front_min is not None and front_min <= LLM_OBSTACLE_FRONT_MIN_BACKOFF_CM
+        status["too_close"] = bool(too_close)
+        status["blocking"] = bool(status["present"] and (severe or medium_close or too_close))
+        return status
+
+    def _detour_side_symbol_from_fusion(self, fusion: Dict[str, Any]) -> str:
+        for key in ("recommended_subgoal", "target_conditioned_subgoal"):
+            value = str(fusion.get(key, "") or "").lower()
+            if "detour_left" in value:
+                return "a"
+            if "detour_right" in value:
+                return "d"
+        for key in ("recommended_action_hint", "target_conditioned_action_hint"):
+            value = str(fusion.get(key, "") or "").lower().replace("-", "_").replace(" ", "_")
+            if value == "left":
+                return "a"
+            if value == "right":
+                return "d"
+        lock = self.llm_obstacle_detour_lock if isinstance(self.llm_obstacle_detour_lock, dict) else {}
+        locked_side = str(lock.get("side_symbol", "") or "")
+        if locked_side in {"a", "d"}:
+            return locked_side
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        bearing = self._as_float_or_none(target_context.get("target_house_bearing_deg"))
+        if bearing is not None:
+            if bearing > 8.0:
+                return "d"
+            if bearing < -8.0:
+                return "a"
+        return LLM_OBSTACLE_DEFAULT_DETOUR_SYMBOL
+
+    def _apply_front_obstacle_detour_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        obstacle = self._front_obstacle_status(fusion)
+        current_symbol = str(normalized.get("action_symbol", "") or "")
+        if not bool(obstacle.get("blocking", False)):
+            if self.llm_obstacle_detour_lock:
+                self.llm_obstacle_detour_lock = {}
+            return normalized
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        metadata = self._metadata_from_labeling_dir(labeling_dir)
+        step_index = int(metadata.get("step_index", 0) or 0)
+        lock = self.llm_obstacle_detour_lock if isinstance(self.llm_obstacle_detour_lock, dict) else {}
+        if str(lock.get("target_house_id", "") or "") != house_id:
+            lock = {
+                "target_house_id": house_id,
+                "side_symbol": self._detour_side_symbol_from_fusion(fusion),
+                "total_steps": 0,
+                "backoff_steps": 0,
+                "side_steps": 0,
+                "started_at_step": step_index,
+            }
+        total_steps = int(lock.get("total_steps", 0) or 0)
+        if total_steps >= LLM_OBSTACLE_DETOUR_MAX_STEPS:
+            self.llm_obstacle_detour_lock = {}
+            return normalized
+
+        side_symbol = str(lock.get("side_symbol", "") or LLM_OBSTACLE_DEFAULT_DETOUR_SYMBOL)
+        if side_symbol not in {"a", "d"}:
+            side_symbol = LLM_OBSTACLE_DEFAULT_DETOUR_SYMBOL
+        too_close = bool(obstacle.get("too_close", False))
+        backoff_steps = int(lock.get("backoff_steps", 0) or 0)
+        side_steps = int(lock.get("side_steps", 0) or 0)
+        if too_close and backoff_steps < 2:
+            action_symbol = "s"
+            repeat = 1
+            phase = "backoff"
+            lock["backoff_steps"] = backoff_steps + 1
+        else:
+            if side_steps >= LLM_OBSTACLE_DETOUR_SIDE_STEPS and bool(obstacle.get("too_close", False)):
+                side_symbol = "d" if side_symbol == "a" else "a"
+                lock["side_symbol"] = side_symbol
+                lock["side_steps"] = 0
+                side_steps = 0
+            action_symbol = side_symbol
+            repeat = min(self._llm_control_repeat_cap(), 2)
+            phase = "side_detour"
+            lock["side_steps"] = side_steps + 1
+        lock["total_steps"] = total_steps + 1
+        lock["last_step_index"] = step_index
+        lock["last_front_obstacle"] = obstacle
+        self.llm_obstacle_detour_lock = lock
+
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = action_symbol
+        normalized["repeat"] = max(1, int(repeat))
+        normalized["stop"] = False
+        normalized["need_capture_after"] = False
+        normalized["obstacle_detour_lock"] = dict(lock)
+        normalized["rule_override"] = {
+            "type": "front_obstacle_structured_detour",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "target_house_id": house_id,
+            "phase": phase,
+            "action_symbol": action_symbol,
+            "repeat": int(repeat),
+            "side_symbol": side_symbol,
+            "front_obstacle": obstacle,
+            "recommended_subgoal": fusion.get("recommended_subgoal"),
+            "recommended_action_hint": fusion.get("recommended_action_hint"),
+            "reason": "front obstacle is too close; execute physical backoff/strafe detour instead of yaw-only observation or forward motion",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        detour_text = (
+            f"front-obstacle detour override: {phase} with {action_symbol} x{int(repeat)} "
+            f"(front_min={obstacle.get('front_min_depth_cm')}cm, severity={obstacle.get('severity')})"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + detour_text
+        if original.get("action_symbol") != action_symbol:
+            self._append_llm_control_log(
+                f"Obstacle detour override: action={original.get('action_symbol')} -> {action_symbol} repeat={int(repeat)}; "
+                f"front_min={obstacle.get('front_min_depth_cm')} severity={obstacle.get('severity')}"
+            )
+        return normalized
+
+    def _apply_target_boundary_transit_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        boundary = self._target_boundary_context(fusion, house_id)
+        if not bool(boundary.get("outside_search_boundary", False)):
+            return normalized
+        if not bool(boundary.get("target_house_in_fov", False)):
+            return normalized
+        obstacle = self._front_obstacle_status(fusion)
+        front_min = self._as_float_or_none(obstacle.get("front_min_depth_cm"))
+        if bool(obstacle.get("blocking", False)) or (
+            bool(obstacle.get("present", False))
+            and front_min is not None
+            and front_min <= LLM_TARGET_TRANSIT_FRONT_MIN_FORWARD_CM
+        ):
+            return normalized
+
+        bearing = self._as_float_or_none(boundary.get("target_house_bearing_deg"))
+        if bearing is not None and abs(bearing) > LLM_TARGET_BOUNDARY_ALIGN_TOLERANCE_DEG:
+            action_symbol = "e" if bearing > 0.0 else "q"
+            repeat = 1
+            need_capture = True
+            phase = "align_to_target_boundary"
+        else:
+            distance_cm = self._as_float_or_none(boundary.get("target_house_distance_cm")) or 0.0
+            action_symbol = "w"
+            repeat = 4 if distance_cm > 3500.0 else 3 if distance_cm > 2500.0 else 2
+            repeat = min(self._llm_control_repeat_cap(), repeat)
+            need_capture = False
+            phase = "advance_to_target_boundary"
+
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = action_symbol
+        normalized["repeat"] = max(1, int(repeat))
+        normalized["stop"] = False
+        normalized["need_capture_after"] = need_capture
+        normalized["target_boundary_context"] = boundary
+        normalized["rule_override"] = {
+            "type": "target_boundary_transit",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "target_house_id": house_id,
+            "phase": phase,
+            "action_symbol": action_symbol,
+            "repeat": int(repeat),
+            "target_boundary_context": boundary,
+            "front_obstacle": obstacle,
+            "reason": "target house is still far outside its search boundary; ignore intermediate house/door candidates and keep moving toward the target boundary",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        transit_reason = (
+            f"target-boundary transit: {phase} with {action_symbol} x{int(repeat)}; "
+            f"target_distance={boundary.get('target_house_distance_cm')}cm, "
+            f"search_allowed_within={boundary.get('search_distance_cm')}cm"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + transit_reason
+        if original.get("action_symbol") != action_symbol:
+            self._append_llm_control_log(
+                f"Target boundary transit override: action={original.get('action_symbol')} -> {action_symbol} repeat={int(repeat)}; "
+                f"target={house_id} distance={boundary.get('target_house_distance_cm')} search_distance={boundary.get('search_distance_cm')}"
+            )
+        return normalized
 
     def _target_entry_visible_for_current_house(self, fusion: Dict[str, Any]) -> bool:
         target_state = str(fusion.get("target_conditioned_state", "") or "")
@@ -3092,6 +3414,242 @@ class Panel:
             return True
         return bool(fusion.get("entry_visible", False))
 
+    def _normalize_angle_deg(self, angle_deg: float) -> float:
+        return ((float(angle_deg) + 180.0) % 360.0) - 180.0
+
+    def _house_center_for_id(self, house_id: str) -> Dict[str, float]:
+        hid = str(house_id or "").strip()
+        if not hid:
+            return {}
+        raw = self._read_local_houses_config()
+        houses = raw.get("houses", []) if isinstance(raw.get("houses"), list) else []
+        for house in houses:
+            if not isinstance(house, dict) or str(house.get("id", "") or "").strip() != hid:
+                continue
+            x = self._as_float_or_none(house.get("center_x"))
+            y = self._as_float_or_none(house.get("center_y"))
+            if x is None or y is None:
+                return {}
+            return {"x": x, "y": y}
+        return {}
+
+    def _house_radius_cm_for_id(self, house_id: str) -> Optional[float]:
+        hid = str(house_id or "").strip()
+        if not hid:
+            return None
+        raw = self._read_local_houses_config()
+        houses = raw.get("houses", []) if isinstance(raw.get("houses"), list) else []
+        for house in houses:
+            if isinstance(house, dict) and str(house.get("id", "") or "").strip() == hid:
+                return self._as_float_or_none(house.get("radius_cm"))
+        return None
+
+    def _target_boundary_context(self, fusion: Dict[str, Any], house_id: str) -> Dict[str, Any]:
+        distance_cm = self._target_house_distance_cm(fusion)
+        radius_cm = self._house_radius_cm_for_id(house_id)
+        search_distance_cm = max(
+            LLM_TARGET_BOUNDARY_MIN_SEARCH_DISTANCE_CM,
+            (radius_cm or 0.0) + LLM_TARGET_BOUNDARY_MARGIN_CM,
+        )
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        bearing = self._as_float_or_none(target_context.get("target_house_bearing_deg"))
+        outside = distance_cm is not None and distance_cm > search_distance_cm
+        return {
+            "target_house_id": str(house_id or ""),
+            "target_house_distance_cm": distance_cm,
+            "target_radius_cm": radius_cm,
+            "boundary_margin_cm": float(LLM_TARGET_BOUNDARY_MARGIN_CM),
+            "search_distance_cm": float(search_distance_cm),
+            "outside_search_boundary": bool(outside),
+            "target_house_bearing_deg": bearing,
+            "target_house_in_fov": bool(target_context.get("target_house_in_fov", False)),
+            "mode": "transit_to_target_boundary" if outside else "entry_search_allowed",
+        }
+
+    def _target_center_from_fusion_or_config(self, fusion: Dict[str, Any], house_id: str) -> Dict[str, float]:
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        center = target_context.get("target_house_center_world", {}) if isinstance(target_context.get("target_house_center_world"), dict) else {}
+        x = self._as_float_or_none(center.get("x"))
+        y = self._as_float_or_none(center.get("y"))
+        if x is not None and y is not None:
+            return {"x": x, "y": y}
+        return self._house_center_for_id(house_id)
+
+    def _uav_pose_from_fusion_or_state(self, fusion: Dict[str, Any]) -> Dict[str, float]:
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        pose = target_context.get("uav_pose_world", {}) if isinstance(target_context.get("uav_pose_world"), dict) else {}
+        x = self._as_float_or_none(pose.get("x"))
+        y = self._as_float_or_none(pose.get("y"))
+        yaw = self._as_float_or_none(pose.get("yaw"))
+        if x is not None and y is not None and yaw is not None:
+            return {"x": x, "y": y, "yaw": yaw}
+        latest_pose = self.latest_state.get("pose", {}) if isinstance(self.latest_state.get("pose"), dict) else {}
+        x = self._as_float_or_none(latest_pose.get("x"))
+        y = self._as_float_or_none(latest_pose.get("y"))
+        yaw = self._as_float_or_none(latest_pose.get("task_yaw", latest_pose.get("yaw")))
+        if x is not None and y is not None and yaw is not None:
+            return {"x": x, "y": y, "yaw": yaw}
+        return {}
+
+    def _geometric_target_reacquire_plan(self, fusion: Dict[str, Any], house_id: str) -> Dict[str, Any]:
+        pose = self._uav_pose_from_fusion_or_state(fusion)
+        target = self._target_center_from_fusion_or_config(fusion, house_id)
+        if not pose or not target:
+            return {}
+        dx = float(target["x"]) - float(pose["x"])
+        dy = float(target["y"]) - float(pose["y"])
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return {}
+        desired_yaw = math.degrees(math.atan2(dy, dx))
+        current_yaw = float(pose["yaw"])
+        delta = self._normalize_angle_deg(desired_yaw - current_yaw)
+        abs_delta = abs(delta)
+        if abs_delta <= LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG:
+            planned_steps = 0
+            yaw_symbol = ""
+        else:
+            planned_steps = max(1, int(round(abs_delta / max(1.0, LLM_YAW_STEP_DEG))))
+            planned_steps = min(planned_steps, int(LLM_TARGET_REACQUIRE_MAX_YAW_STEPS))
+            yaw_symbol = "e" if delta > 0.0 else "q"
+        return {
+            "source": "world_geometry",
+            "target_house_id": house_id,
+            "uav_x": float(pose["x"]),
+            "uav_y": float(pose["y"]),
+            "uav_yaw_deg": current_yaw,
+            "target_x": float(target["x"]),
+            "target_y": float(target["y"]),
+            "desired_yaw_deg": desired_yaw,
+            "signed_delta_deg": delta,
+            "abs_delta_deg": abs_delta,
+            "yaw_symbol": yaw_symbol,
+            "planned_yaw_steps": planned_steps,
+            "yaw_step_deg": float(LLM_YAW_STEP_DEG),
+            "align_tolerance_deg": float(LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG),
+        }
+
+    def _current_target_house_id_from_fusion(self, fusion: Dict[str, Any]) -> str:
+        active = self._current_llm_plan_target()
+        house_id = str(active.get("house_id", "") or "").strip()
+        if house_id:
+            return house_id
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        return str(target_context.get("target_house_id", "") or "").strip()
+
+    def _action_hint_to_yaw_symbol(self, hint: Any) -> str:
+        text = str(hint or "").strip().lower().replace("-", "_").replace(" ", "_")
+        symbol = LLM_CONTROL_ACTION_ALIASES.get(text, text)
+        return symbol if symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS else ""
+
+    def _target_reacquire_needed(self, fusion: Dict[str, Any], *, active_lock: bool = False) -> bool:
+        if self._target_entry_visible_for_current_house(fusion):
+            return False
+        if active_lock:
+            return True
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        if bool(target_context.get("target_house_in_fov", False)):
+            return False
+        target_state = str(fusion.get("target_conditioned_state", "") or "")
+        expected_side = str(target_context.get("target_house_expected_side", "") or "")
+        return target_state == "target_house_not_in_view" or expected_side == "out_of_view"
+
+    def _preferred_reacquire_yaw_symbol(self, fusion: Dict[str, Any], normalized: Dict[str, Any]) -> str:
+        for key in ("target_conditioned_action_hint", "recommended_action_hint"):
+            symbol = self._action_hint_to_yaw_symbol(fusion.get(key))
+            if symbol:
+                return symbol
+        symbol = str(normalized.get("action_symbol", "") or "")
+        if symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return symbol
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        bearing = self._as_float_or_none(target_context.get("target_house_bearing_deg"))
+        if bearing is not None:
+            return "q" if bearing >= 0.0 else "e"
+        return LLM_TARGET_REACQUIRE_DEFAULT_YAW_SYMBOL
+
+    def _apply_target_reacquire_yaw_lock(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        existing_lock = self.llm_target_reacquire_lock if isinstance(self.llm_target_reacquire_lock, dict) else {}
+        lock_for_same_house = str(existing_lock.get("target_house_id", "") or "") == house_id
+        active_lock = lock_for_same_house and int(existing_lock.get("yaw_steps", 0) or 0) < int(existing_lock.get("planned_yaw_steps", existing_lock.get("max_yaw_steps", 0)) or 0)
+        if not house_id or not self._target_reacquire_needed(fusion, active_lock=active_lock):
+            if house_id and str(self.llm_target_reacquire_lock.get("target_house_id", "") or "") == house_id:
+                self.llm_target_reacquire_lock = {}
+            return normalized
+
+        metadata = self._metadata_from_labeling_dir(labeling_dir)
+        step_index = int(metadata.get("step_index", 0) or 0)
+        lock = existing_lock
+        if str(lock.get("target_house_id", "") or "") != house_id or str(lock.get("yaw_symbol", "") or "") not in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+            geometry_plan = self._geometric_target_reacquire_plan(fusion, house_id)
+            yaw_symbol = str(geometry_plan.get("yaw_symbol", "") or "") if geometry_plan else ""
+            planned_steps = int(geometry_plan.get("planned_yaw_steps", 0) or 0) if geometry_plan else 0
+            plan_source = str(geometry_plan.get("source", "") or "")
+            if not yaw_symbol or planned_steps <= 0:
+                yaw_symbol = self._preferred_reacquire_yaw_symbol(fusion, normalized)
+                planned_steps = int(LLM_TARGET_REACQUIRE_MAX_YAW_STEPS)
+                plan_source = "fallback_full_scan"
+            lock = {
+                "target_house_id": house_id,
+                "yaw_symbol": yaw_symbol,
+                "yaw_steps": 0,
+                "planned_yaw_steps": max(1, planned_steps),
+                "max_yaw_steps": max(1, planned_steps),
+                "plan_source": plan_source,
+                "geometry_plan": geometry_plan,
+                "started_at_step": step_index,
+                "initial_target_bearing_deg": target_context.get("target_house_bearing_deg"),
+                "initial_action_hint": fusion.get("target_conditioned_action_hint") or fusion.get("recommended_action_hint"),
+            }
+
+        yaw_symbol = str(lock.get("yaw_symbol", "") or LLM_TARGET_REACQUIRE_DEFAULT_YAW_SYMBOL)
+        yaw_steps = int(lock.get("yaw_steps", 0) or 0)
+        planned_steps = max(1, int(lock.get("planned_yaw_steps", lock.get("max_yaw_steps", LLM_TARGET_REACQUIRE_MAX_YAW_STEPS)) or LLM_TARGET_REACQUIRE_MAX_YAW_STEPS))
+        if yaw_steps >= planned_steps:
+            self.llm_target_reacquire_lock = {}
+            return normalized
+
+        original = dict(normalized)
+        lock["yaw_steps"] = yaw_steps + 1
+        lock["last_step_index"] = step_index
+        self.llm_target_reacquire_lock = lock
+        normalized = dict(normalized)
+        normalized["action_symbol"] = yaw_symbol
+        normalized["repeat"] = 1
+        normalized["stop"] = False
+        normalized["need_capture_after"] = True
+        normalized["target_reacquire_lock"] = dict(lock)
+        normalized["rule_override"] = {
+            "type": "geometric_target_reacquire_yaw_plan",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "target_house_id": house_id,
+            "yaw_symbol": yaw_symbol,
+            "yaw_steps": int(lock.get("yaw_steps", 0) or 0),
+            "planned_yaw_steps": planned_steps,
+            "max_yaw_steps": planned_steps,
+            "plan_source": str(lock.get("plan_source", "") or ""),
+            "geometry_plan": lock.get("geometry_plan", {}),
+            "target_state": str(fusion.get("target_conditioned_state", "") or ""),
+            "target_bearing_deg": (fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}).get("target_house_bearing_deg"),
+            "reason": "target house is not in view; execute the precomputed geometric yaw plan before judging again",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        lock_reason = (
+            f"geometric reacquire plan keeps yaw {'left' if yaw_symbol == 'q' else 'right'} "
+            f"for house {house_id} step {lock['yaw_steps']}/{planned_steps}"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + lock_reason
+        if original.get("action_symbol") != yaw_symbol:
+            self._append_llm_control_log(
+                f"Geometric reacquire yaw plan: action={original.get('action_symbol')} -> {yaw_symbol}; target={house_id} step={lock['yaw_steps']}/{planned_steps}"
+            )
+        return normalized
+
     def _memory_completion_for_house(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
         snapshot = self._read_json_file(Path(labeling_dir) / "entry_search_memory_snapshot_after.json")
         memory = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
@@ -3100,6 +3658,38 @@ class Panel:
         semantic = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
         completion = semantic.get("search_completion_evidence", {}) if isinstance(semantic.get("search_completion_evidence"), dict) else {}
         return completion
+
+    def _best_reliable_memory_entry_for_house(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
+        snapshot = self._read_json_file(Path(labeling_dir) / "entry_search_memory_snapshot_after.json")
+        memory = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
+        memories = memory.get("memories", {}) if isinstance(memory.get("memories"), dict) else {}
+        house_memory = memories.get(str(house_id), {}) if isinstance(memories, dict) else {}
+        semantic = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
+        entries = semantic.get("candidate_entries", []) if isinstance(semantic.get("candidate_entries"), list) else []
+        best: Dict[str, Any] = {}
+        best_score = -1.0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("associated_house_id", "") or "") != str(house_id):
+                continue
+            if not self._is_doorlike_class(str(entry.get("entry_type", "") or "")):
+                continue
+            assoc = self._as_float_or_none(entry.get("association_confidence")) or 0.0
+            match = self._as_float_or_none(entry.get("target_match_score")) or 0.0
+            obs = self._as_float_or_none(entry.get("observation_count")) or 0.0
+            score = assoc + match + min(obs, 5.0) * 0.05
+            if score > best_score:
+                best = entry
+                best_score = score
+        if not best:
+            return {}
+        assoc = self._as_float_or_none(best.get("association_confidence")) or 0.0
+        match = self._as_float_or_none(best.get("target_match_score")) or 0.0
+        obs = self._as_float_or_none(best.get("observation_count")) or 0.0
+        if assoc >= 0.55 and obs >= 2 and match >= 0.45:
+            return best
+        return {}
 
     def _evaluate_llm_house_completion(self, labeling_dir: str) -> Dict[str, Any]:
         metadata = self._metadata_from_labeling_dir(labeling_dir)
@@ -3117,6 +3707,7 @@ class Panel:
                 "finish_type": "no_entry_after_full_coverage",
                 "house_id": house_id,
                 "step_index": step_index,
+                "source_labeling_dir": str(labeling_dir),
                 "reason": "memory reports no entry after full coverage",
                 "memory_completion": memory_completion,
             }
@@ -3124,6 +3715,11 @@ class Panel:
         distance_cm = self._candidate_entry_distance_cm(fusion)
         class_name = self._semantic_class_name(fusion)
         target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        target_house_distance_cm = self._target_house_distance_cm(fusion)
+        bbox_metrics = self._semantic_bbox_metrics(fusion)
+        large_entry_bbox = self._is_large_near_entry_bbox(fusion)
+        reliable_memory_entry = self._best_reliable_memory_entry_for_house(labeling_dir, house_id)
+        front_path_clear = self._front_path_clear_for_approach(fusion)
         threshold = float((self.llm_task_plan.get("execution_policy", {}) if isinstance(self.llm_task_plan, dict) else {}).get("entry_reached_distance_cm", LLM_ENTRY_REACHED_DISTANCE_CM))
         if (
             target_entry_visible
@@ -3136,18 +3732,67 @@ class Panel:
                 "finish_type": "target_entry_reached",
                 "house_id": house_id,
                 "step_index": step_index,
+                "source_labeling_dir": str(labeling_dir),
                 "entry_distance_cm": float(distance_cm),
                 "distance_threshold_cm": threshold,
                 "semantic_class": class_name,
                 "reason": f"target-house door-like entry reached within {threshold:.0f}cm",
+            }
+        if (
+            target_entry_visible
+            and self._is_doorlike_class(class_name)
+            and large_entry_bbox
+            and front_path_clear
+            and (
+                (target_house_distance_cm is not None and target_house_distance_cm <= LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM)
+                or (distance_cm is not None and distance_cm <= LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM)
+            )
+        ):
+            return {
+                "completed": True,
+                "finish_type": "target_entry_reached_large_bbox_proxy",
+                "house_id": house_id,
+                "step_index": step_index,
+                "source_labeling_dir": str(labeling_dir),
+                "entry_distance_cm": distance_cm,
+                "target_house_distance_cm": target_house_distance_cm,
+                "distance_threshold_cm": threshold,
+                "large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
+                "semantic_class": class_name,
+                "bbox_metrics": bbox_metrics,
+                "reason": "target-house entry fills most of the view and the UAV is close enough to treat the doorway as reached",
+            }
+        if (
+            reliable_memory_entry
+            and target_house_distance_cm is not None
+            and target_house_distance_cm <= LLM_ENTRY_REACHED_POSE_PROXY_CM
+        ):
+            return {
+                "completed": True,
+                "finish_type": "target_entry_reached_pose_memory_proxy",
+                "house_id": house_id,
+                "step_index": step_index,
+                "source_labeling_dir": str(labeling_dir),
+                "entry_distance_cm": distance_cm,
+                "target_house_distance_cm": target_house_distance_cm,
+                "pose_proxy_cm": float(LLM_ENTRY_REACHED_POSE_PROXY_CM),
+                "semantic_class": class_name,
+                "reliable_memory_entry_id": str(reliable_memory_entry.get("entry_id", "") or ""),
+                "reliable_memory_entry_type": str(reliable_memory_entry.get("entry_type", "") or ""),
+                "reason": "semantic door evidence became unreliable at close range, but remembered target-house entry and pose distance indicate the entry is reached",
             }
         return {
             "completed": False,
             "house_id": house_id,
             "step_index": step_index,
             "entry_distance_cm": distance_cm,
+            "target_house_distance_cm": target_house_distance_cm,
             "semantic_class": class_name,
             "target_entry_visible": target_entry_visible,
+            "large_entry_bbox": large_entry_bbox,
+            "bbox_metrics": bbox_metrics,
+            "front_path_clear": front_path_clear,
+            "reliable_memory_entry_id": str(reliable_memory_entry.get("entry_id", "") or "") if reliable_memory_entry else "",
         }
 
     def _should_override_to_forward_approach(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
@@ -3174,6 +3819,22 @@ class Panel:
 
     def _apply_llm_control_rule_overrides(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
         if bool(normalized.get("stop", False)):
+            return normalized
+        normalized = self._apply_target_reacquire_yaw_lock(normalized, labeling_dir)
+        if bool(normalized.get("stop", False)):
+            return normalized
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "geometric_target_reacquire_yaw_plan" and str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+            obstacle = self._front_obstacle_status(fusion)
+            if bool(obstacle.get("too_close", False)):
+                return self._apply_front_obstacle_detour_override(normalized, labeling_dir)
+            return normalized
+        normalized = self._apply_front_obstacle_detour_override(normalized, labeling_dir)
+        if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return normalized
+        normalized = self._apply_target_boundary_transit_override(normalized, labeling_dir)
+        if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
         override = self._should_override_to_forward_approach(normalized, labeling_dir)
         if not bool(override.get("override", False)):
@@ -3241,6 +3902,9 @@ class Panel:
 
         teacher_payload = build_prompt_payload(Path(labeling_dir), memory_snapshot="after")
         structured_input = teacher_payload.get("structured_input", {}) if isinstance(teacher_payload.get("structured_input"), dict) else {}
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        target_boundary_context = self._target_boundary_context(fusion, house_id) if house_id else {}
         return {
             "version": "memory_aware_llm_control_prompt_v1",
             "prompt_type": "memory_aware_direct_control",
@@ -3257,9 +3921,19 @@ class Panel:
                 "current_target": self._current_llm_plan_target(),
                 "ordered_targets": self.llm_task_plan.get("ordered_targets", []) if isinstance(self.llm_task_plan, dict) else [],
                 "entry_reached_distance_cm": float(LLM_ENTRY_REACHED_DISTANCE_CM),
+                "entry_reached_pose_proxy_cm": float(LLM_ENTRY_REACHED_POSE_PROXY_CM),
+                "entry_reached_large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
             },
+            "target_reacquire_lock": dict(self.llm_target_reacquire_lock) if isinstance(self.llm_target_reacquire_lock, dict) else {},
+            "obstacle_detour_lock": dict(self.llm_obstacle_detour_lock) if isinstance(self.llm_obstacle_detour_lock, dict) else {},
+            "target_boundary_context": target_boundary_context,
             "completion_rules": {
                 "target_entry_reached": "Finish the current house when a reliable target-house door/open door/close door is within 300cm.",
+                "large_bbox_proxy": "Also treat the current house as reached when a target-house door/open door/close door fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
+                "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
+                "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
+                "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not use yaw-only observation or forward motion as detour; physically back off and strafe left/right until the front path clears.",
+                "target_boundary_transit": "If target_boundary_context.mode=transit_to_target_boundary, ignore intermediate non-target house entrances and keep aligning/moving toward the target house boundary before starting entry search.",
                 "approach_vs_cross": "cross_ready=false means do not enter/cross the doorway yet; it does not mean you cannot approach the doorway.",
                 "forward_preference": "If a target-house entry is visible, associated with the active target, farther than 300cm, and the front path is not severely blocked, prefer forward.",
             },
@@ -3278,15 +3952,26 @@ class Panel:
             "w/a/s/d/r/f may use repeat>1 for a short continuous move. q/e must always use repeat=1 "
             "because yaw changes the view and the controller will capture immediately after yaw.\n"
             "Do not chase non-target entries. If the target house is not in view, reorient with q/e.\n"
+            "When switching to a new target house that is outside the field of view, keep yawing in the same "
+            "geometrically planned direction for the planned number of yaw steps. The executor estimates this from the "
+            "UAV world pose and the target house center. Do not alternate q/e based on short-term noisy bearing wrap-around.\n"
             "Important: cross_ready=false only means do not cross/enter the doorway yet. It does not mean you cannot "
             "approach a visible target-house door. If a target-house door/open door/close door is visible and the UAV "
             "is farther than 3m from it, prefer small forward repeats when the front path is not severely blocked.\n"
             "Treat rule-based labels such as target_house_entry_blocked, blocked_temporary, or persistent_blocked_shift "
             "as warnings against crossing the doorway, not as automatic reasons to stop approaching. If global_front_obstacle.present=false "
             "and the target door is still around 3-12m away, forward approach is usually the preferred data-collection action.\n"
+            "If global_front_obstacle.present=true with high/severe severity or front_min_depth is around 120cm or less, "
+            "do not keep moving forward and do not treat yaw-only observation as a real detour. First back off if the "
+            "obstacle is very close, then strafe left/right according to detour guidance until the front path clears.\n"
+            "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
+            "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
+            "continue along the geometric route to the target house boundary first.\n"
             "The current house search is finished when the UAV is within about 300cm of a reliable target-house entry; "
-            "the executor will switch to the next house. Avoid left/right oscillation; if lateral moves do not improve "
-            "evidence, move forward, back off, yaw to a new sector, or stop for review.\n"
+            "the executor will switch to the next house. Close-range depth can be noisy: if the target-house entry bbox "
+            "fills most of the image or a reliable remembered target-house entry exists while the target-house distance "
+            "is near 3-5m, treat it as reached rather than continuing through the doorway. Avoid left/right oscillation; "
+            "if lateral moves do not improve evidence, move forward, back off, yaw to a new sector, or stop for review.\n"
             "If the search appears complete or unsafe, set stop=true.\n"
             "Return only one JSON object. No markdown. No commentary."
         )
@@ -3361,6 +4046,34 @@ class Panel:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         return artifact_dir
 
+    def _sync_llm_control_labeling_inputs(self, labeling_dir: str, artifact_dir: Path) -> Dict[str, Any]:
+        source_dir = Path(labeling_dir)
+        target_dir = artifact_dir / "labeling_inputs"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        copied: List[str] = []
+        missing: List[str] = []
+        for filename in LLM_CONTROL_LABELING_INPUT_FILES:
+            source_path = source_dir / filename
+            if source_path.is_file():
+                shutil.copy2(source_path, target_dir / filename)
+                copied.append(filename)
+            else:
+                missing.append(filename)
+        manifest = {
+            "version": "llm_control_labeling_inputs_v1",
+            "source_labeling_dir": str(source_dir),
+            "labeling_inputs_dir": str(target_dir),
+            "copied_files": copied,
+            "missing_files": missing,
+            "note": "Only key labeling artifacts are mirrored here; raw capture folders/images are not duplicated.",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        (target_dir / "labeling_inputs_manifest.json").write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return manifest
+
     def _request_llm_control_decision(self, *, labeling_dir: str, decision_index: int) -> Dict[str, Any]:
         from anthropic import Anthropic
         from phase2_multimodal_fusion_analysis.memory_aware_llm_teacher_label_validator import extract_json_object
@@ -3369,6 +4082,9 @@ class Panel:
         system_prompt = self._build_llm_control_system_prompt()
         user_prompt = self._build_llm_control_user_prompt(prompt_payload)
         artifact_dir = self._llm_control_artifact_dir(labeling_dir, decision_index)
+        if isinstance(self.llm_task_plan, dict) and self.llm_task_plan:
+            self._save_llm_task_plan_files(labeling_dir)
+        labeling_inputs_manifest = self._sync_llm_control_labeling_inputs(labeling_dir, artifact_dir)
         prompt_path = artifact_dir / "llm_control_prompt.json"
         prompt_path.write_text(
             json.dumps(
@@ -3377,6 +4093,7 @@ class Panel:
                     "user_prompt": user_prompt,
                     "control_prompt_payload": prompt_payload,
                     "source_labeling_dir": str(labeling_dir),
+                    "labeling_inputs_manifest": labeling_inputs_manifest,
                     "artifact_dir": str(artifact_dir),
                 },
                 indent=2,
@@ -3488,6 +4205,7 @@ class Panel:
             "decision_index": int(decision_index),
             "labeling_dir": str(labeling_dir),
             "artifact_dir": str(artifact_dir),
+            "labeling_inputs_dir": str(artifact_dir / "labeling_inputs"),
             "raw_decision": raw_decision,
             "normalized_decision": normalized,
             "created_at": datetime.now().isoformat(timespec="seconds"),
