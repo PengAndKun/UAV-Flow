@@ -3069,7 +3069,14 @@ class Panel:
         return normalized in {name.replace("_", " ") for name in DOORLIKE_CLASS_NAMES}
 
     def _front_path_clear_for_approach(self, fusion: Dict[str, Any]) -> bool:
-        if bool(fusion.get("front_blocked", False)) or bool(fusion.get("global_front_obstacle", False)):
+        if bool(fusion.get("front_blocked", False)):
+            return False
+        global_obstacle = fusion.get("global_front_obstacle", False)
+        if isinstance(global_obstacle, dict):
+            if bool(global_obstacle.get("present", False)):
+                severity = str(global_obstacle.get("severity", "") or "").lower()
+                return severity not in {"severe", "blocked", "critical"}
+        elif bool(global_obstacle):
             return False
         assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
         if bool(assessment.get("front_obstacle_present", False)):
@@ -3274,6 +3281,9 @@ class Panel:
             "Important: cross_ready=false only means do not cross/enter the doorway yet. It does not mean you cannot "
             "approach a visible target-house door. If a target-house door/open door/close door is visible and the UAV "
             "is farther than 3m from it, prefer small forward repeats when the front path is not severely blocked.\n"
+            "Treat rule-based labels such as target_house_entry_blocked, blocked_temporary, or persistent_blocked_shift "
+            "as warnings against crossing the doorway, not as automatic reasons to stop approaching. If global_front_obstacle.present=false "
+            "and the target door is still around 3-12m away, forward approach is usually the preferred data-collection action.\n"
             "The current house search is finished when the UAV is within about 300cm of a reliable target-house entry; "
             "the executor will switch to the next house. Avoid left/right oscillation; if lateral moves do not improve "
             "evidence, move forward, back off, yaw to a new sector, or stop for review.\n"
