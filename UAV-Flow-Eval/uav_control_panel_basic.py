@@ -43,6 +43,31 @@ MOVE_COMMANDS: Dict[str, Dict[str, Any]] = {
     "x": {"forward_cm": 0.0, "right_cm": 0.0, "up_cm": 0.0, "yaw_delta_deg": 0.0, "action_name": "hold"},
 }
 YAW_IMMEDIATE_CAPTURE_SYMBOLS = {"q", "e"}
+LLM_CONTROL_CONTINUOUS_SYMBOLS = {"w", "a", "s", "d", "r", "f"}
+LLM_CONTROL_SINGLE_SYMBOLS = {"q", "e", "x"}
+LLM_CONTROL_ALLOWED_SYMBOLS = LLM_CONTROL_CONTINUOUS_SYMBOLS | LLM_CONTROL_SINGLE_SYMBOLS
+LLM_CONTROL_ACTION_ALIASES: Dict[str, str] = {
+    "forward": "w",
+    "backward": "s",
+    "left": "a",
+    "right": "d",
+    "up": "r",
+    "down": "f",
+    "yaw_left": "q",
+    "turn_left": "q",
+    "yaw_right": "e",
+    "turn_right": "e",
+    "hold": "x",
+    "stop": "x",
+}
+LLM_CONTROL_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "action_symbol": "w",
+    "repeat": 2,
+    "stop": False,
+    "need_capture_after": True,
+    "confidence": 0.85,
+    "reason": "Short memory-aware control rationale.",
+}
 
 TARGET_CONDITIONED_STATE_OPTIONS: List[str] = [
     "target_house_not_in_view",
@@ -203,6 +228,18 @@ class Panel:
         self.memory_auto_steps_var = tk.StringVar(value="3")
         self.memory_auto_status_var = tk.StringVar(value="Auto Capture: off")
         self.memory_auto_next_var = tk.StringVar(value="Next Auto: off")
+        self.llm_control_base_url_var = tk.StringVar(value=os.environ.get("ANTHROPIC_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE", ""))
+        self.llm_control_api_key_var = tk.StringVar(value=os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("OPENAI_API_KEY", ""))
+        self.llm_control_model_var = tk.StringVar(value=os.environ.get("ANTHROPIC_MODEL", "gpt-5.5"))
+        self.llm_control_max_steps_var = tk.StringVar(value="20")
+        self.llm_control_repeat_cap_var = tk.StringVar(value="4")
+        self.llm_control_delay_ms_var = tk.StringVar(value="350")
+        self.llm_control_timeout_s_var = tk.StringVar(value="60")
+        self.llm_control_status_var = tk.StringVar(value="LLM Control: idle")
+        self.llm_control_step_var = tk.StringVar(value="0/0")
+        self.llm_control_last_action_var = tk.StringVar(value="Last action: none")
+        self.llm_control_last_capture_var = tk.StringVar(value="Last capture: none")
+        self.llm_control_reason_var = tk.StringVar(value="Reason: -")
         self.phase1_settle_var = tk.StringVar(value="0.20")
         self.sequence_var = tk.StringVar(value="")
         self.sequence_delay_var = tk.StringVar(value="260")
@@ -220,6 +257,8 @@ class Panel:
         self.depth_photo: Optional[ImageTk.PhotoImage] = None
         self.memory_window: Optional[tk.Toplevel] = None
         self.memory_text: Optional[tk.Text] = None
+        self.llm_control_window: Optional[tk.Toplevel] = None
+        self.llm_control_log_text: Optional[tk.Text] = None
         self.fusion_preview_label: Optional[tk.Label] = None
         self.fusion_preview_photo: Optional[ImageTk.PhotoImage] = None
         self.fusion_window: Optional[tk.Toplevel] = None
@@ -281,10 +320,15 @@ class Panel:
         self.movement_enabled_state = False
         self.latest_state: Dict[str, Any] = {}
         self.latest_memory_collection_state: Dict[str, Any] = {}
+        self.last_memory_capture_response: Dict[str, Any] = {}
         self.memory_auto_enabled = False
         self.memory_auto_last_capture_time = 0.0
         self.memory_auto_last_capture_step = 0
         self.memory_auto_episode_id = ""
+        self.llm_control_thread: Optional[threading.Thread] = None
+        self.llm_control_stop_event = threading.Event()
+        self.llm_control_running = False
+        self.llm_control_decision_history: List[Dict[str, Any]] = []
 
         self.eval_dir = os.path.dirname(os.path.abspath(__file__))
         self.houses_config_path = os.path.join(self.eval_dir, "houses_config.json")
@@ -383,6 +427,7 @@ class Panel:
             anchor="w",
             justify="left",
         ).grid(row=7, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
+        tk.Button(memory, text="Open LLM Control", command=self.toggle_llm_control_window).grid(row=8, column=0, columnspan=4, padx=6, pady=(0, 6), sticky="ew")
 
         fusion = tk.LabelFrame(left, text="Phase2 Fusion")
         fusion.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -468,6 +513,8 @@ class Panel:
             return None
         if self.memory_window is not None and self.memory_window.winfo_exists() and toplevel == self.memory_window and self.memory_text is not None:
             return ("memory_text", self.memory_text)
+        if self.llm_control_window is not None and self.llm_control_window.winfo_exists() and toplevel == self.llm_control_window and self.llm_control_log_text is not None:
+            return ("llm_control_log", self.llm_control_log_text)
         if toplevel == self.root:
             return ("main_canvas", self.main_canvas)
         return None
@@ -1745,6 +1792,7 @@ class Panel:
             ) or {}
             if not isinstance(response, dict):
                 return False
+            self.last_memory_capture_response = dict(response)
             ok = str(response.get("status", "")) == "ok"
             state = response.get("state")
             result = response.get("result")
@@ -2114,6 +2162,10 @@ class Panel:
             resp = self.safe(self.client.post_json, "/move_relative", payload, label=f"Move {symbol}")
             if isinstance(resp, dict):
                 self.root.after(0, lambda: self.apply_state(resp)); self.refresh_map_async()
+                if str(resp.get("status", "")).lower() in {"error", "disabled"}:
+                    message = str(resp.get("message", "") or f"Move {symbol} failed.")
+                    self.root.after(0, lambda msg=message: self.status_var.set(msg))
+                    return False
                 if from_sequence: self.root.after(0, lambda s=symbol: self.status_var.set(f"Sequence sent: {s}"))
                 if self._should_immediate_memory_capture_after_move(symbol):
                     action_name = str(payload.get("action_name", symbol.lower()) or symbol.lower())
@@ -2210,6 +2262,483 @@ class Panel:
         self.sequence_thread = threading.Thread(target=worker, daemon=True); self.sequence_thread.start()
 
     def on_stop_sequence(self) -> None: self.sequence_stop_event.set(); self.status_var.set("Stopping sequence...")
+
+    def toggle_llm_control_window(self) -> None:
+        if self.llm_control_window and self.llm_control_window.winfo_exists():
+            self._close_llm_control_window()
+            return
+        self.llm_control_window = tk.Toplevel(self.root)
+        self.llm_control_window.title("LLM Control Pilot")
+        self.llm_control_window.geometry("940x720")
+        self.llm_control_window.protocol("WM_DELETE_WINDOW", self._close_llm_control_window)
+
+        config = tk.LabelFrame(self.llm_control_window, text="LLM API")
+        config.pack(fill="x", padx=8, pady=8)
+        config.grid_columnconfigure(1, weight=1)
+        config.grid_columnconfigure(3, weight=1)
+        tk.Label(config, text="API Base URL").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(config, textvariable=self.llm_control_base_url_var).grid(row=0, column=1, columnspan=3, sticky="ew", padx=6, pady=6)
+        tk.Label(config, text="API Key").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(config, textvariable=self.llm_control_api_key_var, show="*").grid(row=1, column=1, sticky="ew", padx=6, pady=6)
+        tk.Label(config, text="Model").grid(row=1, column=2, sticky="e", padx=(10, 4), pady=6)
+        tk.Entry(config, textvariable=self.llm_control_model_var).grid(row=1, column=3, sticky="ew", padx=6, pady=6)
+
+        control = tk.LabelFrame(self.llm_control_window, text="Control Loop")
+        control.pack(fill="x", padx=8, pady=(0, 8))
+        for col in range(6):
+            control.grid_columnconfigure(col, weight=1 if col in {1, 3, 5} else 0)
+        tk.Label(control, text="Max Decisions").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(control, textvariable=self.llm_control_max_steps_var, width=8).grid(row=0, column=1, sticky="w", padx=6, pady=6)
+        tk.Label(control, text="Move Repeat Cap").grid(row=0, column=2, sticky="e", padx=(10, 4), pady=6)
+        tk.Entry(control, textvariable=self.llm_control_repeat_cap_var, width=8).grid(row=0, column=3, sticky="w", padx=6, pady=6)
+        tk.Label(control, text="Delay ms").grid(row=0, column=4, sticky="e", padx=(10, 4), pady=6)
+        tk.Entry(control, textvariable=self.llm_control_delay_ms_var, width=8).grid(row=0, column=5, sticky="w", padx=6, pady=6)
+        tk.Label(control, text="Timeout s").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(control, textvariable=self.llm_control_timeout_s_var, width=8).grid(row=1, column=1, sticky="w", padx=6, pady=6)
+        tk.Button(control, text="Start LLM Control", command=self.on_llm_control_start).grid(row=1, column=2, padx=6, pady=6, sticky="ew")
+        tk.Button(control, text="Single Decision", command=self.on_llm_control_step_once).grid(row=1, column=3, padx=6, pady=6, sticky="ew")
+        tk.Button(control, text="Stop", command=self.on_llm_control_stop).grid(row=1, column=4, columnspan=2, padx=6, pady=6, sticky="ew")
+
+        status = tk.LabelFrame(self.llm_control_window, text="Live State")
+        status.pack(fill="x", padx=8, pady=(0, 8))
+        for idx, var in enumerate(
+            (
+                self.llm_control_status_var,
+                self.llm_control_step_var,
+                self.llm_control_last_action_var,
+                self.llm_control_last_capture_var,
+                self.llm_control_reason_var,
+            )
+        ):
+            tk.Label(status, textvariable=var, anchor="w", justify="left").grid(row=idx, column=0, sticky="ew", padx=6, pady=2)
+        status.grid_columnconfigure(0, weight=1)
+
+        log_frame = tk.LabelFrame(self.llm_control_window, text="Decision Log")
+        log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.llm_control_log_text = tk.Text(log_frame, wrap="word", font=("Consolas", 10))
+        self.llm_control_log_text.pack(fill="both", expand=True, padx=6, pady=6)
+        self.llm_control_log_text.configure(state="disabled")
+        self._append_llm_control_log("LLM control window opened. Start a memory episode before running.")
+
+    def _close_llm_control_window(self) -> None:
+        self.on_llm_control_stop()
+        try:
+            if self.llm_control_window is not None and self.llm_control_window.winfo_exists():
+                self.llm_control_window.destroy()
+        except Exception:
+            pass
+        self.llm_control_window = None
+        self.llm_control_log_text = None
+
+    def _append_llm_control_log(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+
+        def append() -> None:
+            if self.llm_control_log_text is None or not self.llm_control_log_text.winfo_exists():
+                return
+            self.llm_control_log_text.configure(state="normal")
+            self.llm_control_log_text.insert("end", f"[{timestamp}] {message}\n")
+            self.llm_control_log_text.see("end")
+            self.llm_control_log_text.configure(state="disabled")
+
+        self.root.after(0, append)
+
+    def _set_llm_control_var(self, var: tk.StringVar, value: str) -> None:
+        self.root.after(0, lambda: var.set(value))
+
+    def on_llm_control_start(self) -> None:
+        self._start_llm_control_loop(single_step=False)
+
+    def on_llm_control_step_once(self) -> None:
+        self._start_llm_control_loop(single_step=True)
+
+    def _start_llm_control_loop(self, *, single_step: bool) -> None:
+        if self.llm_control_thread and self.llm_control_thread.is_alive():
+            self.llm_control_status_var.set("LLM Control: already running")
+            return
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        if not bool(memory_collection.get("active", False)):
+            self.llm_control_status_var.set("LLM Control: start memory episode first")
+            self.status_var.set("Start Episode first, then start LLM control.")
+            return
+        base_url = self.llm_control_base_url_var.get().strip()
+        api_key = self.llm_control_api_key_var.get().strip()
+        model = self.llm_control_model_var.get().strip()
+        if not base_url or not api_key or not model:
+            self.llm_control_status_var.set("LLM Control: missing API base/key/model")
+            return
+        if self.memory_auto_enabled:
+            self._stop_memory_auto_capture_local()
+            self._append_llm_control_log("Panel auto capture stopped to avoid duplicate captures during LLM control.")
+        try:
+            max_steps = 1 if single_step else max(1, int(float(self.llm_control_max_steps_var.get().strip())))
+        except ValueError:
+            self.llm_control_status_var.set("LLM Control: invalid max decisions")
+            return
+        self.llm_control_stop_event.clear()
+        self.llm_control_thread = threading.Thread(
+            target=lambda: self._llm_control_loop(max_steps=max_steps),
+            daemon=True,
+        )
+        self.llm_control_thread.start()
+
+    def on_llm_control_stop(self) -> None:
+        self.llm_control_stop_event.set()
+        if self.llm_control_running:
+            self.llm_control_status_var.set("LLM Control: stopping...")
+
+    def _llm_control_loop(self, *, max_steps: int) -> None:
+        self.llm_control_running = True
+        self.llm_control_decision_history = []
+        reuse_labeling_dir = ""
+        self._set_llm_control_var(self.llm_control_status_var, "LLM Control: running")
+        self._append_llm_control_log(f"Started LLM control loop with max_decisions={max_steps}.")
+        try:
+            self._ensure_movement_enabled_for_llm()
+            for decision_index in range(1, int(max_steps) + 1):
+                if self.llm_control_stop_event.is_set():
+                    break
+                self._set_llm_control_var(self.llm_control_step_var, f"{decision_index}/{max_steps}")
+                if reuse_labeling_dir:
+                    labeling_dir = reuse_labeling_dir
+                    reuse_labeling_dir = ""
+                    self._append_llm_control_log(f"Reusing immediate yaw capture: {Path(labeling_dir).parent.name}")
+                else:
+                    labeling_dir = self._run_llm_control_capture(
+                        capture_source="llm_control",
+                        note=f"llm_control decision_step={decision_index}",
+                    )
+                if not labeling_dir:
+                    self._set_llm_control_var(self.llm_control_status_var, "LLM Control: capture failed")
+                    break
+
+                self._set_llm_control_var(self.llm_control_last_capture_var, f"Last capture: {Path(labeling_dir).parent.name}")
+                decision = self._request_llm_control_decision(labeling_dir=labeling_dir, decision_index=decision_index)
+                normalized = self._normalize_llm_control_decision(decision)
+                self._write_llm_control_decision(labeling_dir, decision, normalized, decision_index)
+                self.llm_control_decision_history.append(normalized)
+                self.llm_control_decision_history = self.llm_control_decision_history[-12:]
+
+                symbol = str(normalized.get("action_symbol", "x") or "x")
+                repeat = int(normalized.get("repeat", 1) or 1)
+                reason = str(normalized.get("reason", "") or "-")
+                confidence = float(normalized.get("confidence", 0.0) or 0.0)
+                self._set_llm_control_var(
+                    self.llm_control_last_action_var,
+                    f"Last action: {symbol} x{repeat} conf={confidence:.2f}",
+                )
+                self._set_llm_control_var(self.llm_control_reason_var, f"Reason: {reason}")
+                self._append_llm_control_log(f"Decision {decision_index}: action={symbol} repeat={repeat} stop={int(bool(normalized.get('stop')))} reason={reason}")
+
+                if bool(normalized.get("stop", False)):
+                    self._set_llm_control_var(self.llm_control_status_var, "LLM Control: stopped by LLM")
+                    break
+
+                move_ok = True
+                for repeat_index in range(repeat):
+                    if self.llm_control_stop_event.is_set():
+                        move_ok = False
+                        break
+                    move_ok = self._execute_move(symbol, from_sequence=False)
+                    if not move_ok:
+                        break
+                    time.sleep(self._llm_control_delay_s())
+                if not move_ok:
+                    self._set_llm_control_var(self.llm_control_status_var, "LLM Control: movement failed/stopped")
+                    break
+
+                if symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS and not self.llm_control_stop_event.is_set():
+                    yaw_labeling_dir = self._run_llm_control_capture(
+                        capture_source="llm_yaw",
+                        note=f"llm_control immediate capture after yaw symbol={symbol} decision_step={decision_index}",
+                    )
+                    if yaw_labeling_dir:
+                        reuse_labeling_dir = yaw_labeling_dir
+                time.sleep(self._llm_control_delay_s())
+            else:
+                self._set_llm_control_var(self.llm_control_status_var, "LLM Control: completed max decisions")
+        except Exception as exc:
+            logger.exception("LLM control loop failed")
+            self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: error {exc}")
+            self._append_llm_control_log(f"ERROR: {exc}")
+        finally:
+            self.llm_control_running = False
+            if self.llm_control_stop_event.is_set():
+                self._set_llm_control_var(self.llm_control_status_var, "LLM Control: stopped")
+            self._append_llm_control_log("LLM control loop ended.")
+
+    def _ensure_movement_enabled_for_llm(self) -> None:
+        if self.movement_enabled_state:
+            return
+        resp = self.safe(
+            self.client.post_json,
+            "/basic_movement_enable",
+            {"enabled": True},
+            label="Enable movement for LLM control",
+        )
+        if isinstance(resp, dict):
+            self.root.after(0, lambda r=resp: self.apply_state(r))
+            self._append_llm_control_log("Basic movement was disabled; enabled it for LLM control.")
+
+    def _llm_control_delay_s(self) -> float:
+        try:
+            return max(0.05, float(self.llm_control_delay_ms_var.get().strip()) / 1000.0)
+        except ValueError:
+            return 0.35
+
+    def _llm_control_repeat_cap(self) -> int:
+        try:
+            return max(1, min(12, int(float(self.llm_control_repeat_cap_var.get().strip()))))
+        except ValueError:
+            return 4
+
+    def _llm_control_timeout_s(self) -> float:
+        try:
+            return max(10.0, float(self.llm_control_timeout_s_var.get().strip()))
+        except ValueError:
+            return 60.0
+
+    def _run_llm_control_capture(self, *, capture_source: str, note: str) -> str:
+        wait_deadline = time.time() + 240.0
+        while self.memory_capture_inflight and not self.llm_control_stop_event.is_set() and time.time() < wait_deadline:
+            time.sleep(0.1)
+        if self.llm_control_stop_event.is_set():
+            return ""
+        self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: capturing {capture_source}")
+        ok = self._run_memory_capture_analyze(capture_source=capture_source, note=note, update_status=False)
+        response = self.last_memory_capture_response if isinstance(self.last_memory_capture_response, dict) else {}
+        labeling_dir = str(response.get("labeling_dir", "") or "")
+        if ok and labeling_dir:
+            self._append_llm_control_log(f"Capture ready: {Path(labeling_dir).parent.name}")
+            return labeling_dir
+        message = str(response.get("message", "") or "unknown capture error")
+        self._append_llm_control_log(f"Capture failed: {message}")
+        return ""
+
+    def _build_llm_control_prompt_payload(self, labeling_dir: str, decision_index: int) -> Dict[str, Any]:
+        from phase2_multimodal_fusion_analysis.memory_aware_llm_teacher_prompt_builder import build_prompt_payload
+
+        teacher_payload = build_prompt_payload(Path(labeling_dir), memory_snapshot="after")
+        structured_input = teacher_payload.get("structured_input", {}) if isinstance(teacher_payload.get("structured_input"), dict) else {}
+        return {
+            "version": "memory_aware_llm_control_prompt_v1",
+            "prompt_type": "memory_aware_direct_control",
+            "decision_index": int(decision_index),
+            "labeling_dir": str(labeling_dir),
+            "allowed_action_symbols": sorted(LLM_CONTROL_ALLOWED_SYMBOLS),
+            "continuous_action_symbols": sorted(LLM_CONTROL_CONTINUOUS_SYMBOLS),
+            "single_action_symbols": sorted(LLM_CONTROL_SINGLE_SYMBOLS),
+            "repeat_cap": self._llm_control_repeat_cap(),
+            "output_schema": LLM_CONTROL_OUTPUT_SCHEMA,
+            "structured_observation": structured_input,
+            "recent_llm_decisions": self.llm_control_decision_history[-6:],
+        }
+
+    def _build_llm_control_system_prompt(self) -> str:
+        return (
+            "You are a memory-aware UAV control pilot. You directly choose low-level control symbols "
+            "for collecting target-house entry search data.\n"
+            "Use the provided YOLO/RGB evidence, depth traversability evidence, target-house context, "
+            "temporal actions, and structured memory.\n"
+            "Allowed controls: w=forward, s=backward, a=left, d=right, r=up, f=down, q=yaw_left, "
+            "e=yaw_right, x=hold.\n"
+            "w/a/s/d/r/f may use repeat>1 for a short continuous move. q/e must always use repeat=1 "
+            "because yaw changes the view and the controller will capture immediately after yaw.\n"
+            "Do not chase non-target entries. If the target house is not in view, reorient with q/e. "
+            "If the target entry is approachable, prefer small forward repeats. If blocked, detour or back off. "
+            "If the search appears complete or unsafe, set stop=true.\n"
+            "Return only one JSON object. No markdown. No commentary."
+        )
+
+    def _build_llm_control_user_prompt(self, payload: Dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                "Task:",
+                "Directly control the UAV to search for and approach the entrance of the target house while collecting memory-aware training data.",
+                "",
+                "Controller behavior:",
+                "The chosen action will be executed before the next visual analysis. Continuous moves repeat without intermediate screenshots. q/e yaw actions are single-step and trigger an immediate capture.",
+                "",
+                "Control input:",
+                json.dumps(payload, indent=2, ensure_ascii=False),
+                "",
+                "Return strict JSON with this schema:",
+                json.dumps(LLM_CONTROL_OUTPUT_SCHEMA, indent=2, ensure_ascii=False),
+            ]
+        )
+
+    def _safe_llm_control_path_fragment(self, value: str) -> str:
+        text = str(value or "").strip()
+        safe = "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in text)
+        return safe[:120] or "unknown"
+
+    def _resolve_llm_control_capture_root(self, labeling_dir: str) -> Path:
+        labeling_path = Path(labeling_dir).resolve()
+        for parent in labeling_path.parents:
+            if parent.name == "memory_collection_sessions":
+                return parent.parent / "llm_control_sessions"
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        collection_dir = Path(str(memory_collection.get("collection_dir", "") or "")).resolve()
+        if collection_dir:
+            for parent in collection_dir.parents:
+                if parent.name == "captures_remote":
+                    return parent / "llm_control_sessions"
+            if collection_dir.parent.name == "memory_collection_sessions":
+                return collection_dir.parent.parent / "llm_control_sessions"
+        return Path(PROJECT_ROOT) / "captures_remote" / "llm_control_sessions"
+
+    def _resolve_llm_control_episode_id(self, labeling_dir: str) -> str:
+        labeling_path = Path(labeling_dir).resolve()
+        for parent in labeling_path.parents:
+            if parent.parent.name == "memory_collection_sessions":
+                return self._safe_llm_control_path_fragment(parent.name)
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        episode_id = str(memory_collection.get("episode_id", "") or "")
+        return self._safe_llm_control_path_fragment(episode_id or "no_episode")
+
+    def _llm_control_artifact_dir(self, labeling_dir: str, decision_index: int) -> Path:
+        root = self._resolve_llm_control_capture_root(labeling_dir)
+        episode_id = self._resolve_llm_control_episode_id(labeling_dir)
+        capture_name = self._safe_llm_control_path_fragment(Path(labeling_dir).parent.name)
+        artifact_dir = root / episode_id / f"decision_{int(decision_index):04d}_{capture_name}"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        return artifact_dir
+
+    def _request_llm_control_decision(self, *, labeling_dir: str, decision_index: int) -> Dict[str, Any]:
+        from anthropic import Anthropic
+        from phase2_multimodal_fusion_analysis.memory_aware_llm_teacher_label_validator import extract_json_object
+
+        prompt_payload = self._build_llm_control_prompt_payload(labeling_dir, decision_index)
+        system_prompt = self._build_llm_control_system_prompt()
+        user_prompt = self._build_llm_control_user_prompt(prompt_payload)
+        artifact_dir = self._llm_control_artifact_dir(labeling_dir, decision_index)
+        prompt_path = artifact_dir / "llm_control_prompt.json"
+        prompt_path.write_text(
+            json.dumps(
+                {
+                    "system_prompt": system_prompt,
+                    "user_prompt": user_prompt,
+                    "control_prompt_payload": prompt_payload,
+                    "source_labeling_dir": str(labeling_dir),
+                    "artifact_dir": str(artifact_dir),
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        self._set_llm_control_var(self.llm_control_status_var, "LLM Control: waiting for LLM")
+        start_time = time.time()
+        client = Anthropic(
+            api_key=self.llm_control_api_key_var.get().strip(),
+            base_url=self.llm_control_base_url_var.get().strip(),
+            timeout=self._llm_control_timeout_s(),
+        )
+        response = client.messages.create(
+            model=self.llm_control_model_var.get().strip(),
+            max_tokens=500,
+            system=system_prompt,
+            messages=[{"role": "user", "content": [{"type": "text", "text": user_prompt}]}],
+        )
+        latency_ms = (time.time() - start_time) * 1000.0
+        raw_text = self._extract_anthropic_text(response)
+        parsed = extract_json_object(raw_text)
+        response_payload = {
+            "api_style": "anthropic_sdk_text",
+            "model_name": self.llm_control_model_var.get().strip(),
+            "latency_ms": round(float(latency_ms), 3),
+            "raw_text": raw_text,
+            "parsed": parsed,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "source_labeling_dir": str(labeling_dir),
+            "artifact_dir": str(artifact_dir),
+        }
+        (artifact_dir / "llm_control_response.json").write_text(
+            json.dumps(response_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        if not parsed:
+            raise RuntimeError("LLM returned no parseable JSON control decision.")
+        return parsed
+
+    def _extract_anthropic_text(self, response: Any) -> str:
+        content = getattr(response, "content", None)
+        if not isinstance(content, list):
+            return ""
+        parts: List[str] = []
+        for item in content:
+            text = getattr(item, "text", None)
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        return "\n".join(parts).strip()
+
+    def _as_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value or "").strip().lower()
+        if text in {"1", "true", "yes", "y", "stop"}:
+            return True
+        if text in {"0", "false", "no", "n", ""}:
+            return False
+        return False
+
+    def _normalize_llm_control_decision(self, decision: Dict[str, Any]) -> Dict[str, Any]:
+        raw_symbol = str(
+            decision.get("action_symbol")
+            or decision.get("symbol")
+            or decision.get("action")
+            or decision.get("target_conditioned_action_hint")
+            or "x"
+        ).strip().lower().replace(" ", "_")
+        symbol = LLM_CONTROL_ACTION_ALIASES.get(raw_symbol, raw_symbol)
+        if symbol not in LLM_CONTROL_ALLOWED_SYMBOLS:
+            symbol = "x"
+        try:
+            repeat = int(float(decision.get("repeat", 1)))
+        except Exception:
+            repeat = 1
+        if symbol in LLM_CONTROL_CONTINUOUS_SYMBOLS:
+            repeat = max(1, min(self._llm_control_repeat_cap(), repeat))
+        else:
+            repeat = 1
+        try:
+            confidence = float(decision.get("confidence", 0.0) or 0.0)
+        except Exception:
+            confidence = 0.0
+        return {
+            "action_symbol": symbol,
+            "repeat": repeat,
+            "stop": self._as_bool(decision.get("stop", False)),
+            "need_capture_after": self._as_bool(decision.get("need_capture_after", True)),
+            "confidence": max(0.0, min(1.0, confidence)),
+            "reason": str(decision.get("reason", "") or "").strip(),
+            "raw_decision": decision,
+        }
+
+    def _write_llm_control_decision(
+        self,
+        labeling_dir: str,
+        raw_decision: Dict[str, Any],
+        normalized: Dict[str, Any],
+        decision_index: int,
+    ) -> None:
+        artifact_dir = self._llm_control_artifact_dir(labeling_dir, decision_index)
+        payload = {
+            "version": "memory_aware_llm_control_decision_v1",
+            "decision_index": int(decision_index),
+            "labeling_dir": str(labeling_dir),
+            "artifact_dir": str(artifact_dir),
+            "raw_decision": raw_decision,
+            "normalized_decision": normalized,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        (artifact_dir / "llm_control_decision.json").write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def toggle_preview_window(self) -> None:
         if self.preview_window and self.preview_window.winfo_exists():
@@ -2792,7 +3321,8 @@ class Panel:
         threading.Thread(target=worker, daemon=True).start()
 
     def on_close(self) -> None:
-        for window in (self.preview_window, self.depth_window, self.memory_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
+        self.on_llm_control_stop()
+        for window in (self.preview_window, self.depth_window, self.memory_window, self.llm_control_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
             try:
                 if window is not None: window.destroy()
             except Exception:
