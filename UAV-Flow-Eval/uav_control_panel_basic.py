@@ -68,6 +68,30 @@ LLM_CONTROL_OUTPUT_SCHEMA: Dict[str, Any] = {
     "confidence": 0.85,
     "reason": "Short memory-aware control rationale.",
 }
+LLM_ENTRY_REACHED_DISTANCE_CM = 300.0
+LLM_APPROACHABLE_DISTANCE_MARGIN_CM = 320.0
+LLM_TASK_PLAN_OUTPUT_SCHEMA: Dict[str, Any] = {
+    "plan_id": "llm_task_plan_20260428_123000",
+    "task_text": "先探索 house 1，再探索 house 3。",
+    "ordered_targets": [
+        {
+            "order": 1,
+            "house_id": "001",
+            "house_alias": "house 1",
+            "goal": "search_entry",
+            "finish_condition": "target_entry_reached_or_no_entry_after_full_coverage",
+            "status": "pending",
+        }
+    ],
+    "execution_policy": {
+        "entry_reached_distance_cm": LLM_ENTRY_REACHED_DISTANCE_CM,
+        "max_decisions_per_house": 40,
+        "allow_no_entry_completion": True,
+        "stop_on_needs_review": True,
+    },
+    "reason": "Short plan rationale.",
+}
+DOORLIKE_CLASS_NAMES = {"door", "open door", "open_door", "close door", "close_door", "closed door", "closed_door"}
 
 TARGET_CONDITIONED_STATE_OPTIONS: List[str] = [
     "target_house_not_in_view",
@@ -240,6 +264,9 @@ class Panel:
         self.llm_control_last_action_var = tk.StringVar(value="Last action: none")
         self.llm_control_last_capture_var = tk.StringVar(value="Last capture: none")
         self.llm_control_reason_var = tk.StringVar(value="Reason: -")
+        self.llm_task_text_var = tk.StringVar(value="先探索 house 1，再探索 house 3。")
+        self.llm_task_status_var = tk.StringVar(value="LLM Task: no plan")
+        self.llm_task_plan_summary_var = tk.StringVar(value="Plan: none")
         self.phase1_settle_var = tk.StringVar(value="0.20")
         self.sequence_var = tk.StringVar(value="")
         self.sequence_delay_var = tk.StringVar(value="260")
@@ -259,6 +286,9 @@ class Panel:
         self.memory_text: Optional[tk.Text] = None
         self.llm_control_window: Optional[tk.Toplevel] = None
         self.llm_control_log_text: Optional[tk.Text] = None
+        self.llm_task_window: Optional[tk.Toplevel] = None
+        self.llm_task_text: Optional[tk.Text] = None
+        self.llm_task_preview_text: Optional[tk.Text] = None
         self.fusion_preview_label: Optional[tk.Label] = None
         self.fusion_preview_photo: Optional[ImageTk.PhotoImage] = None
         self.fusion_window: Optional[tk.Toplevel] = None
@@ -329,6 +359,10 @@ class Panel:
         self.llm_control_stop_event = threading.Event()
         self.llm_control_running = False
         self.llm_control_decision_history: List[Dict[str, Any]] = []
+        self.llm_task_plan: Dict[str, Any] = {}
+        self.llm_task_plan_applied = False
+        self.llm_task_current_index = 0
+        self.llm_task_execution_trace: Dict[str, Any] = {}
 
         self.eval_dir = os.path.dirname(os.path.abspath(__file__))
         self.houses_config_path = os.path.join(self.eval_dir, "houses_config.json")
@@ -427,7 +461,9 @@ class Panel:
             anchor="w",
             justify="left",
         ).grid(row=7, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
-        tk.Button(memory, text="Open LLM Control", command=self.toggle_llm_control_window).grid(row=8, column=0, columnspan=4, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(memory, text="Open LLM Control", command=self.toggle_llm_control_window).grid(row=8, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(memory, text="Analyze LLM Task", command=self.toggle_llm_task_window).grid(row=8, column=2, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Label(memory, textvariable=self.llm_task_plan_summary_var, anchor="w", justify="left").grid(row=9, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
 
         fusion = tk.LabelFrame(left, text="Phase2 Fusion")
         fusion.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -515,6 +551,8 @@ class Panel:
             return ("memory_text", self.memory_text)
         if self.llm_control_window is not None and self.llm_control_window.winfo_exists() and toplevel == self.llm_control_window and self.llm_control_log_text is not None:
             return ("llm_control_log", self.llm_control_log_text)
+        if self.llm_task_window is not None and self.llm_task_window.winfo_exists() and toplevel == self.llm_task_window and self.llm_task_preview_text is not None:
+            return ("llm_task_preview", self.llm_task_preview_text)
         if toplevel == self.root:
             return ("main_canvas", self.main_canvas)
         return None
@@ -2263,6 +2301,382 @@ class Panel:
 
     def on_stop_sequence(self) -> None: self.sequence_stop_event.set(); self.status_var.set("Stopping sequence...")
 
+    def toggle_llm_task_window(self) -> None:
+        if self.llm_task_window and self.llm_task_window.winfo_exists():
+            self._close_llm_task_window()
+            return
+        self.llm_task_window = tk.Toplevel(self.root)
+        self.llm_task_window.title("LLM Task Planner")
+        self.llm_task_window.geometry("920x760")
+        self.llm_task_window.protocol("WM_DELETE_WINDOW", self._close_llm_task_window)
+
+        config = tk.LabelFrame(self.llm_task_window, text="Task")
+        config.pack(fill="x", padx=8, pady=8)
+        config.grid_columnconfigure(1, weight=1)
+        tk.Label(config, text="Instruction").grid(row=0, column=0, sticky="nw", padx=6, pady=6)
+        self.llm_task_text = tk.Text(config, height=4, wrap="word")
+        self.llm_task_text.grid(row=0, column=1, columnspan=3, sticky="ew", padx=6, pady=6)
+        self.llm_task_text.insert("1.0", self.llm_task_text_var.get().strip())
+        tk.Label(config, text="API Base URL").grid(row=1, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(config, textvariable=self.llm_control_base_url_var).grid(row=1, column=1, columnspan=3, sticky="ew", padx=6, pady=6)
+        tk.Label(config, text="API Key").grid(row=2, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(config, textvariable=self.llm_control_api_key_var, show="*").grid(row=2, column=1, sticky="ew", padx=6, pady=6)
+        tk.Label(config, text="Model").grid(row=2, column=2, sticky="e", padx=(10, 4), pady=6)
+        tk.Entry(config, textvariable=self.llm_control_model_var).grid(row=2, column=3, sticky="ew", padx=6, pady=6)
+        tk.Button(config, text="Analyze Task", command=self.on_llm_task_analyze).grid(row=3, column=0, padx=6, pady=6, sticky="ew")
+        tk.Button(config, text="Apply Plan", command=self.on_llm_task_apply).grid(row=3, column=1, padx=6, pady=6, sticky="ew")
+        tk.Button(config, text="Clear Plan", command=self.on_llm_task_clear).grid(row=3, column=2, padx=6, pady=6, sticky="ew")
+        tk.Label(config, textvariable=self.llm_task_status_var, anchor="w", justify="left").grid(row=4, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
+
+        preview = tk.LabelFrame(self.llm_task_window, text="Plan Preview")
+        preview.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.llm_task_preview_text = tk.Text(preview, wrap="none", font=("Consolas", 10))
+        self.llm_task_preview_text.pack(fill="both", expand=True, padx=6, pady=6)
+        self.llm_task_preview_text.configure(state="disabled")
+        self._refresh_llm_task_preview()
+
+    def _close_llm_task_window(self) -> None:
+        try:
+            if self.llm_task_window is not None and self.llm_task_window.winfo_exists():
+                self.llm_task_window.destroy()
+        except Exception:
+            pass
+        self.llm_task_window = None
+        self.llm_task_text = None
+        self.llm_task_preview_text = None
+
+    def _get_llm_task_text(self) -> str:
+        if self.llm_task_text is not None:
+            try:
+                text = self.llm_task_text.get("1.0", "end").strip()
+                if text:
+                    self.llm_task_text_var.set(text)
+                    return text
+            except Exception:
+                pass
+        return self.llm_task_text_var.get().strip()
+
+    def _refresh_llm_task_preview(self) -> None:
+        plan = self.llm_task_plan if isinstance(self.llm_task_plan, dict) else {}
+        trace = self.llm_task_execution_trace if isinstance(self.llm_task_execution_trace, dict) else {}
+        payload = {
+            "applied": bool(self.llm_task_plan_applied),
+            "current_target_index": int(self.llm_task_current_index),
+            "plan": plan,
+            "execution_trace": trace,
+        }
+        text = json.dumps(payload, indent=2, ensure_ascii=False)
+        if self.llm_task_preview_text is not None and self.llm_task_preview_text.winfo_exists():
+            self.llm_task_preview_text.configure(state="normal")
+            self.llm_task_preview_text.delete("1.0", "end")
+            self.llm_task_preview_text.insert("1.0", text)
+            self.llm_task_preview_text.configure(state="disabled")
+        targets = plan.get("ordered_targets", []) if isinstance(plan.get("ordered_targets"), list) else []
+        target_ids = [str(item.get("house_id", "") or "") for item in targets if isinstance(item, dict)]
+        summary = "Plan: none" if not target_ids else f"Plan: {' -> '.join(target_ids)} | applied={int(bool(self.llm_task_plan_applied))}"
+        self.llm_task_plan_summary_var.set(summary)
+
+    def on_llm_task_analyze(self) -> None:
+        if self.llm_control_thread and self.llm_control_thread.is_alive():
+            self.llm_task_status_var.set("LLM Task: stop LLM control before analyzing a new task.")
+            return
+        task_text = self._get_llm_task_text()
+        if not task_text:
+            self.llm_task_status_var.set("LLM Task: empty instruction.")
+            return
+        if not self.llm_control_base_url_var.get().strip() or not self.llm_control_api_key_var.get().strip():
+            self.llm_task_status_var.set("LLM Task: missing API base/key.")
+            return
+        threading.Thread(target=lambda: self._run_llm_task_analyze(task_text), daemon=True).start()
+
+    def _run_llm_task_analyze(self, task_text: str) -> None:
+        from anthropic import Anthropic
+        from phase2_multimodal_fusion_analysis.memory_aware_llm_teacher_label_validator import extract_json_object
+
+        self._set_llm_control_var(self.llm_task_status_var, "LLM Task: analyzing...")
+        session_dir = self._llm_control_session_dir_for_current_episode()
+        registry = self._house_registry_for_llm_plan()
+        system_prompt = self._build_llm_task_planner_system_prompt()
+        user_prompt = self._build_llm_task_planner_user_prompt(task_text, registry)
+        prompt_payload = {
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "task_text": task_text,
+            "house_registry": registry,
+            "output_schema": LLM_TASK_PLAN_OUTPUT_SCHEMA,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        (session_dir / "task_plan_prompt.json").write_text(
+            json.dumps(prompt_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        try:
+            client = Anthropic(
+                api_key=self.llm_control_api_key_var.get().strip(),
+                base_url=self.llm_control_base_url_var.get().strip(),
+                timeout=self._llm_control_timeout_s(),
+            )
+            start_time = time.time()
+            response = client.messages.create(
+                model=self.llm_control_model_var.get().strip(),
+                max_tokens=900,
+                system=system_prompt,
+                messages=[{"role": "user", "content": [{"type": "text", "text": user_prompt}]}],
+            )
+            raw_text = self._extract_anthropic_text(response)
+            parsed = extract_json_object(raw_text)
+            response_payload = {
+                "api_style": "anthropic_sdk_text",
+                "model_name": self.llm_control_model_var.get().strip(),
+                "latency_ms": round(float((time.time() - start_time) * 1000.0), 3),
+                "raw_text": raw_text,
+                "parsed": parsed,
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            (session_dir / "task_plan_response.json").write_text(
+                json.dumps(response_payload, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            plan = self._normalize_llm_task_plan(parsed, task_text, registry)
+            self.llm_task_plan = plan
+            self.llm_task_plan_applied = False
+            self.llm_task_current_index = 0
+            self.llm_task_execution_trace = self._build_initial_llm_execution_trace(plan)
+            self._save_llm_task_plan_files()
+            self.root.after(0, self._refresh_llm_task_preview)
+            self._set_llm_control_var(self.llm_task_status_var, "LLM Task: plan analyzed, review then Apply Plan.")
+        except Exception as exc:
+            logger.exception("LLM task analysis failed")
+            self._set_llm_control_var(self.llm_task_status_var, f"LLM Task: analysis failed: {exc}")
+
+    def _house_registry_for_llm_plan(self) -> Dict[str, Any]:
+        raw = self._read_local_houses_config()
+        houses = raw.get("houses", []) if isinstance(raw.get("houses"), list) else []
+        available: List[Dict[str, Any]] = []
+        for house in houses:
+            if not isinstance(house, dict):
+                continue
+            house_id = str(house.get("id", "") or "").strip()
+            if not house_id:
+                continue
+            name = str(house.get("name", house_id) or house_id).strip()
+            numeric = str(int(house_id)) if house_id.isdigit() else house_id
+            available.append(
+                {
+                    "house_id": house_id,
+                    "house_name": name,
+                    "aliases": sorted({house_id, numeric, name, name.lower(), f"house {numeric}", f"house_{numeric}", f"house {house_id}", f"House_{numeric}"}),
+                    "status": str(house.get("status", "") or ""),
+                    "center_x": house.get("center_x"),
+                    "center_y": house.get("center_y"),
+                    "radius_cm": house.get("radius_cm"),
+                }
+            )
+        return {
+            "current_target_id": str(raw.get("current_target_id", "") or ""),
+            "available_houses": available,
+        }
+
+    def _build_llm_task_planner_system_prompt(self) -> str:
+        return (
+            "You are a UAV task planner, not the low-level controller. "
+            "Parse the user's natural language instruction into an ordered list of house search targets. "
+            "Only use house ids from the provided house registry. Do not invent houses. "
+            "Return strict JSON only. No markdown. No commentary."
+        )
+
+    def _build_llm_task_planner_user_prompt(self, task_text: str, registry: Dict[str, Any]) -> str:
+        return "\n".join(
+            [
+                "User task:",
+                str(task_text or ""),
+                "",
+                "House registry:",
+                json.dumps(registry, indent=2, ensure_ascii=False),
+                "",
+                "Return a multi-house search plan. Each ordered target goal should be search_entry.",
+                "Use finish_condition=target_entry_reached_or_no_entry_after_full_coverage.",
+                "If a requested house cannot be matched, return status=needs_user_review and unmatched_targets.",
+                "",
+                "Expected JSON shape:",
+                json.dumps(LLM_TASK_PLAN_OUTPUT_SCHEMA, indent=2, ensure_ascii=False),
+            ]
+        )
+
+    def _build_house_alias_map(self, registry: Dict[str, Any]) -> Dict[str, str]:
+        alias_map: Dict[str, str] = {}
+        houses = registry.get("available_houses", []) if isinstance(registry.get("available_houses"), list) else []
+        for house in houses:
+            if not isinstance(house, dict):
+                continue
+            house_id = str(house.get("house_id", "") or "").strip()
+            if not house_id:
+                continue
+            aliases = house.get("aliases", []) if isinstance(house.get("aliases"), list) else []
+            for alias in aliases + [house_id, str(house.get("house_name", "") or "")]:
+                text = str(alias or "").strip().lower().replace("_", " ")
+                if text:
+                    alias_map[text] = house_id
+            if house_id.isdigit():
+                alias_map[str(int(house_id))] = house_id
+        return alias_map
+
+    def _resolve_plan_house_id(self, value: Any, alias_map: Dict[str, str]) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        direct = raw.lower().replace("_", " ")
+        if direct in alias_map:
+            return alias_map[direct]
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if digits:
+            padded = digits.zfill(3)
+            if padded.lower() in alias_map:
+                return alias_map[padded.lower()]
+            if digits in alias_map:
+                return alias_map[digits]
+        return ""
+
+    def _normalize_llm_task_plan(self, parsed: Dict[str, Any], task_text: str, registry: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(parsed, dict):
+            parsed = {}
+        alias_map = self._build_house_alias_map(registry)
+        raw_targets = parsed.get("ordered_targets", []) if isinstance(parsed.get("ordered_targets"), list) else []
+        normalized_targets: List[Dict[str, Any]] = []
+        parsed_unmatched = parsed.get("unmatched_targets", []) if isinstance(parsed.get("unmatched_targets"), list) else []
+        unmatched: List[str] = [str(item) for item in parsed_unmatched if str(item or "").strip()]
+        seen: set[str] = set()
+        for item in raw_targets:
+            if not isinstance(item, dict):
+                continue
+            raw_house = item.get("house_id") or item.get("house_alias") or item.get("target") or item.get("name")
+            house_id = self._resolve_plan_house_id(raw_house, alias_map)
+            if not house_id:
+                unmatched.append(str(raw_house or ""))
+                continue
+            if house_id in seen:
+                continue
+            seen.add(house_id)
+            normalized_targets.append(
+                {
+                    "order": len(normalized_targets) + 1,
+                    "house_id": house_id,
+                    "house_alias": str(item.get("house_alias", raw_house) or raw_house or house_id),
+                    "goal": "search_entry",
+                    "finish_condition": "target_entry_reached_or_no_entry_after_full_coverage",
+                    "status": "pending",
+                    "finish_type": "",
+                    "finished_at_step": None,
+                }
+            )
+        if not normalized_targets and not unmatched:
+            fallback_id = self._get_selected_target_house_id() or str(registry.get("current_target_id", "") or "")
+            fallback_id = self._resolve_plan_house_id(fallback_id, alias_map)
+            if fallback_id:
+                normalized_targets.append(
+                    {
+                        "order": 1,
+                        "house_id": fallback_id,
+                        "house_alias": fallback_id,
+                        "goal": "search_entry",
+                        "finish_condition": "target_entry_reached_or_no_entry_after_full_coverage",
+                        "status": "pending",
+                        "finish_type": "",
+                        "finished_at_step": None,
+                    }
+                )
+        status = "ok" if normalized_targets and not unmatched else ("needs_user_review" if unmatched else "error")
+        return {
+            "version": "llm_multi_house_task_plan_v1",
+            "status": status,
+            "plan_id": str(parsed.get("plan_id", "") or f"llm_task_plan_{datetime.now().strftime('%Y%m%d_%H%M%S')}"),
+            "task_text": str(task_text or ""),
+            "ordered_targets": normalized_targets,
+            "unmatched_targets": unmatched,
+            "execution_policy": {
+                "entry_reached_distance_cm": float(LLM_ENTRY_REACHED_DISTANCE_CM),
+                "max_decisions_per_house": 40,
+                "allow_no_entry_completion": True,
+                "stop_on_needs_review": True,
+            },
+            "reason": str(parsed.get("reason", "") or "Normalized from LLM task planner output."),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _build_initial_llm_execution_trace(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        return {
+            "version": "llm_multi_house_execution_trace_v1",
+            "plan_id": str(plan.get("plan_id", "") or ""),
+            "episode_id": str(memory_collection.get("episode_id", "") or ""),
+            "collection_dir": str(memory_collection.get("collection_dir", "") or ""),
+            "current_target_index": 0,
+            "events": [],
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _save_llm_task_plan_files(self) -> None:
+        session_dir = self._llm_control_session_dir_for_current_episode()
+        self.llm_task_plan["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        self.llm_task_execution_trace["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        (session_dir / "task_plan.json").write_text(
+            json.dumps(self.llm_task_plan, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        (session_dir / "execution_trace.json").write_text(
+            json.dumps(self.llm_task_execution_trace, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def on_llm_task_apply(self) -> None:
+        if not isinstance(self.llm_task_plan, dict) or not self.llm_task_plan.get("ordered_targets"):
+            self.llm_task_status_var.set("LLM Task: no analyzed plan to apply.")
+            return
+        if str(self.llm_task_plan.get("status", "") or "") == "needs_user_review":
+            self.llm_task_status_var.set("LLM Task: plan has unmatched targets; review before coding more.")
+            return
+        self.llm_task_plan_applied = True
+        self.llm_task_current_index = 0
+        targets = self.llm_task_plan.get("ordered_targets", []) if isinstance(self.llm_task_plan.get("ordered_targets"), list) else []
+        for idx, item in enumerate(targets):
+            if isinstance(item, dict):
+                item["status"] = "active" if idx == 0 else "pending"
+        self.llm_task_execution_trace = self._build_initial_llm_execution_trace(self.llm_task_plan)
+        first_house = str(targets[0].get("house_id", "") or "") if targets and isinstance(targets[0], dict) else ""
+        if first_house:
+            self._append_llm_task_event("target_started", first_house, {"reason": "plan_applied"})
+            threading.Thread(target=lambda hid=first_house: self._select_target_house_for_llm_plan(hid), daemon=True).start()
+        self._save_llm_task_plan_files()
+        self._refresh_llm_task_preview()
+        self.llm_task_status_var.set(f"LLM Task: plan applied, active target={first_house or 'none'}.")
+
+    def on_llm_task_clear(self) -> None:
+        self.llm_task_plan = {}
+        self.llm_task_plan_applied = False
+        self.llm_task_current_index = 0
+        self.llm_task_execution_trace = {}
+        self._refresh_llm_task_preview()
+        self.llm_task_status_var.set("LLM Task: cleared.")
+
+    def _append_llm_task_event(self, event_type: str, house_id: str, extra: Optional[Dict[str, Any]] = None) -> None:
+        if not isinstance(self.llm_task_execution_trace, dict) or not self.llm_task_execution_trace:
+            self.llm_task_execution_trace = self._build_initial_llm_execution_trace(self.llm_task_plan if isinstance(self.llm_task_plan, dict) else {})
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        event = {
+            "event_type": str(event_type),
+            "house_id": str(house_id or ""),
+            "step_index": int(memory_collection.get("step_index", 0) or 0),
+            "time": datetime.now().isoformat(timespec="seconds"),
+        }
+        if isinstance(extra, dict):
+            event.update(extra)
+        events = self.llm_task_execution_trace.setdefault("events", [])
+        if isinstance(events, list):
+            events.append(event)
+        self.llm_task_execution_trace["current_target_index"] = int(self.llm_task_current_index)
+        self.llm_task_execution_trace["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
     def toggle_llm_control_window(self) -> None:
         if self.llm_control_window and self.llm_control_window.winfo_exists():
             self._close_llm_control_window()
@@ -2298,6 +2712,8 @@ class Panel:
         tk.Button(control, text="Start LLM Control", command=self.on_llm_control_start).grid(row=1, column=2, padx=6, pady=6, sticky="ew")
         tk.Button(control, text="Single Decision", command=self.on_llm_control_step_once).grid(row=1, column=3, padx=6, pady=6, sticky="ew")
         tk.Button(control, text="Stop", command=self.on_llm_control_stop).grid(row=1, column=4, columnspan=2, padx=6, pady=6, sticky="ew")
+        tk.Button(control, text="Analyze LLM Task", command=self.toggle_llm_task_window).grid(row=2, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="ew")
+        tk.Label(control, textvariable=self.llm_task_plan_summary_var, anchor="w", justify="left").grid(row=2, column=3, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
 
         status = tk.LabelFrame(self.llm_control_window, text="Live State")
         status.pack(fill="x", padx=8, pady=(0, 8))
@@ -2394,6 +2810,8 @@ class Panel:
         self._set_llm_control_var(self.llm_control_status_var, "LLM Control: running")
         self._append_llm_control_log(f"Started LLM control loop with max_decisions={max_steps}.")
         try:
+            if not self._prepare_llm_plan_execution():
+                return
             self._ensure_movement_enabled_for_llm()
             for decision_index in range(1, int(max_steps) + 1):
                 if self.llm_control_stop_event.is_set():
@@ -2413,8 +2831,15 @@ class Panel:
                     break
 
                 self._set_llm_control_var(self.llm_control_last_capture_var, f"Last capture: {Path(labeling_dir).parent.name}")
+                completion = self._evaluate_llm_house_completion(labeling_dir)
+                if bool(completion.get("completed", False)):
+                    switched = self._advance_llm_task_plan_after_completion(completion)
+                    if switched:
+                        continue
+                    break
                 decision = self._request_llm_control_decision(labeling_dir=labeling_dir, decision_index=decision_index)
                 normalized = self._normalize_llm_control_decision(decision)
+                normalized = self._apply_llm_control_rule_overrides(normalized, labeling_dir)
                 self._write_llm_control_decision(labeling_dir, decision, normalized, decision_index)
                 self.llm_control_decision_history.append(normalized)
                 self.llm_control_decision_history = self.llm_control_decision_history[-12:]
@@ -2480,6 +2905,295 @@ class Panel:
             self.root.after(0, lambda r=resp: self.apply_state(r))
             self._append_llm_control_log("Basic movement was disabled; enabled it for LLM control.")
 
+    def _select_target_house_for_llm_plan(self, house_id: str) -> bool:
+        hid = str(house_id or "").strip()
+        if not hid:
+            return False
+        response = self.safe(
+            self.client.post_json,
+            "/select_target_house",
+            {"house_id": hid},
+            label=f"LLM plan select target {hid}",
+        )
+        if not isinstance(response, dict) or response.get("status") != "ok":
+            message = str(response.get("message", "") if isinstance(response, dict) else "" or f"Failed to select {hid}")
+            self._append_llm_control_log(f"Target switch failed: {hid} {message}")
+            return False
+        self._update_local_current_target_id(hid)
+        self.root.after(0, lambda h=hid: self._set_selected_target_house(h, mark_clean=True))
+        self.root.after(0, lambda r=response: self.apply_state(r))
+        self._append_llm_control_log(f"Target switched to house {hid}.")
+        return True
+
+    def _current_llm_plan_target(self) -> Dict[str, Any]:
+        if not self.llm_task_plan_applied or not isinstance(self.llm_task_plan, dict):
+            return {}
+        targets = self.llm_task_plan.get("ordered_targets", [])
+        if not isinstance(targets, list) or not targets:
+            return {}
+        index = max(0, min(int(self.llm_task_current_index), len(targets) - 1))
+        item = targets[index]
+        return item if isinstance(item, dict) else {}
+
+    def _prepare_llm_plan_execution(self) -> bool:
+        if not self.llm_task_plan_applied:
+            return True
+        targets = self.llm_task_plan.get("ordered_targets", []) if isinstance(self.llm_task_plan.get("ordered_targets"), list) else []
+        if not targets:
+            self._set_llm_control_var(self.llm_control_status_var, "LLM Control: applied plan has no targets")
+            return False
+        active_index = None
+        for idx, item in enumerate(targets):
+            if isinstance(item, dict) and str(item.get("status", "") or "") in {"active", "pending"}:
+                active_index = idx
+                break
+        if active_index is None:
+            self._set_llm_control_var(self.llm_control_status_var, "LLM Control: plan already completed")
+            return False
+        self.llm_task_current_index = int(active_index)
+        target = targets[self.llm_task_current_index]
+        if isinstance(target, dict):
+            target["status"] = "active"
+            house_id = str(target.get("house_id", "") or "")
+        else:
+            house_id = ""
+        if not house_id:
+            self._set_llm_control_var(self.llm_control_status_var, "LLM Control: active plan target missing house_id")
+            return False
+        if not self._select_target_house_for_llm_plan(house_id):
+            self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: failed to select target {house_id}")
+            return False
+        self._append_llm_task_event("target_started", house_id, {"reason": "llm_control_start"})
+        self._save_llm_task_plan_files()
+        self.root.after(0, self._refresh_llm_task_preview)
+        return True
+
+    def _advance_llm_task_plan_after_completion(self, completion: Dict[str, Any]) -> bool:
+        house_id = str(completion.get("house_id", "") or "")
+        finish_type = str(completion.get("finish_type", "") or "")
+        self._append_llm_control_log(f"House search finished: house={house_id} finish_type={finish_type} reason={completion.get('reason', '')}")
+        if not self.llm_task_plan_applied:
+            self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: house {house_id} finished")
+            self.llm_control_stop_event.set()
+            return False
+
+        targets = self.llm_task_plan.get("ordered_targets", []) if isinstance(self.llm_task_plan.get("ordered_targets"), list) else []
+        if 0 <= int(self.llm_task_current_index) < len(targets) and isinstance(targets[self.llm_task_current_index], dict):
+            targets[self.llm_task_current_index]["status"] = "done"
+            targets[self.llm_task_current_index]["finish_type"] = finish_type
+            targets[self.llm_task_current_index]["finished_at_step"] = completion.get("step_index")
+        self._append_llm_task_event("target_finished", house_id, completion)
+
+        next_index = None
+        for idx, item in enumerate(targets):
+            if isinstance(item, dict) and str(item.get("status", "") or "") == "pending":
+                next_index = idx
+                break
+        if next_index is None:
+            self.llm_task_plan["status"] = "completed"
+            self._append_llm_task_event("plan_completed", house_id, {"reason": "all_targets_done"})
+            self._save_llm_task_plan_files()
+            self.root.after(0, self._refresh_llm_task_preview)
+            self._set_llm_control_var(self.llm_control_status_var, "LLM Control: multi-house plan completed")
+            self.llm_control_stop_event.set()
+            return False
+
+        self.llm_task_current_index = int(next_index)
+        next_target = targets[next_index]
+        next_target["status"] = "active"
+        next_house_id = str(next_target.get("house_id", "") or "")
+        if not next_house_id:
+            self._set_llm_control_var(self.llm_control_status_var, "LLM Control: next target missing house_id")
+            self.llm_control_stop_event.set()
+            return False
+        if not self._select_target_house_for_llm_plan(next_house_id):
+            self.llm_control_stop_event.set()
+            return False
+        self._append_llm_task_event("target_started", next_house_id, {"reason": f"previous_finished:{finish_type}"})
+        self._save_llm_task_plan_files()
+        self.root.after(0, self._refresh_llm_task_preview)
+        self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: switched to house {next_house_id}")
+        return True
+
+    def _read_json_file(self, path: Path) -> Dict[str, Any]:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8-sig"))
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    def _fusion_payload_from_labeling_dir(self, labeling_dir: str) -> Dict[str, Any]:
+        payload = self._read_json_file(Path(labeling_dir) / "fusion_result.json")
+        fusion = payload.get("fusion", {}) if isinstance(payload.get("fusion"), dict) else {}
+        return fusion if fusion else payload
+
+    def _metadata_from_labeling_dir(self, labeling_dir: str) -> Dict[str, Any]:
+        return self._read_json_file(Path(labeling_dir) / "sample_metadata.json")
+
+    def _as_float_or_none(self, value: Any) -> Optional[float]:
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _candidate_entry_distance_cm(self, fusion: Dict[str, Any]) -> Optional[float]:
+        direct_keys = ("entry_distance_cm", "distance_cm", "dist_cm")
+        for key in direct_keys:
+            value = self._as_float_or_none(fusion.get(key))
+            if value is not None and value > 0:
+                return value
+        for section_key in ("semantic_depth_assessment", "matched_depth_candidate", "chosen_depth_candidate", "best_depth_candidate"):
+            section = fusion.get(section_key)
+            if not isinstance(section, dict):
+                continue
+            for key in direct_keys + ("depth_cm", "center_depth_cm"):
+                value = self._as_float_or_none(section.get(key))
+                if value is not None and value > 0:
+                    return value
+        return None
+
+    def _semantic_class_name(self, fusion: Dict[str, Any]) -> str:
+        semantic = fusion.get("semantic_detection", {}) if isinstance(fusion.get("semantic_detection"), dict) else {}
+        return str(
+            semantic.get("class_name_normalized")
+            or semantic.get("class_name")
+            or fusion.get("class_name")
+            or fusion.get("semantic_class")
+            or ""
+        ).strip().lower().replace("_", " ")
+
+    def _is_doorlike_class(self, class_name: str) -> bool:
+        normalized = str(class_name or "").strip().lower().replace("_", " ")
+        return normalized in {name.replace("_", " ") for name in DOORLIKE_CLASS_NAMES}
+
+    def _front_path_clear_for_approach(self, fusion: Dict[str, Any]) -> bool:
+        if bool(fusion.get("front_blocked", False)) or bool(fusion.get("global_front_obstacle", False)):
+            return False
+        assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
+        if bool(assessment.get("front_obstacle_present", False)):
+            severity = str(assessment.get("front_obstacle_severity", "") or "").lower()
+            return severity not in {"severe", "blocked", "critical"}
+        return True
+
+    def _target_entry_visible_for_current_house(self, fusion: Dict[str, Any]) -> bool:
+        target_state = str(fusion.get("target_conditioned_state", "") or "")
+        if target_state in {"target_house_not_in_view", "non_target_house_entry_visible"}:
+            return False
+        if target_state in {"target_house_entry_visible", "target_house_entry_approachable", "target_house_entry_blocked", "target_house_geometric_opening_needs_confirmation"}:
+            return True
+        return bool(fusion.get("entry_visible", False))
+
+    def _memory_completion_for_house(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
+        snapshot = self._read_json_file(Path(labeling_dir) / "entry_search_memory_snapshot_after.json")
+        memory = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
+        memories = memory.get("memories", {}) if isinstance(memory.get("memories"), dict) else {}
+        house_memory = memories.get(str(house_id), {}) if isinstance(memories, dict) else {}
+        semantic = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
+        completion = semantic.get("search_completion_evidence", {}) if isinstance(semantic.get("search_completion_evidence"), dict) else {}
+        return completion
+
+    def _evaluate_llm_house_completion(self, labeling_dir: str) -> Dict[str, Any]:
+        metadata = self._metadata_from_labeling_dir(labeling_dir)
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        active_target = self._current_llm_plan_target()
+        house_id = str(active_target.get("house_id") or metadata.get("target_house_id") or "").strip()
+        step_index = int(metadata.get("step_index", 0) or 0)
+        if not house_id:
+            return {"completed": False, "reason": "no_active_house_id"}
+
+        memory_completion = self._memory_completion_for_house(labeling_dir, house_id)
+        if bool(memory_completion.get("no_entry_after_full_coverage", False)):
+            return {
+                "completed": True,
+                "finish_type": "no_entry_after_full_coverage",
+                "house_id": house_id,
+                "step_index": step_index,
+                "reason": "memory reports no entry after full coverage",
+                "memory_completion": memory_completion,
+            }
+
+        distance_cm = self._candidate_entry_distance_cm(fusion)
+        class_name = self._semantic_class_name(fusion)
+        target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        threshold = float((self.llm_task_plan.get("execution_policy", {}) if isinstance(self.llm_task_plan, dict) else {}).get("entry_reached_distance_cm", LLM_ENTRY_REACHED_DISTANCE_CM))
+        if (
+            target_entry_visible
+            and self._is_doorlike_class(class_name)
+            and distance_cm is not None
+            and distance_cm <= threshold
+        ):
+            return {
+                "completed": True,
+                "finish_type": "target_entry_reached",
+                "house_id": house_id,
+                "step_index": step_index,
+                "entry_distance_cm": float(distance_cm),
+                "distance_threshold_cm": threshold,
+                "semantic_class": class_name,
+                "reason": f"target-house door-like entry reached within {threshold:.0f}cm",
+            }
+        return {
+            "completed": False,
+            "house_id": house_id,
+            "step_index": step_index,
+            "entry_distance_cm": distance_cm,
+            "semantic_class": class_name,
+            "target_entry_visible": target_entry_visible,
+        }
+
+    def _should_override_to_forward_approach(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        distance_cm = self._candidate_entry_distance_cm(fusion)
+        class_name = self._semantic_class_name(fusion)
+        target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        if not target_entry_visible or not self._is_doorlike_class(class_name):
+            return {"override": False}
+        if distance_cm is None or distance_cm <= LLM_APPROACHABLE_DISTANCE_MARGIN_CM:
+            return {"override": False}
+        if not self._front_path_clear_for_approach(fusion):
+            return {"override": False}
+        current_symbol = str(normalized.get("action_symbol", "") or "")
+        if current_symbol == "w":
+            return {"override": False}
+        return {
+            "override": True,
+            "distance_cm": float(distance_cm),
+            "semantic_class": class_name,
+            "target_state": str(fusion.get("target_conditioned_state", "") or ""),
+            "reason": "target-house door is visible and farther than 3m; cross_ready=false does not block approach",
+        }
+
+    def _apply_llm_control_rule_overrides(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        override = self._should_override_to_forward_approach(normalized, labeling_dir)
+        if not bool(override.get("override", False)):
+            return normalized
+        distance_cm = float(override.get("distance_cm", 0.0) or 0.0)
+        repeat = 1
+        if distance_cm > 800.0:
+            repeat = min(self._llm_control_repeat_cap(), 3)
+        elif distance_cm > 450.0:
+            repeat = min(self._llm_control_repeat_cap(), 2)
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = "w"
+        normalized["repeat"] = max(1, int(repeat))
+        normalized["rule_override"] = {
+            "type": "approach_visible_target_entry",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            **override,
+        }
+        reason = str(normalized.get("reason", "") or "")
+        normalized["reason"] = (reason + " | " if reason else "") + str(override.get("reason", "rule override to forward approach"))
+        self._append_llm_control_log(
+            f"Rule override: action={original.get('action_symbol')} -> w repeat={repeat}; distance={distance_cm:.1f}cm"
+        )
+        return normalized
+
     def _llm_control_delay_s(self) -> float:
         try:
             return max(0.05, float(self.llm_control_delay_ms_var.get().strip()) / 1000.0)
@@ -2530,6 +3244,18 @@ class Panel:
             "single_action_symbols": sorted(LLM_CONTROL_SINGLE_SYMBOLS),
             "repeat_cap": self._llm_control_repeat_cap(),
             "output_schema": LLM_CONTROL_OUTPUT_SCHEMA,
+            "active_task_plan": {
+                "applied": bool(self.llm_task_plan_applied),
+                "current_target_index": int(self.llm_task_current_index),
+                "current_target": self._current_llm_plan_target(),
+                "ordered_targets": self.llm_task_plan.get("ordered_targets", []) if isinstance(self.llm_task_plan, dict) else [],
+                "entry_reached_distance_cm": float(LLM_ENTRY_REACHED_DISTANCE_CM),
+            },
+            "completion_rules": {
+                "target_entry_reached": "Finish the current house when a reliable target-house door/open door/close door is within 300cm.",
+                "approach_vs_cross": "cross_ready=false means do not enter/cross the doorway yet; it does not mean you cannot approach the doorway.",
+                "forward_preference": "If a target-house entry is visible, associated with the active target, farther than 300cm, and the front path is not severely blocked, prefer forward.",
+            },
             "structured_observation": structured_input,
             "recent_llm_decisions": self.llm_control_decision_history[-6:],
         }
@@ -2544,8 +3270,13 @@ class Panel:
             "e=yaw_right, x=hold.\n"
             "w/a/s/d/r/f may use repeat>1 for a short continuous move. q/e must always use repeat=1 "
             "because yaw changes the view and the controller will capture immediately after yaw.\n"
-            "Do not chase non-target entries. If the target house is not in view, reorient with q/e. "
-            "If the target entry is approachable, prefer small forward repeats. If blocked, detour or back off. "
+            "Do not chase non-target entries. If the target house is not in view, reorient with q/e.\n"
+            "Important: cross_ready=false only means do not cross/enter the doorway yet. It does not mean you cannot "
+            "approach a visible target-house door. If a target-house door/open door/close door is visible and the UAV "
+            "is farther than 3m from it, prefer small forward repeats when the front path is not severely blocked.\n"
+            "The current house search is finished when the UAV is within about 300cm of a reliable target-house entry; "
+            "the executor will switch to the next house. Avoid left/right oscillation; if lateral moves do not improve "
+            "evidence, move forward, back off, yaw to a new sector, or stop for review.\n"
             "If the search appears complete or unsafe, set stop=true.\n"
             "Return only one JSON object. No markdown. No commentary."
         )
@@ -2571,6 +3302,22 @@ class Panel:
         text = str(value or "").strip()
         safe = "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in text)
         return safe[:120] or "unknown"
+
+    def _llm_control_session_dir_for_current_episode(self) -> Path:
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        collection_dir_text = str(memory_collection.get("collection_dir", "") or "").strip()
+        episode_id = str(memory_collection.get("episode_id", "") or "").strip()
+        root = Path(PROJECT_ROOT) / "captures_remote" / "llm_control_sessions"
+        if collection_dir_text:
+            collection_dir = Path(collection_dir_text)
+            if collection_dir.parent.name == "memory_collection_sessions":
+                root = collection_dir.parent.parent / "llm_control_sessions"
+                episode_id = episode_id or collection_dir.name
+        if not episode_id:
+            episode_id = f"no_episode_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        session_dir = root / self._safe_llm_control_path_fragment(episode_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir
 
     def _resolve_llm_control_capture_root(self, labeling_dir: str) -> Path:
         labeling_path = Path(labeling_dir).resolve()
