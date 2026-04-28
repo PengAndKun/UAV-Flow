@@ -90,6 +90,16 @@ LLM_TARGET_BOUNDARY_MARGIN_CM = 800.0
 LLM_TARGET_BOUNDARY_MIN_SEARCH_DISTANCE_CM = 1800.0
 LLM_TARGET_BOUNDARY_ALIGN_TOLERANCE_DEG = 18.0
 LLM_TARGET_TRANSIT_FRONT_MIN_FORWARD_CM = 160.0
+LLM_DEPTH_MAX_VALID_CM = 1200.0
+LLM_DEPTH_CORRIDOR_X_RANGE = (0.35, 0.65)
+LLM_DEPTH_BODY_Y_RANGE = (0.35, 0.60)
+LLM_DEPTH_LOW_Y_RANGE = (0.60, 0.90)
+LLM_DEPTH_UPPER_Y_RANGE = (0.10, 0.35)
+LLM_LOW_OBSTACLE_NEAR_CM = 160.0
+LLM_BODY_CORRIDOR_CLEAR_P10_CM = 220.0
+LLM_BODY_CORRIDOR_MIN_CLEAR_CM = 180.0
+LLM_BODY_CLOSE_RATIO_MAX = 0.03
+LLM_LOW_CLOSE_RATIO_MIN = 0.08
 LLM_CONTROL_LABELING_INPUT_FILES = (
     "fusion_result.json",
     "sample_metadata.json",
@@ -103,6 +113,8 @@ LLM_CONTROL_LABELING_INPUT_FILES = (
     "labeling_summary.txt",
     "yolo_summary.txt",
     "depth_summary.txt",
+    "depth_cm.png",
+    "depth_overlay.png",
     "fusion_overlay.png",
 )
 LLM_TASK_PLAN_OUTPUT_SCHEMA: Dict[str, Any] = {
@@ -3193,7 +3205,152 @@ class Panel:
             return severity not in {"high", "severe", "blocked", "critical"}
         return True
 
-    def _front_obstacle_status(self, fusion: Dict[str, Any]) -> Dict[str, Any]:
+    def _depth_cm_path_from_labeling_dir(self, labeling_dir: str) -> Optional[Path]:
+        if not labeling_dir:
+            return None
+        labeling_path = Path(labeling_dir)
+        direct = labeling_path / "depth_cm.png"
+        if direct.is_file():
+            return direct
+        metadata = self._metadata_from_labeling_dir(labeling_dir)
+        images = metadata.get("images", {}) if isinstance(metadata.get("images"), dict) else {}
+        for key in ("depth_cm", "depth"):
+            candidate = images.get(key)
+            if candidate:
+                path = Path(str(candidate))
+                if path.is_file():
+                    return path
+        return None
+
+    def _depth_band_summary(
+        self,
+        depth_cm: np.ndarray,
+        *,
+        y_range: tuple,
+        x_range: tuple = LLM_DEPTH_CORRIDOR_X_RANGE,
+    ) -> Dict[str, Any]:
+        h, w = depth_cm.shape[:2]
+        y0 = max(0, min(h, int(round(float(y_range[0]) * h))))
+        y1 = max(y0 + 1, min(h, int(round(float(y_range[1]) * h))))
+        x0 = max(0, min(w, int(round(float(x_range[0]) * w))))
+        x1 = max(x0 + 1, min(w, int(round(float(x_range[1]) * w))))
+        roi = depth_cm[y0:y1, x0:x1].astype(np.float32, copy=False)
+        valid = roi[np.isfinite(roi) & (roi > 0.0) & (roi <= float(LLM_DEPTH_MAX_VALID_CM))]
+        summary: Dict[str, Any] = {
+            "y_range": [float(y_range[0]), float(y_range[1])],
+            "x_range": [float(x_range[0]), float(x_range[1])],
+            "sample_count": int(valid.size),
+            "min_cm": None,
+            "p05_cm": None,
+            "p10_cm": None,
+            "p20_cm": None,
+            "median_cm": None,
+            "close_ratio_100": 0.0,
+            "close_ratio_140": 0.0,
+        }
+        if valid.size == 0:
+            return summary
+        percentiles = np.percentile(valid, [5, 10, 20, 50])
+        summary.update(
+            {
+                "min_cm": round(float(np.min(valid)), 2),
+                "p05_cm": round(float(percentiles[0]), 2),
+                "p10_cm": round(float(percentiles[1]), 2),
+                "p20_cm": round(float(percentiles[2]), 2),
+                "median_cm": round(float(percentiles[3]), 2),
+                "close_ratio_100": round(float(np.mean(valid <= 100.0)), 4),
+                "close_ratio_140": round(float(np.mean(valid <= 140.0)), 4),
+            }
+        )
+        return summary
+
+    def _height_aware_front_corridor_status(self, labeling_dir: str) -> Dict[str, Any]:
+        depth_path = self._depth_cm_path_from_labeling_dir(labeling_dir)
+        status: Dict[str, Any] = {
+            "available": False,
+            "depth_cm_path": str(depth_path) if depth_path else "",
+            "corridor_x_range": [float(LLM_DEPTH_CORRIDOR_X_RANGE[0]), float(LLM_DEPTH_CORRIDOR_X_RANGE[1])],
+            "low_obstacle_passable": False,
+            "body_corridor_clear": False,
+            "body_corridor_blocking": False,
+            "classification": "unavailable",
+            "reason": "",
+        }
+        if depth_path is None:
+            status["reason"] = "depth_cm.png not found"
+            return status
+        try:
+            depth_cm = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
+            if depth_cm is None:
+                status["reason"] = "failed to read depth_cm.png"
+                return status
+            if depth_cm.ndim == 3:
+                depth_cm = depth_cm[:, :, 0]
+            upper = self._depth_band_summary(depth_cm, y_range=LLM_DEPTH_UPPER_Y_RANGE)
+            body = self._depth_band_summary(depth_cm, y_range=LLM_DEPTH_BODY_Y_RANGE)
+            low = self._depth_band_summary(depth_cm, y_range=LLM_DEPTH_LOW_Y_RANGE)
+        except Exception as exc:
+            status["reason"] = f"height-aware depth analysis failed: {exc}"
+            return status
+
+        body_min = self._as_float_or_none(body.get("min_cm"))
+        body_p10 = self._as_float_or_none(body.get("p10_cm"))
+        body_close_ratio = float(body.get("close_ratio_140", 0.0) or 0.0)
+        low_min = self._as_float_or_none(low.get("min_cm"))
+        low_p10 = self._as_float_or_none(low.get("p10_cm"))
+        low_close_ratio = float(low.get("close_ratio_140", 0.0) or 0.0)
+        upper_close_ratio = float(upper.get("close_ratio_140", 0.0) or 0.0)
+
+        low_near = bool(
+            (low_min is not None and low_min <= LLM_LOW_OBSTACLE_NEAR_CM)
+            or (low_p10 is not None and low_p10 <= LLM_LOW_OBSTACLE_NEAR_CM)
+            or low_close_ratio >= LLM_LOW_CLOSE_RATIO_MIN
+        )
+        body_clear = bool(
+            body_min is not None
+            and body_p10 is not None
+            and body_min >= LLM_BODY_CORRIDOR_MIN_CLEAR_CM
+            and body_p10 >= LLM_BODY_CORRIDOR_CLEAR_P10_CM
+            and body_close_ratio <= LLM_BODY_CLOSE_RATIO_MAX
+            and upper_close_ratio <= LLM_BODY_CLOSE_RATIO_MAX
+        )
+        body_blocking = bool(
+            (body_min is not None and body_min <= LLM_OBSTACLE_FRONT_MIN_BLOCK_CM)
+            or (body_p10 is not None and body_p10 <= LLM_TARGET_TRANSIT_FRONT_MIN_FORWARD_CM)
+            or body_close_ratio > LLM_BODY_CLOSE_RATIO_MAX
+        )
+        low_passable = bool(low_near and body_clear and not body_blocking)
+        if low_passable:
+            classification = "low_obstacle_passable"
+            reason = "near depth is concentrated in the lower image band while the UAV body corridor is clear"
+        elif body_blocking:
+            classification = "body_corridor_blocked"
+            reason = "near depth intersects the central body-height corridor"
+        elif body_clear:
+            classification = "body_corridor_clear"
+            reason = "central body-height corridor has sufficient depth clearance"
+        else:
+            classification = "uncertain"
+            reason = "depth bands do not provide a confident pass/block decision"
+
+        status.update(
+            {
+                "available": True,
+                "upper_band": upper,
+                "body_band": body,
+                "low_band": low,
+                "low_obstacle_passable": low_passable,
+                "body_corridor_clear": body_clear,
+                "body_corridor_blocking": body_blocking,
+                "classification": classification,
+                "reason": reason,
+                "effective_front_min_depth_cm": body_min,
+                "effective_front_p10_depth_cm": body_p10,
+            }
+        )
+        return status
+
+    def _front_obstacle_status(self, fusion: Dict[str, Any], labeling_dir: str = "") -> Dict[str, Any]:
         status: Dict[str, Any] = {
             "present": bool(fusion.get("front_blocked", False)),
             "severity": "",
@@ -3201,6 +3358,7 @@ class Panel:
             "front_mean_depth_cm": None,
             "blocking": False,
             "too_close": False,
+            "low_obstacle_passable": False,
         }
         global_obstacle = fusion.get("global_front_obstacle", {}) if isinstance(fusion.get("global_front_obstacle"), dict) else {}
         if global_obstacle:
@@ -3222,6 +3380,22 @@ class Panel:
         too_close = front_min is not None and front_min <= LLM_OBSTACLE_FRONT_MIN_BACKOFF_CM
         status["too_close"] = bool(too_close)
         status["blocking"] = bool(status["present"] and (severe or medium_close or too_close))
+        if labeling_dir:
+            height_aware = self._height_aware_front_corridor_status(labeling_dir)
+            status["height_aware_front_corridor"] = height_aware
+            if bool(height_aware.get("available", False)):
+                if bool(height_aware.get("body_corridor_blocking", False)):
+                    status["blocking"] = bool(status["present"])
+                    status["too_close"] = bool(status["too_close"] or severe)
+                    status["blocking_reason"] = str(height_aware.get("reason", "") or "")
+                elif bool(height_aware.get("low_obstacle_passable", False)):
+                    status["low_obstacle_passable"] = True
+                    status["blocking"] = False
+                    status["too_close"] = False
+                    status["severity"] = "low_passable"
+                    status["effective_front_min_depth_cm"] = height_aware.get("effective_front_min_depth_cm")
+                    status["effective_front_p10_depth_cm"] = height_aware.get("effective_front_p10_depth_cm")
+                    status["blocking_reason"] = str(height_aware.get("reason", "") or "")
         return status
 
     def _detour_side_symbol_from_fusion(self, fusion: Dict[str, Any]) -> str:
@@ -3254,7 +3428,7 @@ class Panel:
         if bool(normalized.get("stop", False)):
             return normalized
         fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
-        obstacle = self._front_obstacle_status(fusion)
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
         current_symbol = str(normalized.get("action_symbol", "") or "")
         if not bool(obstacle.get("blocking", False)):
             if self.llm_obstacle_detour_lock:
@@ -3350,12 +3524,13 @@ class Panel:
             return normalized
         if not bool(boundary.get("target_house_in_fov", False)):
             return normalized
-        obstacle = self._front_obstacle_status(fusion)
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
         front_min = self._as_float_or_none(obstacle.get("front_min_depth_cm"))
         if bool(obstacle.get("blocking", False)) or (
             bool(obstacle.get("present", False))
             and front_min is not None
             and front_min <= LLM_TARGET_TRANSIT_FRONT_MIN_FORWARD_CM
+            and not bool(obstacle.get("low_obstacle_passable", False))
         ):
             return normalized
 
@@ -3826,7 +4001,7 @@ class Panel:
         rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
         if rule_type == "geometric_target_reacquire_yaw_plan" and str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
-            obstacle = self._front_obstacle_status(fusion)
+            obstacle = self._front_obstacle_status(fusion, labeling_dir)
             if bool(obstacle.get("too_close", False)):
                 return self._apply_front_obstacle_detour_override(normalized, labeling_dir)
             return normalized
@@ -3905,6 +4080,7 @@ class Panel:
         fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
         house_id = self._current_target_house_id_from_fusion(fusion)
         target_boundary_context = self._target_boundary_context(fusion, house_id) if house_id else {}
+        height_aware_front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
         return {
             "version": "memory_aware_llm_control_prompt_v1",
             "prompt_type": "memory_aware_direct_control",
@@ -3927,12 +4103,14 @@ class Panel:
             "target_reacquire_lock": dict(self.llm_target_reacquire_lock) if isinstance(self.llm_target_reacquire_lock, dict) else {},
             "obstacle_detour_lock": dict(self.llm_obstacle_detour_lock) if isinstance(self.llm_obstacle_detour_lock, dict) else {},
             "target_boundary_context": target_boundary_context,
+            "height_aware_front_obstacle": height_aware_front_obstacle,
             "completion_rules": {
                 "target_entry_reached": "Finish the current house when a reliable target-house door/open door/close door is within 300cm.",
                 "large_bbox_proxy": "Also treat the current house as reached when a target-house door/open door/close door fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
                 "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not use yaw-only observation or forward motion as detour; physically back off and strafe left/right until the front path clears.",
+                "low_obstacle_passable": "If height_aware_front_obstacle.low_obstacle_passable=true, the near depth is only in the lower image band and the UAV body-height corridor is clear; do not treat it as a blocking front obstacle.",
                 "target_boundary_transit": "If target_boundary_context.mode=transit_to_target_boundary, ignore intermediate non-target house entrances and keep aligning/moving toward the target house boundary before starting entry search.",
                 "approach_vs_cross": "cross_ready=false means do not enter/cross the doorway yet; it does not mean you cannot approach the doorway.",
                 "forward_preference": "If a target-house entry is visible, associated with the active target, farther than 300cm, and the front path is not severely blocked, prefer forward.",
@@ -3964,6 +4142,10 @@ class Panel:
             "If global_front_obstacle.present=true with high/severe severity or front_min_depth is around 120cm or less, "
             "do not keep moving forward and do not treat yaw-only observation as a real detour. First back off if the "
             "obstacle is very close, then strafe left/right according to detour guidance until the front path clears.\n"
+            "Depth is height-sensitive: if height_aware_front_obstacle.low_obstacle_passable=true, the near depth is "
+            "concentrated in the lower image band while the UAV body-height corridor is clear. In that case do not "
+            "treat bushes/curbs/low foreground objects as a hard front blockage; continue target-boundary transit or "
+            "approach cautiously instead of backoff/side oscillation.\n"
             "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
             "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
             "continue along the geometric route to the target house boundary first.\n"
