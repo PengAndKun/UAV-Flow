@@ -4063,17 +4063,54 @@ class Panel:
 
     def _target_entry_alignment_status(self, fusion: Dict[str, Any]) -> Dict[str, Any]:
         class_name = self._semantic_class_name(fusion)
-        if not self._target_entry_visible_for_current_house(fusion) or not self._is_doorlike_class(class_name):
+        if not self._is_doorlike_class(class_name):
+            return {"needed": False}
+        target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        boundary = self._target_boundary_context(fusion, house_id) if house_id else {}
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        target_house_id = str(target_context.get("target_house_id", "") or house_id or "").strip()
+        current_house_id = str(target_context.get("current_house_id", "") or "").strip()
+        target_distance = self._as_float_or_none(target_context.get("target_house_distance_cm"))
+        search_distance = self._as_float_or_none(boundary.get("search_distance_cm"))
+        in_target_search_area = bool(
+            target_entry_visible
+            or (target_house_id and current_house_id and target_house_id == current_house_id)
+            or (
+                bool(target_context.get("target_house_in_fov", False))
+                and target_distance is not None
+                and search_distance is not None
+                and target_distance <= search_distance
+            )
+        )
+        if not in_target_search_area or bool(boundary.get("outside_search_boundary", False)):
             return {"needed": False}
         metrics = self._semantic_bbox_metrics(fusion)
-        center_x = self._as_float_or_none(metrics.get("center_x_norm")) if metrics else None
+        assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
+        chosen_candidate = fusion.get("chosen_depth_candidate", {}) if isinstance(fusion.get("chosen_depth_candidate"), dict) else {}
+        center_source = ""
+        center_x = self._as_float_or_none(assessment.get("center_x_norm"))
+        if center_x is not None:
+            center_source = "semantic_depth_assessment"
         if center_x is None:
-            assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
-            center_x = self._as_float_or_none(assessment.get("center_x_norm"))
+            center_x = self._as_float_or_none(chosen_candidate.get("center_x_norm"))
+            if center_x is not None:
+                center_source = "chosen_depth_candidate"
+        if center_x is None:
+            center_x = self._as_float_or_none(metrics.get("center_x_norm")) if metrics else None
+            if center_x is not None:
+                center_source = "semantic_yolo_bbox"
         if center_x is None:
             return {"needed": False}
         touches_left = bool(metrics.get("touches_left", 0.0)) if metrics else False
         touches_right = bool(metrics.get("touches_right", 0.0)) if metrics else False
+        depth_joint = bool(
+            assessment
+            and (
+                self._as_float_or_none(assessment.get("entry_distance_cm")) is not None
+                or isinstance(assessment.get("depth_bbox"), dict)
+            )
+        )
         if touches_left or center_x < LLM_ENTRY_CENTER_MIN_X_NORM:
             side = "left"
         elif touches_right or center_x > LLM_ENTRY_CENTER_MAX_X_NORM:
@@ -4083,6 +4120,8 @@ class Panel:
                 "needed": False,
                 "center_x_norm": float(center_x),
                 "center_offset_norm": float(center_x) - 0.5,
+                "center_source": center_source,
+                "depth_joint_evidence": depth_joint,
                 "bbox_metrics": metrics,
             }
         return {
@@ -4090,9 +4129,22 @@ class Panel:
             "side": side,
             "center_x_norm": float(center_x),
             "center_offset_norm": float(center_x) - 0.5,
+            "center_source": center_source,
+            "depth_joint_evidence": depth_joint,
+            "target_entry_visible": bool(target_entry_visible),
+            "in_target_search_area": bool(in_target_search_area),
+            "target_distance_cm": target_distance,
+            "search_distance_cm": search_distance,
+            "semantic_depth_assessment": {
+                "entry_distance_cm": assessment.get("entry_distance_cm"),
+                "opening_width_cm": assessment.get("opening_width_cm"),
+                "traversable": assessment.get("traversable"),
+                "confidence": assessment.get("confidence"),
+                "depth_gain_cm": assessment.get("depth_gain_cm"),
+            },
             "action_symbol": self._entry_alignment_action_for_side(fusion, side),
             "bbox_metrics": metrics,
-            "reason": "target entry bbox is too close to the image edge; re-center it before forward approach",
+            "reason": "doorlike YOLO+Depth entry candidate is too close to the image edge inside the target-house search area; re-center it before forward approach",
         }
 
     def _apply_target_entry_alignment_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
@@ -4611,7 +4663,7 @@ class Panel:
                 "approach_vs_cross": "cross_ready=false means do not enter/cross the doorway yet; it does not mean you cannot approach the doorway.",
                 "forward_preference": "If a target-house entry is visible, associated with the active target, farther than 300cm, and the front path is not severely blocked, prefer forward.",
                 "safe_long_repeat": "When the body-height depth corridor is clear and the next move is straight forward, use repeat close to repeat_cap instead of conservative 2-4 step moves.",
-                "entry_centering": "When target_entry_alignment.needed=true, re-center the visible target entry with q/e or lateral a/d before forward approach; do not use long forward repeat while the door is near the image edge.",
+                "entry_centering": "When target_entry_alignment.needed=true, re-center the YOLO+Depth door candidate with q/e or lateral a/d before forward approach; do not use long forward repeat while the candidate entry is near the image edge.",
             },
             "structured_observation": structured_input,
             "recent_llm_decisions": self.llm_control_decision_history[-6:],
@@ -4648,10 +4700,11 @@ class Panel:
             "axis-aligned transit or target-entry approach, use repeat near repeat_cap. Do not keep choosing tiny "
             "w x2/w x3 moves when the available forward clearance supports a longer safe command; the executor will "
             "still clamp repeat if depth clearance is not enough.\n"
-            "However, forward confidence requires visual alignment: if the target-house door/open door/close door is "
-            "near the image edge or target_entry_alignment.needed=true, first re-center it with q/e or a/d and capture "
-            "again. Do not run a long forward repeat when the door is at the far left/right edge, because it can leave "
-            "the field of view and cause the next frame to lock onto the wrong door.\n"
+            "However, forward confidence requires visual alignment and YOLO+Depth agreement: once inside the target "
+            "house search radius, if a door/open door/close door has a semantic-depth candidate but it is near the image "
+            "edge, or target_entry_alignment.needed=true, first re-center it with q/e or a/d and capture again. Do not "
+            "run a long forward repeat when the candidate door is at the far left/right edge, because it can leave the "
+            "field of view and cause the next frame to lock onto the wrong door.\n"
             "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
             "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
             "follow axis_aligned_transit_plan first. Prefer x-first or y-first horizontal/vertical world-axis movement "
