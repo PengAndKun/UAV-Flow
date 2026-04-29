@@ -90,6 +90,10 @@ LLM_TARGET_BOUNDARY_MARGIN_CM = 800.0
 LLM_TARGET_BOUNDARY_MIN_SEARCH_DISTANCE_CM = 1800.0
 LLM_TARGET_BOUNDARY_ALIGN_TOLERANCE_DEG = 18.0
 LLM_TARGET_TRANSIT_FRONT_MIN_FORWARD_CM = 160.0
+LLM_AXIS_TRANSIT_ALIGN_TOLERANCE_DEG = 12.0
+LLM_AXIS_TRANSIT_BOUNDARY_MARGIN_CM = 180.0
+LLM_AXIS_TRANSIT_WAYPOINT_TOLERANCE_CM = 220.0
+LLM_AXIS_TRANSIT_HOUSE_CLEARANCE_CM = 180.0
 LLM_DEPTH_MAX_VALID_CM = 1200.0
 LLM_DEPTH_CORRIDOR_X_RANGE = (0.35, 0.65)
 LLM_DEPTH_BODY_Y_RANGE = (0.35, 0.60)
@@ -3428,13 +3432,18 @@ class Panel:
         if bool(normalized.get("stop", False)):
             return normalized
         fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if house_id:
+            boundary = self._target_boundary_context(fusion, house_id)
+            axis_plan = self._axis_aligned_boundary_transit_plan(fusion, house_id, boundary)
+            if str(axis_plan.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+                return normalized
         obstacle = self._front_obstacle_status(fusion, labeling_dir)
         current_symbol = str(normalized.get("action_symbol", "") or "")
         if not bool(obstacle.get("blocking", False)):
             if self.llm_obstacle_detour_lock:
                 self.llm_obstacle_detour_lock = {}
             return normalized
-        house_id = self._current_target_house_id_from_fusion(fusion)
         metadata = self._metadata_from_labeling_dir(labeling_dir)
         step_index = int(metadata.get("step_index", 0) or 0)
         lock = self.llm_obstacle_detour_lock if isinstance(self.llm_obstacle_detour_lock, dict) else {}
@@ -3522,31 +3531,43 @@ class Panel:
         boundary = self._target_boundary_context(fusion, house_id)
         if not bool(boundary.get("outside_search_boundary", False)):
             return normalized
-        if not bool(boundary.get("target_house_in_fov", False)):
+        axis_plan = self._axis_aligned_boundary_transit_plan(fusion, house_id, boundary)
+        if not axis_plan and not bool(boundary.get("target_house_in_fov", False)):
             return normalized
         obstacle = self._front_obstacle_status(fusion, labeling_dir)
         front_min = self._as_float_or_none(obstacle.get("front_min_depth_cm"))
-        if bool(obstacle.get("blocking", False)) or (
+        axis_action = str(axis_plan.get("action_symbol", "") or "") if axis_plan else ""
+        if (
+            axis_action not in YAW_IMMEDIATE_CAPTURE_SYMBOLS
+            and bool(obstacle.get("blocking", False))
+        ) or (
             bool(obstacle.get("present", False))
             and front_min is not None
             and front_min <= LLM_TARGET_TRANSIT_FRONT_MIN_FORWARD_CM
             and not bool(obstacle.get("low_obstacle_passable", False))
+            and axis_action not in YAW_IMMEDIATE_CAPTURE_SYMBOLS
         ):
             return normalized
 
-        bearing = self._as_float_or_none(boundary.get("target_house_bearing_deg"))
-        if bearing is not None and abs(bearing) > LLM_TARGET_BOUNDARY_ALIGN_TOLERANCE_DEG:
-            action_symbol = "e" if bearing > 0.0 else "q"
-            repeat = 1
-            need_capture = True
-            phase = "align_to_target_boundary"
+        if axis_plan:
+            action_symbol = str(axis_plan.get("action_symbol", "") or "w")
+            repeat = int(axis_plan.get("repeat", 1) or 1)
+            need_capture = bool(axis_plan.get("need_capture_after", action_symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS))
+            phase = str(axis_plan.get("phase", "") or "axis_aligned_target_boundary")
         else:
-            distance_cm = self._as_float_or_none(boundary.get("target_house_distance_cm")) or 0.0
-            action_symbol = "w"
-            repeat = 4 if distance_cm > 3500.0 else 3 if distance_cm > 2500.0 else 2
-            repeat = min(self._llm_control_repeat_cap(), repeat)
-            need_capture = False
-            phase = "advance_to_target_boundary"
+            bearing = self._as_float_or_none(boundary.get("target_house_bearing_deg"))
+            if bearing is not None and abs(bearing) > LLM_TARGET_BOUNDARY_ALIGN_TOLERANCE_DEG:
+                action_symbol = "e" if bearing > 0.0 else "q"
+                repeat = 1
+                need_capture = True
+                phase = "align_to_target_boundary"
+            else:
+                distance_cm = self._as_float_or_none(boundary.get("target_house_distance_cm")) or 0.0
+                action_symbol = "w"
+                repeat = 4 if distance_cm > 3500.0 else 3 if distance_cm > 2500.0 else 2
+                repeat = min(self._llm_control_repeat_cap(), repeat)
+                need_capture = False
+                phase = "advance_to_target_boundary"
 
         original = dict(normalized)
         normalized = dict(normalized)
@@ -3564,8 +3585,9 @@ class Panel:
             "action_symbol": action_symbol,
             "repeat": int(repeat),
             "target_boundary_context": boundary,
+            "axis_aligned_transit_plan": axis_plan,
             "front_obstacle": obstacle,
-            "reason": "target house is still far outside its search boundary; ignore intermediate house/door candidates and keep moving toward the target boundary",
+            "reason": "target house is still far outside its search boundary; use axis-aligned boundary transit to avoid diagonal crossing near intermediate houses",
         }
         reason = str(normalized.get("reason", "") or "")
         transit_reason = (
@@ -3573,11 +3595,16 @@ class Panel:
             f"target_distance={boundary.get('target_house_distance_cm')}cm, "
             f"search_allowed_within={boundary.get('search_distance_cm')}cm"
         )
+        if axis_plan:
+            transit_reason += (
+                f", axis={axis_plan.get('selected_axis')} "
+                f"remaining={axis_plan.get('axis_remaining_to_boundary_cm')}cm"
+            )
         normalized["reason"] = (reason + " | " if reason else "") + transit_reason
         if original.get("action_symbol") != action_symbol:
             self._append_llm_control_log(
                 f"Target boundary transit override: action={original.get('action_symbol')} -> {action_symbol} repeat={int(repeat)}; "
-                f"target={house_id} distance={boundary.get('target_house_distance_cm')} search_distance={boundary.get('search_distance_cm')}"
+                f"target={house_id} distance={boundary.get('target_house_distance_cm')} search_distance={boundary.get('search_distance_cm')} phase={phase}"
             )
         return normalized
 
@@ -3619,6 +3646,152 @@ class Panel:
                 return self._as_float_or_none(house.get("radius_cm"))
         return None
 
+    def _house_records_for_route_planning(self) -> List[Dict[str, Any]]:
+        raw = self._read_local_houses_config()
+        houses = raw.get("houses", []) if isinstance(raw.get("houses"), list) else []
+        records: List[Dict[str, Any]] = []
+        for house in houses:
+            if not isinstance(house, dict):
+                continue
+            house_id = str(house.get("id", "") or "").strip()
+            x = self._as_float_or_none(house.get("center_x"))
+            y = self._as_float_or_none(house.get("center_y"))
+            radius = self._as_float_or_none(house.get("radius_cm"))
+            if not house_id or x is None or y is None or radius is None:
+                continue
+            records.append({"id": house_id, "x": float(x), "y": float(y), "radius_cm": float(radius)})
+        return records
+
+    def _point_to_segment_distance_cm(
+        self,
+        px: float,
+        py: float,
+        ax: float,
+        ay: float,
+        bx: float,
+        by: float,
+    ) -> float:
+        abx = float(bx) - float(ax)
+        aby = float(by) - float(ay)
+        apx = float(px) - float(ax)
+        apy = float(py) - float(ay)
+        denom = abx * abx + aby * aby
+        if denom <= 1e-6:
+            return math.hypot(apx, apy)
+        t = max(0.0, min(1.0, (apx * abx + apy * aby) / denom))
+        cx = float(ax) + t * abx
+        cy = float(ay) + t * aby
+        return math.hypot(float(px) - cx, float(py) - cy)
+
+    def _axis_route_clearance(
+        self,
+        *,
+        pose: Dict[str, float],
+        target: Dict[str, float],
+        first_axis: str,
+        target_house_id: str,
+        current_house_id: str = "",
+    ) -> Dict[str, Any]:
+        cx = float(pose["x"])
+        cy = float(pose["y"])
+        tx = float(target["x"])
+        ty = float(target["y"])
+        if first_axis == "x":
+            waypoint = {"x": tx, "y": cy}
+        else:
+            waypoint = {"x": cx, "y": ty}
+        segments = [
+            {"from": {"x": cx, "y": cy}, "to": waypoint},
+            {"from": waypoint, "to": {"x": tx, "y": ty}},
+        ]
+        ignored = {str(target_house_id or "").strip(), str(current_house_id or "").strip()}
+        blockers: List[Dict[str, Any]] = []
+        min_clearance: Optional[float] = None
+        for house in self._house_records_for_route_planning():
+            house_id = str(house.get("id", "") or "").strip()
+            if not house_id or house_id in ignored:
+                continue
+            base_radius = float(house.get("radius_cm", 0.0) or 0.0)
+            radius = base_radius + float(LLM_AXIS_TRANSIT_HOUSE_CLEARANCE_CM)
+            if math.hypot(float(house["x"]) - cx, float(house["y"]) - cy) <= radius:
+                continue
+            for idx, segment in enumerate(segments):
+                dist = self._point_to_segment_distance_cm(
+                    float(house["x"]),
+                    float(house["y"]),
+                    float(segment["from"]["x"]),
+                    float(segment["from"]["y"]),
+                    float(segment["to"]["x"]),
+                    float(segment["to"]["y"]),
+                )
+                clearance = dist - radius
+                min_clearance = clearance if min_clearance is None else min(min_clearance, clearance)
+                if clearance < 0.0:
+                    blockers.append(
+                        {
+                            "house_id": house_id,
+                            "segment_index": idx,
+                            "distance_to_route_cm": round(float(dist), 2),
+                            "clearance_cm": round(float(clearance), 2),
+                        }
+                    )
+        return {
+            "first_axis": first_axis,
+            "waypoint": waypoint,
+            "segments": segments,
+            "blocker_count": len(blockers),
+            "min_clearance_cm": round(float(min_clearance), 2) if min_clearance is not None else None,
+            "blockers": blockers[:8],
+        }
+
+    def _choose_axis_route_order(
+        self,
+        *,
+        pose: Dict[str, float],
+        target: Dict[str, float],
+        target_house_id: str,
+        current_house_id: str = "",
+    ) -> Dict[str, Any]:
+        x_route = self._axis_route_clearance(
+            pose=pose,
+            target=target,
+            first_axis="x",
+            target_house_id=target_house_id,
+            current_house_id=current_house_id,
+        )
+        y_route = self._axis_route_clearance(
+            pose=pose,
+            target=target,
+            first_axis="y",
+            target_house_id=target_house_id,
+            current_house_id=current_house_id,
+        )
+        dx = abs(float(target["x"]) - float(pose["x"]))
+        dy = abs(float(target["y"]) - float(pose["y"]))
+
+        def route_key(route: Dict[str, Any]) -> tuple:
+            min_clearance = self._as_float_or_none(route.get("min_clearance_cm"))
+            return (
+                -int(route.get("blocker_count", 0) or 0),
+                min_clearance if min_clearance is not None else 1e9,
+                dx if route.get("first_axis") == "x" else dy,
+            )
+
+        selected = x_route if route_key(x_route) >= route_key(y_route) else y_route
+        fallback_axis = "x" if dx >= dy else "y"
+        if int(x_route.get("blocker_count", 0) or 0) == int(y_route.get("blocker_count", 0) or 0):
+            x_clearance = self._as_float_or_none(x_route.get("min_clearance_cm"))
+            y_clearance = self._as_float_or_none(y_route.get("min_clearance_cm"))
+            if x_clearance is not None and y_clearance is not None and abs(x_clearance - y_clearance) < 100.0:
+                selected = x_route if fallback_axis == "x" else y_route
+        return {
+            "selected_first_axis": str(selected.get("first_axis", fallback_axis)),
+            "fallback_axis": fallback_axis,
+            "x_first": x_route,
+            "y_first": y_route,
+            "reason": "choose the axis-aligned route with fewer non-target house intersections, then larger clearance",
+        }
+
     def _target_boundary_context(self, fusion: Dict[str, Any], house_id: str) -> Dict[str, Any]:
         distance_cm = self._target_house_distance_cm(fusion)
         radius_cm = self._house_radius_cm_for_id(house_id)
@@ -3639,6 +3812,106 @@ class Panel:
             "target_house_bearing_deg": bearing,
             "target_house_in_fov": bool(target_context.get("target_house_in_fov", False)),
             "mode": "transit_to_target_boundary" if outside else "entry_search_allowed",
+        }
+
+    def _axis_aligned_boundary_transit_plan(
+        self,
+        fusion: Dict[str, Any],
+        house_id: str,
+        boundary: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not bool(boundary.get("outside_search_boundary", False)):
+            return {}
+        pose = self._uav_pose_from_fusion_or_state(fusion)
+        target = self._target_center_from_fusion_or_config(fusion, house_id)
+        if not pose or not target:
+            return {}
+        search_distance = self._as_float_or_none(boundary.get("search_distance_cm"))
+        if search_distance is None or search_distance <= 0.0:
+            return {}
+
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        current_house_id = str(target_context.get("current_house_id", "") or "").strip()
+        route_choice = self._choose_axis_route_order(
+            pose=pose,
+            target=target,
+            target_house_id=house_id,
+            current_house_id=current_house_id,
+        )
+
+        dx = float(target["x"]) - float(pose["x"])
+        dy = float(target["y"]) - float(pose["y"])
+        abs_dx = abs(dx)
+        abs_dy = abs(dy)
+        first_axis = str(route_choice.get("selected_first_axis", "") or "x")
+
+        def axis_remaining(axis: str) -> float:
+            if axis == "x":
+                other = abs_dy
+                primary = abs_dx
+            else:
+                other = abs_dx
+                primary = abs_dy
+            if other < search_distance:
+                allowed_primary = math.sqrt(max(0.0, search_distance * search_distance - other * other))
+                return max(0.0, primary - allowed_primary + float(LLM_AXIS_TRANSIT_BOUNDARY_MARGIN_CM))
+            return primary
+
+        first_remaining = axis_remaining(first_axis)
+        if first_remaining > float(LLM_AXIS_TRANSIT_WAYPOINT_TOLERANCE_CM):
+            axis = first_axis
+            remaining_cm = first_remaining
+            phase = f"axis_{axis}_to_target_boundary"
+        else:
+            second_axis = "y" if first_axis == "x" else "x"
+            second_remaining = axis_remaining(second_axis)
+            axis = second_axis if second_remaining > float(LLM_AXIS_TRANSIT_WAYPOINT_TOLERANCE_CM) else first_axis
+            remaining_cm = max(first_remaining, second_remaining)
+            phase = f"axis_{axis}_finish_target_boundary"
+
+        if axis == "x":
+            desired_yaw = 0.0 if dx >= 0.0 else 180.0
+            signed_axis_delta_cm = dx
+        else:
+            desired_yaw = 90.0 if dy >= 0.0 else -90.0
+            signed_axis_delta_cm = dy
+        current_yaw = float(pose["yaw"])
+        yaw_delta = self._normalize_angle_deg(desired_yaw - current_yaw)
+        if abs(yaw_delta) > float(LLM_AXIS_TRANSIT_ALIGN_TOLERANCE_DEG):
+            action_symbol = "e" if yaw_delta > 0.0 else "q"
+            repeat = 1
+            need_capture = True
+            phase = f"align_{phase}"
+        else:
+            action_symbol = "w"
+            if remaining_cm > 2500.0:
+                repeat = 4
+            elif remaining_cm > 1200.0:
+                repeat = 3
+            else:
+                repeat = 2
+            repeat = min(self._llm_control_repeat_cap(), repeat)
+            need_capture = False
+
+        return {
+            "mode": "axis_aligned_target_boundary_transit",
+            "target_house_id": str(house_id or ""),
+            "current_house_id": current_house_id,
+            "selected_axis": axis,
+            "selected_first_axis": first_axis,
+            "signed_axis_delta_cm": round(float(signed_axis_delta_cm), 2),
+            "axis_remaining_to_boundary_cm": round(float(remaining_cm), 2),
+            "desired_yaw_deg": round(float(desired_yaw), 2),
+            "current_yaw_deg": round(float(current_yaw), 2),
+            "yaw_delta_deg": round(float(yaw_delta), 2),
+            "action_symbol": action_symbol,
+            "repeat": int(max(1, repeat)),
+            "need_capture_after": bool(need_capture),
+            "phase": phase,
+            "pose": {"x": float(pose["x"]), "y": float(pose["y"]), "yaw": float(pose["yaw"])},
+            "target": {"x": float(target["x"]), "y": float(target["y"])},
+            "route_choice": route_choice,
+            "reason": "use an axis-aligned route to approach the target search boundary before entrance/house judging, reducing diagonal crossing near intermediate houses",
         }
 
     def _target_center_from_fusion_or_config(self, fusion: Dict[str, Any], house_id: str) -> Dict[str, float]:
@@ -3750,6 +4023,12 @@ class Panel:
         existing_lock = self.llm_target_reacquire_lock if isinstance(self.llm_target_reacquire_lock, dict) else {}
         lock_for_same_house = str(existing_lock.get("target_house_id", "") or "") == house_id
         active_lock = lock_for_same_house and int(existing_lock.get("yaw_steps", 0) or 0) < int(existing_lock.get("planned_yaw_steps", existing_lock.get("max_yaw_steps", 0)) or 0)
+        if house_id:
+            boundary = self._target_boundary_context(fusion, house_id)
+            if bool(boundary.get("outside_search_boundary", False)) and self._axis_aligned_boundary_transit_plan(fusion, house_id, boundary):
+                if lock_for_same_house:
+                    self.llm_target_reacquire_lock = {}
+                return normalized
         if not house_id or not self._target_reacquire_needed(fusion, active_lock=active_lock):
             if house_id and str(self.llm_target_reacquire_lock.get("target_house_id", "") or "") == house_id:
                 self.llm_target_reacquire_lock = {}
@@ -4080,6 +4359,7 @@ class Panel:
         fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
         house_id = self._current_target_house_id_from_fusion(fusion)
         target_boundary_context = self._target_boundary_context(fusion, house_id) if house_id else {}
+        axis_aligned_transit_plan = self._axis_aligned_boundary_transit_plan(fusion, house_id, target_boundary_context) if house_id else {}
         height_aware_front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
         return {
             "version": "memory_aware_llm_control_prompt_v1",
@@ -4103,6 +4383,7 @@ class Panel:
             "target_reacquire_lock": dict(self.llm_target_reacquire_lock) if isinstance(self.llm_target_reacquire_lock, dict) else {},
             "obstacle_detour_lock": dict(self.llm_obstacle_detour_lock) if isinstance(self.llm_obstacle_detour_lock, dict) else {},
             "target_boundary_context": target_boundary_context,
+            "axis_aligned_transit_plan": axis_aligned_transit_plan,
             "height_aware_front_obstacle": height_aware_front_obstacle,
             "completion_rules": {
                 "target_entry_reached": "Finish the current house when a reliable target-house door/open door/close door is within 300cm.",
@@ -4111,7 +4392,7 @@ class Panel:
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
                 "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not use yaw-only observation or forward motion as detour; physically back off and strafe left/right until the front path clears.",
                 "low_obstacle_passable": "If height_aware_front_obstacle.low_obstacle_passable=true, the near depth is only in the lower image band and the UAV body-height corridor is clear; do not treat it as a blocking front obstacle.",
-                "target_boundary_transit": "If target_boundary_context.mode=transit_to_target_boundary, ignore intermediate non-target house entrances and keep aligning/moving toward the target house boundary before starting entry search.",
+                "target_boundary_transit": "If target_boundary_context.mode=transit_to_target_boundary, ignore intermediate non-target house entrances and follow axis_aligned_transit_plan first; start entrance/house judging only after reaching the target search boundary.",
                 "approach_vs_cross": "cross_ready=false means do not enter/cross the doorway yet; it does not mean you cannot approach the doorway.",
                 "forward_preference": "If a target-house entry is visible, associated with the active target, farther than 300cm, and the front path is not severely blocked, prefer forward.",
             },
@@ -4148,7 +4429,9 @@ class Panel:
             "approach cautiously instead of backoff/side oscillation.\n"
             "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
             "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
-            "continue along the geometric route to the target house boundary first.\n"
+            "follow axis_aligned_transit_plan first. Prefer x-first or y-first horizontal/vertical world-axis movement "
+            "that has fewer non-target house intersections; avoid diagonal shortcuts through intermediate houses. "
+            "Only after reaching the target search boundary should you begin detailed building/entry judgment.\n"
             "The current house search is finished when the UAV is within about 300cm of a reliable target-house entry; "
             "the executor will switch to the next house. Close-range depth can be noisy: if the target-house entry bbox "
             "fills most of the image or a reliable remembered target-house entry exists while the target-house distance "
