@@ -41,6 +41,7 @@ NO_ENTRY_MIN_VISITED_COVERAGE_RATIO = 0.75
 NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO = 0.50
 NO_ENTRY_MIN_TOTAL_OBSERVATIONS = 8
 RELIABLE_ENTRY_ASSOCIATION_THRESHOLD = 0.65
+NON_ENTERABLE_MAX_OPENING_WIDTH_CM = 90.0
 DEFAULT_SECTOR_IDS = [
     "front_left",
     "front_center",
@@ -173,6 +174,8 @@ def _default_search_completion_evidence() -> Dict[str, Any]:
         "total_observations": 0,
         "candidate_entry_count": 0,
         "rejected_entry_count": 0,
+        "non_enterable_entry_count": 0,
+        "unresolved_entry_count": 0,
         "approachable_entry_count": 0,
         "blocked_entry_count": 0,
         "reasons": [],
@@ -181,6 +184,7 @@ def _default_search_completion_evidence() -> Dict[str, Any]:
             "min_observed_coverage_ratio": NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO,
             "min_total_observations": NO_ENTRY_MIN_TOTAL_OBSERVATIONS,
             "reliable_entry_association_threshold": RELIABLE_ENTRY_ASSOCIATION_THRESHOLD,
+            "non_enterable_max_opening_width_cm": NON_ENTERABLE_MAX_OPENING_WIDTH_CM,
         },
         "updated_at": _now_text(),
     }
@@ -1037,13 +1041,15 @@ class EntrySearchMemoryStore:
         return coverage
 
     def _entry_is_reliable_target_entry(self, entry: Dict[str, Any]) -> bool:
-        status = str(entry.get("status") or entry.get("entry_state") or "").strip()
-        entry_type = str(entry.get("entry_type") or entry.get("semantic_class") or "").strip().lower()
+        status = str(entry.get("status") or entry.get("entry_state") or "").strip().lower()
+        entry_type = str(entry.get("entry_type") or entry.get("semantic_class") or "").strip().lower().replace("_", " ")
         if "window" in entry_type or status in {"window_rejected", "non_target"}:
+            return False
+        if self._entry_is_non_enterable_candidate(entry):
             return False
         if bool(entry.get("is_entered", False)):
             return True
-        if status in {"approachable", "blocked_confirmed"}:
+        if status in {"approachable"}:
             return True
         try:
             association_confidence = float(entry.get("association_confidence", 0.0) or 0.0)
@@ -1054,6 +1060,37 @@ class EntrySearchMemoryStore:
         except Exception:
             target_match_score = 0.0
         return association_confidence >= RELIABLE_ENTRY_ASSOCIATION_THRESHOLD and target_match_score >= 0.45
+
+    def _entry_is_rejected_candidate(self, entry: Dict[str, Any]) -> bool:
+        status = str(entry.get("status") or entry.get("entry_state") or "").strip().lower()
+        entry_type = str(entry.get("entry_type") or entry.get("semantic_class") or "").strip().lower().replace("_", " ")
+        return bool("window" in entry_type or status in {"window_rejected", "non_target", "rejected"})
+
+    def _entry_is_non_enterable_candidate(self, entry: Dict[str, Any]) -> bool:
+        status = str(entry.get("status") or entry.get("entry_state") or "").strip().lower()
+        entry_type = str(entry.get("entry_type") or entry.get("semantic_class") or "").strip().lower().replace("_", " ")
+        if entry_type in {"close door", "closed door"}:
+            return True
+        if status in {"closed", "close_door", "closed_door", "blocked_confirmed"}:
+            return True
+        opening_width = _safe_float(entry.get("opening_width_cm"), None)
+        if status in {"blocked_temporary", "target_house_entry_blocked"} and opening_width is not None:
+            return opening_width < NON_ENTERABLE_MAX_OPENING_WIDTH_CM
+        bbox_history = entry.get("bbox_history", []) if isinstance(entry.get("bbox_history"), list) else []
+        if status in {"blocked_temporary", "target_house_entry_blocked"} and bbox_history:
+            closed_votes = 0
+            open_votes = 0
+            for item in bbox_history:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("class_name", "") or "").strip().lower().replace("_", " ")
+                if name in {"close door", "closed door"}:
+                    closed_votes += 1
+                elif name == "open door":
+                    open_votes += 1
+            if closed_votes > 0 and open_votes == 0:
+                return True
+        return False
 
     def _refresh_search_completion_evidence(self, memory: Dict[str, Any]) -> None:
         semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
@@ -1072,12 +1109,24 @@ class EntrySearchMemoryStore:
             for entry in candidate_entries
             if isinstance(entry, dict)
         )
+        non_enterable_count = sum(
+            1
+            for entry in candidate_entries
+            if isinstance(entry, dict) and self._entry_is_non_enterable_candidate(entry)
+        )
+        rejected_or_non_enterable_count = sum(
+            1
+            for entry in candidate_entries
+            if isinstance(entry, dict)
+            and (self._entry_is_rejected_candidate(entry) or self._entry_is_non_enterable_candidate(entry))
+        )
+        unresolved_count = max(0, candidate_count - rejected_or_non_enterable_count)
         full_coverage_ready = (
             visited_ratio >= NO_ENTRY_MIN_VISITED_COVERAGE_RATIO
             and observed_ratio >= NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO
             and total_observations >= NO_ENTRY_MIN_TOTAL_OBSERVATIONS
         )
-        all_candidates_rejected_or_none = candidate_count == 0 or rejected_count >= candidate_count
+        all_candidates_rejected_or_none = candidate_count == 0 or rejected_or_non_enterable_count >= candidate_count
         no_entry_after_full_coverage = bool(
             full_coverage_ready
             and not has_reliable_entry
@@ -1094,11 +1143,13 @@ class EntrySearchMemoryStore:
         else:
             reasons.append("no_reliable_entry")
         if all_candidates_rejected_or_none:
-            reasons.append("all_candidates_rejected_or_no_candidate")
+            reasons.append("all_candidates_rejected_non_enterable_or_no_candidate")
         else:
             reasons.append("unrejected_candidates_remain")
         if approachable_count > 0:
             reasons.append("approachable_entry_present")
+        if non_enterable_count > 0:
+            reasons.append("non_enterable_entry_present")
         evidence = _default_search_completion_evidence()
         evidence.update(
             {
@@ -1110,6 +1161,9 @@ class EntrySearchMemoryStore:
                 "total_observations": total_observations,
                 "candidate_entry_count": candidate_count,
                 "rejected_entry_count": rejected_count,
+                "non_enterable_entry_count": non_enterable_count,
+                "rejected_or_non_enterable_entry_count": rejected_or_non_enterable_count,
+                "unresolved_entry_count": unresolved_count,
                 "approachable_entry_count": approachable_count,
                 "blocked_entry_count": blocked_count,
                 "reasons": reasons,

@@ -85,6 +85,10 @@ LLM_CENTERED_ENTRY_MIN_BBOX_HEIGHT_RATIO = 0.55
 LLM_CENTERED_ENTRY_MIN_DEPTH_CONFIDENCE = 0.60
 LLM_CENTERED_ENTRY_MIN_OPENING_WIDTH_CM = 90.0
 LLM_CENTERED_ENTRY_MIN_CLEARANCE_DEPTH_CM = 250.0
+LLM_ENTERABLE_ENTRY_MIN_OPENING_WIDTH_CM = 90.0
+LLM_CLOSED_ENTRY_ORBIT_DISTANCE_CM = 650.0
+LLM_COVERAGE_ORBIT_REPEAT = 4
+LLM_COVERAGE_ORBIT_DEFAULT_SYMBOL = "d"
 LLM_YAW_STEP_DEG = 30.0
 LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG = 18.0
 LLM_TARGET_REACQUIRE_MAX_YAW_STEPS = 12
@@ -3161,6 +3165,50 @@ class Panel:
         normalized = str(class_name or "").strip().lower().replace("_", " ")
         return normalized in {name.replace("_", " ") for name in DOORLIKE_CLASS_NAMES}
 
+    def _is_closed_door_class(self, class_name: str) -> bool:
+        normalized = str(class_name or "").strip().lower().replace("_", " ")
+        return normalized in {"close door", "closed door"}
+
+    def _is_enterable_entry_evidence(self, fusion: Dict[str, Any]) -> bool:
+        class_name = self._semantic_class_name(fusion)
+        if not self._is_doorlike_class(class_name) or self._is_closed_door_class(class_name):
+            return False
+        normalized = str(class_name or "").strip().lower().replace("_", " ")
+        if normalized == "open door":
+            return True
+        assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
+        opening_width_cm = self._as_float_or_none(assessment.get("opening_width_cm"))
+        traversable = bool(assessment.get("traversable", False))
+        crossing_ready = bool(assessment.get("crossing_ready", False))
+        return bool(
+            (traversable or crossing_ready)
+            and opening_width_cm is not None
+            and opening_width_cm >= LLM_ENTERABLE_ENTRY_MIN_OPENING_WIDTH_CM
+        )
+
+    def _non_enterable_entry_status(self, fusion: Dict[str, Any]) -> Dict[str, Any]:
+        class_name = self._semantic_class_name(fusion)
+        assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
+        opening_width_cm = self._as_float_or_none(assessment.get("opening_width_cm"))
+        entry_distance_cm = self._candidate_entry_distance_cm(fusion)
+        traversable = bool(assessment.get("traversable", False))
+        crossing_ready = bool(assessment.get("crossing_ready", False))
+        closed_class = self._is_closed_door_class(class_name)
+        narrow_opening = bool(opening_width_cm is not None and opening_width_cm < LLM_ENTERABLE_ENTRY_MIN_OPENING_WIDTH_CM)
+        enterable = self._is_enterable_entry_evidence(fusion)
+        return {
+            "is_doorlike": self._is_doorlike_class(class_name),
+            "enterable": enterable,
+            "closed_class": closed_class,
+            "narrow_opening": narrow_opening,
+            "semantic_class": class_name,
+            "entry_distance_cm": entry_distance_cm,
+            "opening_width_cm": opening_width_cm,
+            "traversable": traversable,
+            "crossing_ready": crossing_ready,
+            "reason": "closed_or_non_traversable_entry_candidate" if self._is_doorlike_class(class_name) and not enterable else "",
+        }
+
     def _semantic_bbox_metrics(self, fusion: Dict[str, Any]) -> Dict[str, float]:
         semantic = fusion.get("semantic_detection", {}) if isinstance(fusion.get("semantic_detection"), dict) else {}
         xyxy = semantic.get("xyxy")
@@ -3241,14 +3289,16 @@ class Panel:
             target_entry_visible
             or (house_id and target_house_id == house_id and current_house_id == house_id)
         )
-        if not self._is_doorlike_class(class_name) or not in_target_house_area:
+        enterable_evidence = self._is_enterable_entry_evidence(fusion)
+        if not enterable_evidence or not in_target_house_area:
             return {
                 "eligible": False,
                 "semantic_class": class_name,
+                "enterable_evidence": enterable_evidence,
                 "target_entry_visible": bool(target_entry_visible),
                 "current_house_id": current_house_id,
                 "target_house_id": target_house_id,
-                "reason": "not a door-like target-house entry candidate",
+                "reason": "not an enterable target-house entry candidate",
             }
 
         metrics = self._semantic_bbox_metrics(fusion)
@@ -3304,6 +3354,7 @@ class Panel:
         return {
             "eligible": eligible,
             "semantic_class": class_name,
+            "enterable_evidence": enterable_evidence,
             "target_entry_visible": bool(target_entry_visible),
             "current_house_id": current_house_id,
             "target_house_id": target_house_id,
@@ -4433,6 +4484,36 @@ class Panel:
         completion = semantic.get("search_completion_evidence", {}) if isinstance(semantic.get("search_completion_evidence"), dict) else {}
         return completion
 
+    def _perimeter_coverage_status_for_house(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
+        snapshot = self._read_json_file(Path(labeling_dir) / "entry_search_memory_snapshot_after.json")
+        memory = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
+        memories = memory.get("memories", {}) if isinstance(memory.get("memories"), dict) else {}
+        house_memory = memories.get(str(house_id), {}) if isinstance(memories, dict) else {}
+        semantic = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
+        coverage = semantic.get("perimeter_coverage", {}) if isinstance(semantic.get("perimeter_coverage"), dict) else {}
+        completion = semantic.get("search_completion_evidence", {}) if isinstance(semantic.get("search_completion_evidence"), dict) else {}
+        bins = coverage.get("bins", {}) if isinstance(coverage.get("bins"), dict) else {}
+        visited_bins = [str(name) for name, payload in bins.items() if isinstance(payload, dict) and bool(payload.get("visited", False))]
+        observed_bins = [str(name) for name, payload in bins.items() if isinstance(payload, dict) and bool(payload.get("observed", False))]
+        unvisited_bins = [str(name) for name, payload in bins.items() if isinstance(payload, dict) and not bool(payload.get("visited", False))]
+        unobserved_bins = [str(name) for name, payload in bins.items() if isinstance(payload, dict) and not bool(payload.get("observed", False))]
+        return {
+            "house_id": str(house_id or ""),
+            "visited_coverage_ratio": self._as_float_or_none(coverage.get("visited_coverage_ratio")) or 0.0,
+            "observed_coverage_ratio": self._as_float_or_none(coverage.get("observed_coverage_ratio")) or 0.0,
+            "total_observations": int(coverage.get("total_observations", 0) or 0),
+            "visual_observation_count": int(coverage.get("visual_observation_count", 0) or 0),
+            "last_viewpoint_bin": str(coverage.get("last_viewpoint_bin", "") or ""),
+            "last_viewpoint_angle_deg": coverage.get("last_viewpoint_angle_deg"),
+            "visited_bins": visited_bins,
+            "observed_bins": observed_bins,
+            "unvisited_bins": unvisited_bins,
+            "unobserved_bins": unobserved_bins,
+            "full_coverage_ready": bool(completion.get("full_coverage_ready", False)),
+            "no_entry_after_full_coverage": bool(completion.get("no_entry_after_full_coverage", False)),
+            "completion_reasons": completion.get("reasons", []) if isinstance(completion.get("reasons"), list) else [],
+        }
+
     def _best_reliable_memory_entry_for_house(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
         snapshot = self._read_json_file(Path(labeling_dir) / "entry_search_memory_snapshot_after.json")
         memory = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
@@ -4447,7 +4528,11 @@ class Panel:
                 continue
             if str(entry.get("associated_house_id", "") or "") != str(house_id):
                 continue
-            if not self._is_doorlike_class(str(entry.get("entry_type", "") or "")):
+            entry_type = str(entry.get("entry_type", "") or entry.get("semantic_class", "") or "")
+            status = str(entry.get("status", "") or entry.get("entry_state", "") or "").strip().lower()
+            if not self._is_doorlike_class(entry_type) or self._is_closed_door_class(entry_type):
+                continue
+            if status in {"blocked_temporary", "blocked_confirmed", "non_target", "window_rejected"} and not bool(entry.get("is_entered", False)):
                 continue
             assoc = self._as_float_or_none(entry.get("association_confidence")) or 0.0
             match = self._as_float_or_none(entry.get("target_match_score")) or 0.0
@@ -4499,7 +4584,7 @@ class Panel:
         centered_depth_proxy_cm = float(execution_policy.get("entry_reached_centered_depth_proxy_cm", LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM))
         if (
             target_entry_visible
-            and self._is_doorlike_class(class_name)
+            and self._is_enterable_entry_evidence(fusion)
             and distance_cm is not None
             and distance_cm <= threshold
         ):
@@ -4533,7 +4618,7 @@ class Panel:
             }
         if (
             target_entry_visible
-            and self._is_doorlike_class(class_name)
+            and self._is_enterable_entry_evidence(fusion)
             and large_entry_bbox
             and front_path_clear
             and (
@@ -4598,6 +4683,21 @@ class Panel:
             return {"override": False}
         if distance_cm is None or distance_cm <= LLM_APPROACHABLE_DISTANCE_MARGIN_CM:
             return {"override": False}
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        coverage = self._perimeter_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+        non_enterable = self._non_enterable_entry_status(fusion)
+        if (
+            bool(non_enterable.get("is_doorlike", False))
+            and not bool(non_enterable.get("enterable", False))
+            and not bool(coverage.get("full_coverage_ready", False))
+            and distance_cm <= LLM_CLOSED_ENTRY_ORBIT_DISTANCE_CM
+        ):
+            return {
+                "override": False,
+                "reason": "visible entry is closed/non-traversable and perimeter coverage is incomplete; do not force forward approach",
+                "non_enterable_entry": non_enterable,
+                "perimeter_coverage": coverage,
+            }
         obstacle = self._front_obstacle_status(fusion, labeling_dir)
         if not self._front_path_clear_for_approach(fusion) and not bool(obstacle.get("low_obstacle_passable", False)):
             return {"override": False}
@@ -4614,6 +4714,71 @@ class Panel:
             "front_obstacle": obstacle,
             "reason": "target-house door is visible and farther than 3m; cross_ready=false does not block approach",
         }
+
+    def _apply_closed_entry_coverage_orbit_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        current_symbol = str(normalized.get("action_symbol", "") or "")
+        if current_symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        boundary = self._target_boundary_context(fusion, house_id)
+        if bool(boundary.get("outside_search_boundary", False)):
+            return normalized
+        target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        if not target_entry_visible:
+            return normalized
+        non_enterable = self._non_enterable_entry_status(fusion)
+        if not bool(non_enterable.get("is_doorlike", False)) or bool(non_enterable.get("enterable", False)):
+            return normalized
+        distance_cm = self._as_float_or_none(non_enterable.get("entry_distance_cm"))
+        if distance_cm is None or distance_cm > LLM_CLOSED_ENTRY_ORBIT_DISTANCE_CM:
+            return normalized
+        coverage = self._perimeter_coverage_status_for_house(labeling_dir, house_id)
+        if bool(coverage.get("full_coverage_ready", False)) or bool(coverage.get("no_entry_after_full_coverage", False)):
+            return normalized
+        if current_symbol not in {"w", "x"}:
+            return normalized
+
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        bearing = self._as_float_or_none(target_context.get("target_house_bearing_deg"))
+        if bearing is not None and bearing < -12.0:
+            orbit_symbol = "a"
+        elif bearing is not None and bearing > 12.0:
+            orbit_symbol = "d"
+        else:
+            orbit_symbol = LLM_COVERAGE_ORBIT_DEFAULT_SYMBOL
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = orbit_symbol
+        normalized["repeat"] = min(self._llm_control_repeat_cap(), int(LLM_COVERAGE_ORBIT_REPEAT))
+        normalized["need_capture_after"] = True
+        normalized["rule_override"] = {
+            "type": "closed_entry_perimeter_coverage_orbit",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "target_house_id": house_id,
+            "orbit_symbol": orbit_symbol,
+            "repeat": int(normalized["repeat"]),
+            "non_enterable_entry": non_enterable,
+            "perimeter_coverage": coverage,
+            "reason": "close/non-traversable target-house door is near, but perimeter coverage is incomplete; orbit laterally to inspect other house faces before declaring no enterable entry",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        orbit_reason = (
+            f"closed/non-traversable entry near {distance_cm:.1f}cm, coverage "
+            f"{coverage.get('visited_coverage_ratio', 0.0):.3f}/{coverage.get('observed_coverage_ratio', 0.0):.3f}; "
+            f"orbit with {orbit_symbol}"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + orbit_reason
+        self._append_llm_control_log(
+            f"Closed-entry coverage orbit: action={original.get('action_symbol')} -> {orbit_symbol} repeat={normalized['repeat']}; "
+            f"target={house_id} visited={coverage.get('visited_coverage_ratio')} observed={coverage.get('observed_coverage_ratio')}"
+        )
+        return normalized
 
     def _apply_safe_forward_repeat_boost(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") != "w":
@@ -4683,6 +4848,9 @@ class Panel:
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
         normalized = self._apply_target_boundary_transit_override(normalized, labeling_dir)
+        if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return normalized
+        normalized = self._apply_closed_entry_coverage_orbit_override(normalized, labeling_dir)
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
         normalized = self._apply_target_entry_alignment_override(normalized, labeling_dir)
@@ -4768,6 +4936,8 @@ class Panel:
         axis_aligned_transit_plan = self._axis_aligned_boundary_transit_plan(fusion, house_id, target_boundary_context) if house_id else {}
         height_aware_front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
         target_entry_alignment = self._target_entry_alignment_status(fusion)
+        perimeter_coverage_status = self._perimeter_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+        non_enterable_entry_status = self._non_enterable_entry_status(fusion)
         return {
             "version": "memory_aware_llm_control_prompt_v1",
             "prompt_type": "memory_aware_direct_control",
@@ -4794,10 +4964,13 @@ class Panel:
             "axis_aligned_transit_plan": axis_aligned_transit_plan,
             "height_aware_front_obstacle": height_aware_front_obstacle,
             "target_entry_alignment": target_entry_alignment,
+            "perimeter_coverage_status": perimeter_coverage_status,
+            "non_enterable_entry_status": non_enterable_entry_status,
             "completion_rules": {
-                "target_entry_reached": "Finish the current house when a reliable target-house door/open door/close door is within 300cm.",
-                "large_bbox_proxy": "Also treat the current house as reached when a target-house door/open door/close door fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
-                "centered_depth_proxy": "Also finish when a target-house door/open door/close door is roughly centered, has a sufficiently large YOLO bbox, YOLO+Depth marks the opening traversable, and the doorway/target-house distance is within the near-entry proxy range.",
+                "target_entry_reached": "Finish the current house when a reliable enterable target-house entry is within 300cm. close door/closed door is not enterable completion evidence.",
+                "large_bbox_proxy": "Also treat the current house as reached when an enterable target-house entry fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
+                "centered_depth_proxy": "Also finish when an enterable target-house entry is roughly centered, has a sufficiently large YOLO bbox, YOLO+Depth marks the opening traversable, and the doorway/target-house distance is within the near-entry proxy range.",
+                "closed_entry_full_coverage": "If only close door/closed/non-traversable narrow-door evidence is found, do not finish until perimeter_coverage_status.full_coverage_ready=true and no open/traversable/approachable entry remains.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
                 "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not use yaw-only observation or forward motion as detour; physically back off and strafe left/right until the front path clears.",
@@ -4848,12 +5021,16 @@ class Panel:
             "edge, or target_entry_alignment.needed=true, first re-center it with q/e or a/d and capture again. Do not "
             "run a long forward repeat when the candidate door is at the far left/right edge, because it can leave the "
             "field of view and cause the next frame to lock onto the wrong door.\n"
+            "A close door/closed door or a narrow non-traversable door is not evidence that the house search is finished. "
+            "It is only evidence that this face may not provide an enterable opening. If non_enterable_entry_status.enterable=false "
+            "and perimeter_coverage_status.full_coverage_ready=false, orbit around the target house with lateral movement "
+            "and short recentering yaws to observe the remaining perimeter bins before declaring no enterable entry.\n"
             "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
             "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
             "follow axis_aligned_transit_plan first. Prefer x-first or y-first horizontal/vertical world-axis movement "
             "that has fewer non-target house intersections; avoid diagonal shortcuts through intermediate houses. "
             "Only after reaching the target search boundary should you begin detailed building/entry judgment.\n"
-            "The current house search is finished when the UAV is within about 300cm of a reliable target-house entry; "
+            "The current house search is finished when the UAV is within about 300cm of a reliable enterable target-house entry; "
             "the executor will switch to the next house. Close-range depth can be noisy: if the target-house entry bbox "
             "fills most of the image or a reliable remembered target-house entry exists while the target-house distance "
             "is near 3-5m, treat it as reached rather than continuing through the doorway. If a target-house door/open "
