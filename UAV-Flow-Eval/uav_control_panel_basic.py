@@ -77,6 +77,8 @@ LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM = 520.0
 LLM_LARGE_ENTRY_BBOX_AREA_RATIO = 0.42
 LLM_LARGE_ENTRY_BBOX_HEIGHT_RATIO = 0.82
 LLM_LARGE_ENTRY_BBOX_WIDTH_RATIO = 0.68
+LLM_ENTRY_CENTER_MIN_X_NORM = 0.30
+LLM_ENTRY_CENTER_MAX_X_NORM = 0.70
 LLM_YAW_STEP_DEG = 30.0
 LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG = 18.0
 LLM_TARGET_REACQUIRE_MAX_YAW_STEPS = 12
@@ -94,6 +96,7 @@ LLM_AXIS_TRANSIT_ALIGN_TOLERANCE_DEG = 12.0
 LLM_AXIS_TRANSIT_BOUNDARY_MARGIN_CM = 180.0
 LLM_AXIS_TRANSIT_WAYPOINT_TOLERANCE_CM = 220.0
 LLM_AXIS_TRANSIT_HOUSE_CLEARANCE_CM = 180.0
+LLM_LONG_REPEAT_CLEARANCE_MARGIN_CM = 60.0
 LLM_DEPTH_MAX_VALID_CM = 1200.0
 LLM_DEPTH_CORRIDOR_X_RANGE = (0.35, 0.65)
 LLM_DEPTH_BODY_Y_RANGE = (0.35, 0.60)
@@ -309,7 +312,7 @@ class Panel:
         self.llm_control_api_key_var = tk.StringVar(value=os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("OPENAI_API_KEY", ""))
         self.llm_control_model_var = tk.StringVar(value=os.environ.get("ANTHROPIC_MODEL", "gpt-5.5"))
         self.llm_control_max_steps_var = tk.StringVar(value="20")
-        self.llm_control_repeat_cap_var = tk.StringVar(value="4")
+        self.llm_control_repeat_cap_var = tk.StringVar(value="12")
         self.llm_control_delay_ms_var = tk.StringVar(value="350")
         self.llm_control_timeout_s_var = tk.StringVar(value="60")
         self.llm_control_status_var = tk.StringVar(value="LLM Control: idle")
@@ -3164,12 +3167,18 @@ class Panel:
         image_height = max(1.0, float(target_context.get("image_height", 480) or 480))
         width = max(0.0, x2 - x1)
         height = max(0.0, y2 - y1)
+        center_x = x1 + width * 0.5
+        center_y = y1 + height * 0.5
         area_ratio = (width * height) / max(1.0, image_width * image_height)
         return {
             "x1": x1,
             "y1": y1,
             "x2": x2,
             "y2": y2,
+            "center_x": center_x,
+            "center_y": center_y,
+            "center_x_norm": center_x / image_width,
+            "center_y_norm": center_y / image_height,
             "width_ratio": width / image_width,
             "height_ratio": height / image_height,
             "area_ratio": area_ratio,
@@ -3402,6 +3411,43 @@ class Panel:
                     status["blocking_reason"] = str(height_aware.get("reason", "") or "")
         return status
 
+    def _safe_forward_repeat_from_depth(
+        self,
+        obstacle: Dict[str, Any],
+        *,
+        fallback_repeat: int = 1,
+        remaining_cm: Optional[float] = None,
+    ) -> int:
+        cap = max(1, int(self._llm_control_repeat_cap()))
+        fallback = max(1, min(cap, int(fallback_repeat or 1)))
+        if not isinstance(obstacle, dict) or bool(obstacle.get("blocking", False)):
+            return fallback
+        if bool(obstacle.get("too_close", False)):
+            return fallback
+        if bool(obstacle.get("low_obstacle_passable", False)):
+            safe_repeat = cap
+        else:
+            clearance = self._as_float_or_none(obstacle.get("effective_front_min_depth_cm"))
+            if clearance is None:
+                height_aware = obstacle.get("height_aware_front_corridor", {}) if isinstance(obstacle.get("height_aware_front_corridor"), dict) else {}
+                clearance = self._as_float_or_none(height_aware.get("effective_front_min_depth_cm"))
+            if clearance is None:
+                clearance = self._as_float_or_none(obstacle.get("front_min_depth_cm"))
+            severity = str(obstacle.get("severity", "") or "").lower()
+            if clearance is None:
+                safe_repeat = cap if severity in {"", "clear"} else fallback
+            else:
+                forward_step_cm = abs(float(MOVE_COMMANDS.get("w", {}).get("forward_cm", 20.0) or 20.0))
+                usable_cm = max(0.0, float(clearance) - float(LLM_LONG_REPEAT_CLEARANCE_MARGIN_CM))
+                safe_repeat = max(fallback, int(usable_cm // max(1.0, forward_step_cm)))
+                if severity not in {"", "clear", "low_passable"} and safe_repeat <= fallback:
+                    return fallback
+        if remaining_cm is not None:
+            forward_step_cm = abs(float(MOVE_COMMANDS.get("w", {}).get("forward_cm", 20.0) or 20.0))
+            needed_repeat = max(1, int(math.ceil(max(0.0, float(remaining_cm)) / max(1.0, forward_step_cm))))
+            safe_repeat = min(int(safe_repeat), needed_repeat)
+        return max(1, min(cap, int(safe_repeat)))
+
     def _detour_side_symbol_from_fusion(self, fusion: Dict[str, Any]) -> str:
         for key in ("recommended_subgoal", "target_conditioned_subgoal"):
             value = str(fusion.get(key, "") or "").lower()
@@ -3568,6 +3614,22 @@ class Panel:
                 repeat = min(self._llm_control_repeat_cap(), repeat)
                 need_capture = False
                 phase = "advance_to_target_boundary"
+        depth_safe_repeat = None
+        if action_symbol == "w":
+            remaining_for_repeat = None
+            if axis_plan:
+                remaining_for_repeat = self._as_float_or_none(axis_plan.get("axis_remaining_to_boundary_cm"))
+            if remaining_for_repeat is None:
+                distance_cm = self._as_float_or_none(boundary.get("target_house_distance_cm"))
+                search_distance_cm = self._as_float_or_none(boundary.get("search_distance_cm"))
+                if distance_cm is not None and search_distance_cm is not None:
+                    remaining_for_repeat = max(0.0, distance_cm - search_distance_cm)
+            depth_safe_repeat = self._safe_forward_repeat_from_depth(
+                obstacle,
+                fallback_repeat=int(repeat),
+                remaining_cm=remaining_for_repeat,
+            )
+            repeat = depth_safe_repeat
 
         original = dict(normalized)
         normalized = dict(normalized)
@@ -3587,6 +3649,7 @@ class Panel:
             "target_boundary_context": boundary,
             "axis_aligned_transit_plan": axis_plan,
             "front_obstacle": obstacle,
+            "depth_safe_repeat": depth_safe_repeat,
             "reason": "target house is still far outside its search boundary; use axis-aligned boundary transit to avoid diagonal crossing near intermediate houses",
         }
         reason = str(normalized.get("reason", "") or "")
@@ -3989,6 +4052,90 @@ class Panel:
         symbol = LLM_CONTROL_ACTION_ALIASES.get(text, text)
         return symbol if symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS else ""
 
+    def _entry_alignment_action_for_side(self, fusion: Dict[str, Any], side: str) -> str:
+        desired = {"left": {"q", "a"}, "right": {"e", "d"}}.get(str(side or "").lower(), set())
+        for key in ("target_conditioned_action_hint", "recommended_action_hint"):
+            text = str(fusion.get(key, "") or "").strip().lower().replace("-", "_").replace(" ", "_")
+            symbol = LLM_CONTROL_ACTION_ALIASES.get(text, text)
+            if symbol in desired:
+                return symbol
+        return "q" if side == "left" else "e"
+
+    def _target_entry_alignment_status(self, fusion: Dict[str, Any]) -> Dict[str, Any]:
+        class_name = self._semantic_class_name(fusion)
+        if not self._target_entry_visible_for_current_house(fusion) or not self._is_doorlike_class(class_name):
+            return {"needed": False}
+        metrics = self._semantic_bbox_metrics(fusion)
+        center_x = self._as_float_or_none(metrics.get("center_x_norm")) if metrics else None
+        if center_x is None:
+            assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
+            center_x = self._as_float_or_none(assessment.get("center_x_norm"))
+        if center_x is None:
+            return {"needed": False}
+        touches_left = bool(metrics.get("touches_left", 0.0)) if metrics else False
+        touches_right = bool(metrics.get("touches_right", 0.0)) if metrics else False
+        if touches_left or center_x < LLM_ENTRY_CENTER_MIN_X_NORM:
+            side = "left"
+        elif touches_right or center_x > LLM_ENTRY_CENTER_MAX_X_NORM:
+            side = "right"
+        else:
+            return {
+                "needed": False,
+                "center_x_norm": float(center_x),
+                "center_offset_norm": float(center_x) - 0.5,
+                "bbox_metrics": metrics,
+            }
+        return {
+            "needed": True,
+            "side": side,
+            "center_x_norm": float(center_x),
+            "center_offset_norm": float(center_x) - 0.5,
+            "action_symbol": self._entry_alignment_action_for_side(fusion, side),
+            "bbox_metrics": metrics,
+            "reason": "target entry bbox is too close to the image edge; re-center it before forward approach",
+        }
+
+    def _apply_target_entry_alignment_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        current_symbol = str(normalized.get("action_symbol", "") or "")
+        if current_symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        alignment = self._target_entry_alignment_status(fusion)
+        if not bool(alignment.get("needed", False)):
+            return normalized
+        distance_cm = self._candidate_entry_distance_cm(fusion)
+        if distance_cm is not None and distance_cm <= LLM_ENTRY_REACHED_DISTANCE_CM:
+            return normalized
+        action_symbol = str(alignment.get("action_symbol", "") or "")
+        if action_symbol not in LLM_CONTROL_ALLOWED_SYMBOLS:
+            action_symbol = "q" if str(alignment.get("side", "")) == "left" else "e"
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = action_symbol
+        normalized["repeat"] = 1
+        normalized["stop"] = False
+        normalized["need_capture_after"] = True
+        normalized["rule_override"] = {
+            "type": "align_visible_target_entry_before_forward",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "action_symbol": action_symbol,
+            "repeat": 1,
+            "entry_alignment": alignment,
+            "entry_distance_cm": distance_cm,
+            "entry_class": self._semantic_class_name(fusion),
+            "reason": "target-house entry is visible but near the image edge; align/re-center before any forward repeat",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        align_text = (
+            f"target-entry alignment override: {action_symbol} x1 "
+            f"(center_x={alignment.get('center_x_norm'):.3f}, side={alignment.get('side')})"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + align_text
+        return normalized
+
     def _target_reacquire_needed(self, fusion: Dict[str, Any], *, active_lock: bool = False) -> bool:
         if self._target_entry_visible_for_current_house(fusion):
             return False
@@ -4258,7 +4405,10 @@ class Panel:
             return {"override": False}
         if distance_cm is None or distance_cm <= LLM_APPROACHABLE_DISTANCE_MARGIN_CM:
             return {"override": False}
-        if not self._front_path_clear_for_approach(fusion):
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        if not self._front_path_clear_for_approach(fusion) and not bool(obstacle.get("low_obstacle_passable", False)):
+            return {"override": False}
+        if bool(self._target_entry_alignment_status(fusion).get("needed", False)):
             return {"override": False}
         current_symbol = str(normalized.get("action_symbol", "") or "")
         if current_symbol == "w":
@@ -4268,8 +4418,60 @@ class Panel:
             "distance_cm": float(distance_cm),
             "semantic_class": class_name,
             "target_state": str(fusion.get("target_conditioned_state", "") or ""),
+            "front_obstacle": obstacle,
             "reason": "target-house door is visible and farther than 3m; cross_ready=false does not block approach",
         }
+
+    def _apply_safe_forward_repeat_boost(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") != "w":
+            return normalized
+        current_repeat = max(1, int(normalized.get("repeat", 1) or 1))
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        if bool(self._target_entry_alignment_status(fusion).get("needed", False)):
+            return normalized
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        if bool(obstacle.get("blocking", False)) or bool(obstacle.get("too_close", False)):
+            return normalized
+
+        remaining_cm: Optional[float] = None
+        rule = normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}
+        axis_plan = rule.get("axis_aligned_transit_plan", {}) if isinstance(rule.get("axis_aligned_transit_plan"), dict) else {}
+        if axis_plan:
+            remaining_cm = self._as_float_or_none(axis_plan.get("axis_remaining_to_boundary_cm"))
+        if remaining_cm is None:
+            house_id = self._current_target_house_id_from_fusion(fusion)
+            boundary = self._target_boundary_context(fusion, house_id) if house_id else {}
+            if bool(boundary.get("outside_search_boundary", False)):
+                distance_cm = self._as_float_or_none(boundary.get("target_house_distance_cm"))
+                search_distance_cm = self._as_float_or_none(boundary.get("search_distance_cm"))
+                if distance_cm is not None and search_distance_cm is not None:
+                    remaining_cm = max(0.0, distance_cm - search_distance_cm)
+        if remaining_cm is None:
+            distance_cm = self._candidate_entry_distance_cm(fusion)
+            if distance_cm is not None and distance_cm > LLM_ENTRY_REACHED_DISTANCE_CM:
+                remaining_cm = max(0.0, distance_cm - LLM_ENTRY_REACHED_DISTANCE_CM)
+
+        boosted_repeat = self._safe_forward_repeat_from_depth(
+            obstacle,
+            fallback_repeat=current_repeat,
+            remaining_cm=remaining_cm,
+        )
+        if boosted_repeat <= current_repeat:
+            return normalized
+        normalized = dict(normalized)
+        normalized["repeat"] = int(boosted_repeat)
+        normalized["safe_forward_repeat_boost"] = {
+            "original_repeat": int(current_repeat),
+            "boosted_repeat": int(boosted_repeat),
+            "repeat_cap": int(self._llm_control_repeat_cap()),
+            "remaining_cm": round(float(remaining_cm), 2) if remaining_cm is not None else None,
+            "front_obstacle": obstacle,
+            "reason": "front depth/body corridor is safe enough for a longer continuous forward command",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        boost_text = f"safe-depth repeat boost: w x{current_repeat} -> x{int(boosted_repeat)}"
+        normalized["reason"] = (reason + " | " if reason else "") + boost_text
+        return normalized
 
     def _apply_llm_control_rule_overrides(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
         if bool(normalized.get("stop", False)):
@@ -4290,15 +4492,26 @@ class Panel:
         normalized = self._apply_target_boundary_transit_override(normalized, labeling_dir)
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
+        normalized = self._apply_target_entry_alignment_override(normalized, labeling_dir)
+        if bool(normalized.get("stop", False)):
+            return normalized
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "align_visible_target_entry_before_forward":
+            return normalized
         override = self._should_override_to_forward_approach(normalized, labeling_dir)
         if not bool(override.get("override", False)):
-            return normalized
+            return self._apply_safe_forward_repeat_boost(normalized, labeling_dir)
         distance_cm = float(override.get("distance_cm", 0.0) or 0.0)
         repeat = 1
         if distance_cm > 800.0:
             repeat = min(self._llm_control_repeat_cap(), 3)
         elif distance_cm > 450.0:
             repeat = min(self._llm_control_repeat_cap(), 2)
+        repeat = self._safe_forward_repeat_from_depth(
+            override.get("front_obstacle", {}) if isinstance(override.get("front_obstacle"), dict) else {},
+            fallback_repeat=int(repeat),
+            remaining_cm=max(0.0, distance_cm - LLM_ENTRY_REACHED_DISTANCE_CM),
+        )
         original = dict(normalized)
         normalized = dict(normalized)
         normalized["action_symbol"] = "w"
@@ -4314,7 +4527,7 @@ class Panel:
         self._append_llm_control_log(
             f"Rule override: action={original.get('action_symbol')} -> w repeat={repeat}; distance={distance_cm:.1f}cm"
         )
-        return normalized
+        return self._apply_safe_forward_repeat_boost(normalized, labeling_dir)
 
     def _llm_control_delay_s(self) -> float:
         try:
@@ -4326,7 +4539,7 @@ class Panel:
         try:
             return max(1, min(12, int(float(self.llm_control_repeat_cap_var.get().strip()))))
         except ValueError:
-            return 4
+            return 12
 
     def _llm_control_timeout_s(self) -> float:
         try:
@@ -4361,6 +4574,7 @@ class Panel:
         target_boundary_context = self._target_boundary_context(fusion, house_id) if house_id else {}
         axis_aligned_transit_plan = self._axis_aligned_boundary_transit_plan(fusion, house_id, target_boundary_context) if house_id else {}
         height_aware_front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        target_entry_alignment = self._target_entry_alignment_status(fusion)
         return {
             "version": "memory_aware_llm_control_prompt_v1",
             "prompt_type": "memory_aware_direct_control",
@@ -4385,6 +4599,7 @@ class Panel:
             "target_boundary_context": target_boundary_context,
             "axis_aligned_transit_plan": axis_aligned_transit_plan,
             "height_aware_front_obstacle": height_aware_front_obstacle,
+            "target_entry_alignment": target_entry_alignment,
             "completion_rules": {
                 "target_entry_reached": "Finish the current house when a reliable target-house door/open door/close door is within 300cm.",
                 "large_bbox_proxy": "Also treat the current house as reached when a target-house door/open door/close door fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
@@ -4395,6 +4610,8 @@ class Panel:
                 "target_boundary_transit": "If target_boundary_context.mode=transit_to_target_boundary, ignore intermediate non-target house entrances and follow axis_aligned_transit_plan first; start entrance/house judging only after reaching the target search boundary.",
                 "approach_vs_cross": "cross_ready=false means do not enter/cross the doorway yet; it does not mean you cannot approach the doorway.",
                 "forward_preference": "If a target-house entry is visible, associated with the active target, farther than 300cm, and the front path is not severely blocked, prefer forward.",
+                "safe_long_repeat": "When the body-height depth corridor is clear and the next move is straight forward, use repeat close to repeat_cap instead of conservative 2-4 step moves.",
+                "entry_centering": "When target_entry_alignment.needed=true, re-center the visible target entry with q/e or lateral a/d before forward approach; do not use long forward repeat while the door is near the image edge.",
             },
             "structured_observation": structured_input,
             "recent_llm_decisions": self.llm_control_decision_history[-6:],
@@ -4427,6 +4644,14 @@ class Panel:
             "concentrated in the lower image band while the UAV body-height corridor is clear. In that case do not "
             "treat bushes/curbs/low foreground objects as a hard front blockage; continue target-boundary transit or "
             "approach cautiously instead of backoff/side oscillation.\n"
+            "Be decisive with continuous forward motion: when the depth/body corridor is clear and the current plan is "
+            "axis-aligned transit or target-entry approach, use repeat near repeat_cap. Do not keep choosing tiny "
+            "w x2/w x3 moves when the available forward clearance supports a longer safe command; the executor will "
+            "still clamp repeat if depth clearance is not enough.\n"
+            "However, forward confidence requires visual alignment: if the target-house door/open door/close door is "
+            "near the image edge or target_entry_alignment.needed=true, first re-center it with q/e or a/d and capture "
+            "again. Do not run a long forward repeat when the door is at the far left/right edge, because it can leave "
+            "the field of view and cause the next frame to lock onto the wrong door.\n"
             "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
             "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
             "follow axis_aligned_transit_plan first. Prefer x-first or y-first horizontal/vertical world-axis movement "
