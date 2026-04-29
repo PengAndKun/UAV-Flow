@@ -74,11 +74,17 @@ LLM_ENTRY_REACHED_DISTANCE_CM = 300.0
 LLM_APPROACHABLE_DISTANCE_MARGIN_CM = 320.0
 LLM_ENTRY_REACHED_POSE_PROXY_CM = 350.0
 LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM = 520.0
+LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM = 900.0
 LLM_LARGE_ENTRY_BBOX_AREA_RATIO = 0.42
 LLM_LARGE_ENTRY_BBOX_HEIGHT_RATIO = 0.82
 LLM_LARGE_ENTRY_BBOX_WIDTH_RATIO = 0.68
 LLM_ENTRY_CENTER_MIN_X_NORM = 0.30
 LLM_ENTRY_CENTER_MAX_X_NORM = 0.70
+LLM_CENTERED_ENTRY_MIN_BBOX_AREA_RATIO = 0.22
+LLM_CENTERED_ENTRY_MIN_BBOX_HEIGHT_RATIO = 0.55
+LLM_CENTERED_ENTRY_MIN_DEPTH_CONFIDENCE = 0.60
+LLM_CENTERED_ENTRY_MIN_OPENING_WIDTH_CM = 90.0
+LLM_CENTERED_ENTRY_MIN_CLEARANCE_DEPTH_CM = 250.0
 LLM_YAW_STEP_DEG = 30.0
 LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG = 18.0
 LLM_TARGET_REACQUIRE_MAX_YAW_STEPS = 12
@@ -141,6 +147,7 @@ LLM_TASK_PLAN_OUTPUT_SCHEMA: Dict[str, Any] = {
         "entry_reached_distance_cm": LLM_ENTRY_REACHED_DISTANCE_CM,
         "entry_reached_pose_proxy_cm": LLM_ENTRY_REACHED_POSE_PROXY_CM,
         "entry_reached_large_bbox_proxy_cm": LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM,
+        "entry_reached_centered_depth_proxy_cm": LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM,
         "max_decisions_per_house": 40,
         "allow_no_entry_completion": True,
         "stop_on_needs_review": True,
@@ -2655,6 +2662,7 @@ class Panel:
                 "entry_reached_distance_cm": float(LLM_ENTRY_REACHED_DISTANCE_CM),
                 "entry_reached_pose_proxy_cm": float(LLM_ENTRY_REACHED_POSE_PROXY_CM),
                 "entry_reached_large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
+                "entry_reached_centered_depth_proxy_cm": float(LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM),
                 "max_decisions_per_house": 40,
                 "allow_no_entry_completion": True,
                 "stop_on_needs_review": True,
@@ -3217,6 +3225,119 @@ class Panel:
             severity = str(assessment.get("front_obstacle_severity", "") or "").lower()
             return severity not in {"high", "severe", "blocked", "critical"}
         return True
+
+    def _centered_depth_entry_completion_candidate(
+        self,
+        fusion: Dict[str, Any],
+        house_id: str,
+        max_distance_cm: float,
+    ) -> Dict[str, Any]:
+        class_name = self._semantic_class_name(fusion)
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        current_house_id = str(target_context.get("current_house_id", "") or "").strip()
+        target_house_id = str(target_context.get("target_house_id", "") or house_id or "").strip()
+        target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        in_target_house_area = bool(
+            target_entry_visible
+            or (house_id and target_house_id == house_id and current_house_id == house_id)
+        )
+        if not self._is_doorlike_class(class_name) or not in_target_house_area:
+            return {
+                "eligible": False,
+                "semantic_class": class_name,
+                "target_entry_visible": bool(target_entry_visible),
+                "current_house_id": current_house_id,
+                "target_house_id": target_house_id,
+                "reason": "not a door-like target-house entry candidate",
+            }
+
+        metrics = self._semantic_bbox_metrics(fusion)
+        assessment = fusion.get("semantic_depth_assessment", {}) if isinstance(fusion.get("semantic_depth_assessment"), dict) else {}
+        chosen_candidate = fusion.get("chosen_depth_candidate", {}) if isinstance(fusion.get("chosen_depth_candidate"), dict) else {}
+        center_source = ""
+        center_x = self._as_float_or_none(assessment.get("center_x_norm"))
+        if center_x is not None:
+            center_source = "semantic_depth_assessment"
+        if center_x is None:
+            center_x = self._as_float_or_none(chosen_candidate.get("center_x_norm"))
+            if center_x is not None:
+                center_source = "chosen_depth_candidate"
+        if center_x is None:
+            center_x = self._as_float_or_none(metrics.get("center_x_norm")) if metrics else None
+            if center_x is not None:
+                center_source = "semantic_yolo_bbox"
+
+        distance_cm = self._candidate_entry_distance_cm(fusion)
+        target_house_distance_cm = self._target_house_distance_cm(fusion)
+        area_ratio = self._as_float_or_none(metrics.get("area_ratio")) if metrics else None
+        height_ratio = self._as_float_or_none(metrics.get("height_ratio")) if metrics else None
+        depth_confidence = self._as_float_or_none(assessment.get("confidence"))
+        opening_width_cm = self._as_float_or_none(assessment.get("opening_width_cm"))
+        clearance_depth_cm = self._as_float_or_none(assessment.get("clearance_depth_cm"))
+        depth_gain_cm = self._as_float_or_none(assessment.get("depth_gain_cm"))
+
+        centered = bool(
+            center_x is not None
+            and LLM_ENTRY_CENTER_MIN_X_NORM <= center_x <= LLM_ENTRY_CENTER_MAX_X_NORM
+        )
+        bbox_big_enough = bool(
+            self._is_large_near_entry_bbox(fusion)
+            or (area_ratio is not None and area_ratio >= LLM_CENTERED_ENTRY_MIN_BBOX_AREA_RATIO)
+            or (height_ratio is not None and height_ratio >= LLM_CENTERED_ENTRY_MIN_BBOX_HEIGHT_RATIO)
+        )
+        distance_ok = bool(
+            (distance_cm is not None and distance_cm <= max_distance_cm)
+            or (target_house_distance_cm is not None and target_house_distance_cm <= max_distance_cm)
+        )
+        depth_ok = bool(
+            assessment
+            and bool(assessment.get("traversable", False))
+            and (depth_confidence is not None and depth_confidence >= LLM_CENTERED_ENTRY_MIN_DEPTH_CONFIDENCE)
+            and (opening_width_cm is not None and opening_width_cm >= LLM_CENTERED_ENTRY_MIN_OPENING_WIDTH_CM)
+            and (
+                (clearance_depth_cm is not None and clearance_depth_cm >= LLM_CENTERED_ENTRY_MIN_CLEARANCE_DEPTH_CM)
+                or (depth_gain_cm is not None and depth_gain_cm >= LLM_CENTERED_ENTRY_MIN_CLEARANCE_DEPTH_CM)
+            )
+        )
+        front_path_clear = self._front_path_clear_for_approach(fusion)
+        eligible = bool(centered and bbox_big_enough and distance_ok and depth_ok and front_path_clear)
+        return {
+            "eligible": eligible,
+            "semantic_class": class_name,
+            "target_entry_visible": bool(target_entry_visible),
+            "current_house_id": current_house_id,
+            "target_house_id": target_house_id,
+            "center_x_norm": float(center_x) if center_x is not None else None,
+            "center_source": center_source,
+            "centered": centered,
+            "bbox_big_enough": bbox_big_enough,
+            "distance_ok": distance_ok,
+            "depth_ok": depth_ok,
+            "front_path_clear": front_path_clear,
+            "entry_distance_cm": distance_cm,
+            "target_house_distance_cm": target_house_distance_cm,
+            "max_distance_cm": float(max_distance_cm),
+            "bbox_metrics": metrics,
+            "semantic_depth_assessment": {
+                "entry_distance_cm": assessment.get("entry_distance_cm"),
+                "opening_width_cm": assessment.get("opening_width_cm"),
+                "clearance_depth_cm": assessment.get("clearance_depth_cm"),
+                "depth_gain_cm": assessment.get("depth_gain_cm"),
+                "traversable": assessment.get("traversable"),
+                "crossing_ready": assessment.get("crossing_ready"),
+                "confidence": assessment.get("confidence"),
+            },
+            "thresholds": {
+                "center_x_min": float(LLM_ENTRY_CENTER_MIN_X_NORM),
+                "center_x_max": float(LLM_ENTRY_CENTER_MAX_X_NORM),
+                "min_bbox_area_ratio": float(LLM_CENTERED_ENTRY_MIN_BBOX_AREA_RATIO),
+                "min_bbox_height_ratio": float(LLM_CENTERED_ENTRY_MIN_BBOX_HEIGHT_RATIO),
+                "min_depth_confidence": float(LLM_CENTERED_ENTRY_MIN_DEPTH_CONFIDENCE),
+                "min_opening_width_cm": float(LLM_CENTERED_ENTRY_MIN_OPENING_WIDTH_CM),
+                "min_clearance_depth_cm": float(LLM_CENTERED_ENTRY_MIN_CLEARANCE_DEPTH_CM),
+            },
+            "reason": "centered YOLO+Depth target-house entry candidate satisfies near-entry completion proxy" if eligible else "centered-depth completion proxy not satisfied",
+        }
 
     def _depth_cm_path_from_labeling_dir(self, labeling_dir: str) -> Optional[Path]:
         if not labeling_dir:
@@ -4373,7 +4494,9 @@ class Panel:
         large_entry_bbox = self._is_large_near_entry_bbox(fusion)
         reliable_memory_entry = self._best_reliable_memory_entry_for_house(labeling_dir, house_id)
         front_path_clear = self._front_path_clear_for_approach(fusion)
-        threshold = float((self.llm_task_plan.get("execution_policy", {}) if isinstance(self.llm_task_plan, dict) else {}).get("entry_reached_distance_cm", LLM_ENTRY_REACHED_DISTANCE_CM))
+        execution_policy = self.llm_task_plan.get("execution_policy", {}) if isinstance(self.llm_task_plan, dict) else {}
+        threshold = float(execution_policy.get("entry_reached_distance_cm", LLM_ENTRY_REACHED_DISTANCE_CM))
+        centered_depth_proxy_cm = float(execution_policy.get("entry_reached_centered_depth_proxy_cm", LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM))
         if (
             target_entry_visible
             and self._is_doorlike_class(class_name)
@@ -4390,6 +4513,23 @@ class Panel:
                 "distance_threshold_cm": threshold,
                 "semantic_class": class_name,
                 "reason": f"target-house door-like entry reached within {threshold:.0f}cm",
+            }
+        centered_depth_completion = self._centered_depth_entry_completion_candidate(fusion, house_id, centered_depth_proxy_cm)
+        if bool(centered_depth_completion.get("eligible", False)):
+            return {
+                "completed": True,
+                "finish_type": "target_entry_reached_centered_depth_proxy",
+                "house_id": house_id,
+                "step_index": step_index,
+                "source_labeling_dir": str(labeling_dir),
+                "entry_distance_cm": distance_cm,
+                "target_house_distance_cm": target_house_distance_cm,
+                "distance_threshold_cm": threshold,
+                "centered_depth_proxy_cm": centered_depth_proxy_cm,
+                "semantic_class": class_name,
+                "bbox_metrics": bbox_metrics,
+                "centered_depth_completion": centered_depth_completion,
+                "reason": "target-house door is roughly centered and YOLO+Depth indicates a traversable near-entry opening, so the current house search is complete",
             }
         if (
             target_entry_visible
@@ -4445,6 +4585,7 @@ class Panel:
             "large_entry_bbox": large_entry_bbox,
             "bbox_metrics": bbox_metrics,
             "front_path_clear": front_path_clear,
+            "centered_depth_completion": centered_depth_completion,
             "reliable_memory_entry_id": str(reliable_memory_entry.get("entry_id", "") or "") if reliable_memory_entry else "",
         }
 
@@ -4645,6 +4786,7 @@ class Panel:
                 "entry_reached_distance_cm": float(LLM_ENTRY_REACHED_DISTANCE_CM),
                 "entry_reached_pose_proxy_cm": float(LLM_ENTRY_REACHED_POSE_PROXY_CM),
                 "entry_reached_large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
+                "entry_reached_centered_depth_proxy_cm": float(LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM),
             },
             "target_reacquire_lock": dict(self.llm_target_reacquire_lock) if isinstance(self.llm_target_reacquire_lock, dict) else {},
             "obstacle_detour_lock": dict(self.llm_obstacle_detour_lock) if isinstance(self.llm_obstacle_detour_lock, dict) else {},
@@ -4655,6 +4797,7 @@ class Panel:
             "completion_rules": {
                 "target_entry_reached": "Finish the current house when a reliable target-house door/open door/close door is within 300cm.",
                 "large_bbox_proxy": "Also treat the current house as reached when a target-house door/open door/close door fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
+                "centered_depth_proxy": "Also finish when a target-house door/open door/close door is roughly centered, has a sufficiently large YOLO bbox, YOLO+Depth marks the opening traversable, and the doorway/target-house distance is within the near-entry proxy range.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
                 "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not use yaw-only observation or forward motion as detour; physically back off and strafe left/right until the front path clears.",
@@ -4713,7 +4856,9 @@ class Panel:
             "The current house search is finished when the UAV is within about 300cm of a reliable target-house entry; "
             "the executor will switch to the next house. Close-range depth can be noisy: if the target-house entry bbox "
             "fills most of the image or a reliable remembered target-house entry exists while the target-house distance "
-            "is near 3-5m, treat it as reached rather than continuing through the doorway. Avoid left/right oscillation; "
+            "is near 3-5m, treat it as reached rather than continuing through the doorway. If a target-house door/open "
+            "door/close door is roughly centered, large enough in YOLO/RGB, and semantic depth says the opening is "
+            "traversable within the near-entry proxy range, stop the current house instead of yawing away for reacquire. Avoid left/right oscillation; "
             "if lateral moves do not improve evidence, move forward, back off, yaw to a new sector, or stop for review.\n"
             "If the search appears complete or unsafe, set stop=true.\n"
             "Return only one JSON object. No markdown. No commentary."
