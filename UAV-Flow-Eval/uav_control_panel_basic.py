@@ -75,6 +75,9 @@ LLM_APPROACHABLE_DISTANCE_MARGIN_CM = 320.0
 LLM_ENTRY_REACHED_POSE_PROXY_CM = 350.0
 LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM = 520.0
 LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM = 900.0
+LLM_PROXY_STOP_MIN_OBSERVED_FACE_COUNT = 2
+LLM_PROXY_STOP_MIN_OBSERVED_COVERAGE_RATIO = 0.50
+LLM_PREMATURE_STOP_CONTINUE_REPEAT = 3
 LLM_LARGE_ENTRY_BBOX_AREA_RATIO = 0.42
 LLM_LARGE_ENTRY_BBOX_HEIGHT_RATIO = 0.82
 LLM_LARGE_ENTRY_BBOX_WIDTH_RATIO = 0.68
@@ -163,6 +166,8 @@ LLM_TASK_PLAN_OUTPUT_SCHEMA: Dict[str, Any] = {
         "entry_reached_pose_proxy_cm": LLM_ENTRY_REACHED_POSE_PROXY_CM,
         "entry_reached_large_bbox_proxy_cm": LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM,
         "entry_reached_centered_depth_proxy_cm": LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM,
+        "proxy_stop_min_observed_face_count": LLM_PROXY_STOP_MIN_OBSERVED_FACE_COUNT,
+        "proxy_stop_min_observed_coverage_ratio": LLM_PROXY_STOP_MIN_OBSERVED_COVERAGE_RATIO,
         "max_decisions_per_house": 40,
         "allow_no_entry_completion": True,
         "stop_on_needs_review": True,
@@ -4894,6 +4899,105 @@ class Panel:
             return best
         return {}
 
+    def _entry_stop_gate_status(
+        self,
+        labeling_dir: str,
+        fusion: Dict[str, Any],
+        house_id: str,
+        *,
+        actual_threshold_cm: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        threshold = float(actual_threshold_cm if actual_threshold_cm is not None else LLM_ENTRY_REACHED_DISTANCE_CM)
+        distance_cm = self._candidate_entry_distance_cm(fusion)
+        target_house_distance_cm = self._target_house_distance_cm(fusion)
+        target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        semantic_class = self._semantic_class_name(fusion)
+        doorlike_candidate = self._is_doorlike_class(semantic_class)
+        enterable_evidence = self._is_enterable_entry_evidence(fusion)
+        memory_completion = self._memory_completion_for_house(labeling_dir, house_id) if house_id else {}
+        perimeter_status = self._perimeter_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+        face_status = self._face_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+
+        observed_face_count = int(face_status.get("observed_face_count", 0) or 0)
+        face_observed_ratio = self._as_float_or_none(face_status.get("observed_coverage_ratio")) or 0.0
+        perimeter_observed_ratio = self._as_float_or_none(perimeter_status.get("observed_coverage_ratio")) or 0.0
+        full_coverage_ready = bool(
+            face_status.get("full_coverage_ready", False)
+            or face_status.get("face_coverage_ready", False)
+            or perimeter_status.get("full_coverage_ready", False)
+        )
+        coverage_enough_for_proxy = bool(
+            full_coverage_ready
+            or observed_face_count >= LLM_PROXY_STOP_MIN_OBSERVED_FACE_COUNT
+            or face_observed_ratio >= LLM_PROXY_STOP_MIN_OBSERVED_COVERAGE_RATIO
+            or perimeter_observed_ratio >= LLM_PROXY_STOP_MIN_OBSERVED_COVERAGE_RATIO
+        )
+        actual_entry_reached = bool(
+            target_entry_visible
+            and enterable_evidence
+            and distance_cm is not None
+            and distance_cm <= threshold
+        )
+        near_entry_proxy_close = bool(
+            target_entry_visible
+            and enterable_evidence
+            and (
+                (distance_cm is not None and distance_cm <= LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM)
+                or (
+                    target_house_distance_cm is not None
+                    and target_house_distance_cm <= LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM
+                )
+            )
+        )
+        no_entry_after_full_coverage = bool(memory_completion.get("no_entry_after_full_coverage", False))
+        proxy_stop_allowed = bool(near_entry_proxy_close and coverage_enough_for_proxy)
+        candidate_entry_evidence = bool(doorlike_candidate and enterable_evidence and distance_cm is not None)
+        block_premature_proxy_stop = bool(
+            candidate_entry_evidence
+            and not actual_entry_reached
+            and not proxy_stop_allowed
+            and not no_entry_after_full_coverage
+        )
+
+        blocked_reason = ""
+        if block_premature_proxy_stop:
+            blocked_reason = (
+                "enterable door-like evidence is present, but it is still beyond the true 300cm reach threshold "
+                "and the house-face/perimeter coverage is insufficient for a proxy stop"
+            )
+        return {
+            "house_id": str(house_id or ""),
+            "allow_stop": bool(
+                no_entry_after_full_coverage
+                or actual_entry_reached
+                or proxy_stop_allowed
+                or not block_premature_proxy_stop
+            ),
+            "block_premature_proxy_stop": block_premature_proxy_stop,
+            "actual_entry_reached": actual_entry_reached,
+            "proxy_stop_allowed": proxy_stop_allowed,
+            "near_entry_proxy_close": near_entry_proxy_close,
+            "coverage_enough_for_proxy": coverage_enough_for_proxy,
+            "no_entry_after_full_coverage": no_entry_after_full_coverage,
+            "target_entry_visible": bool(target_entry_visible),
+            "semantic_class": semantic_class,
+            "doorlike_candidate": doorlike_candidate,
+            "enterable_evidence": bool(enterable_evidence),
+            "entry_distance_cm": distance_cm,
+            "target_house_distance_cm": target_house_distance_cm,
+            "actual_threshold_cm": threshold,
+            "large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
+            "observed_face_count": observed_face_count,
+            "min_observed_face_count_for_proxy": int(LLM_PROXY_STOP_MIN_OBSERVED_FACE_COUNT),
+            "face_observed_ratio": face_observed_ratio,
+            "perimeter_observed_ratio": perimeter_observed_ratio,
+            "min_observed_coverage_ratio_for_proxy": float(LLM_PROXY_STOP_MIN_OBSERVED_COVERAGE_RATIO),
+            "full_coverage_ready": full_coverage_ready,
+            "observed_faces": face_status.get("observed_faces", []) if isinstance(face_status.get("observed_faces"), list) else [],
+            "observed_bins": perimeter_status.get("observed_bins", []) if isinstance(perimeter_status.get("observed_bins"), list) else [],
+            "blocked_reason": blocked_reason,
+        }
+
     def _evaluate_llm_house_completion(self, labeling_dir: str) -> Dict[str, Any]:
         metadata = self._metadata_from_labeling_dir(labeling_dir)
         fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
@@ -4926,6 +5030,7 @@ class Panel:
         execution_policy = self.llm_task_plan.get("execution_policy", {}) if isinstance(self.llm_task_plan, dict) else {}
         threshold = float(execution_policy.get("entry_reached_distance_cm", LLM_ENTRY_REACHED_DISTANCE_CM))
         centered_depth_proxy_cm = float(execution_policy.get("entry_reached_centered_depth_proxy_cm", LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM))
+        stop_gate = self._entry_stop_gate_status(labeling_dir, fusion, house_id, actual_threshold_cm=threshold)
         if (
             target_entry_visible
             and self._is_enterable_entry_evidence(fusion)
@@ -4942,9 +5047,10 @@ class Panel:
                 "distance_threshold_cm": threshold,
                 "semantic_class": class_name,
                 "reason": f"target-house door-like entry reached within {threshold:.0f}cm",
+                "stop_gate_status": stop_gate,
             }
         centered_depth_completion = self._centered_depth_entry_completion_candidate(fusion, house_id, centered_depth_proxy_cm)
-        if bool(centered_depth_completion.get("eligible", False)):
+        if bool(centered_depth_completion.get("eligible", False)) and bool(stop_gate.get("proxy_stop_allowed", False)):
             return {
                 "completed": True,
                 "finish_type": "target_entry_reached_centered_depth_proxy",
@@ -4958,13 +5064,20 @@ class Panel:
                 "semantic_class": class_name,
                 "bbox_metrics": bbox_metrics,
                 "centered_depth_completion": centered_depth_completion,
+                "stop_gate_status": stop_gate,
                 "reason": "target-house door is roughly centered and YOLO+Depth indicates a traversable near-entry opening, so the current house search is complete",
             }
+        if bool(centered_depth_completion.get("eligible", False)):
+            centered_depth_completion = dict(centered_depth_completion)
+            centered_depth_completion["eligible"] = False
+            centered_depth_completion["stop_gate_status"] = stop_gate
+            centered_depth_completion["reason"] = "centered-depth proxy was blocked because search coverage is not sufficient and the entry is still beyond the true reach threshold"
         if (
             target_entry_visible
             and self._is_enterable_entry_evidence(fusion)
             and large_entry_bbox
             and front_path_clear
+            and bool(stop_gate.get("proxy_stop_allowed", False))
             and (
                 (target_house_distance_cm is not None and target_house_distance_cm <= LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM)
                 or (distance_cm is not None and distance_cm <= LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM)
@@ -4982,6 +5095,7 @@ class Panel:
                 "large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
                 "semantic_class": class_name,
                 "bbox_metrics": bbox_metrics,
+                "stop_gate_status": stop_gate,
                 "reason": "target-house entry fills most of the view and the UAV is close enough to treat the doorway as reached",
             }
         if (
@@ -5001,6 +5115,7 @@ class Panel:
                 "semantic_class": class_name,
                 "reliable_memory_entry_id": str(reliable_memory_entry.get("entry_id", "") or ""),
                 "reliable_memory_entry_type": str(reliable_memory_entry.get("entry_type", "") or ""),
+                "stop_gate_status": stop_gate,
                 "reason": "semantic door evidence became unreliable at close range, but remembered target-house entry and pose distance indicate the entry is reached",
             }
         return {
@@ -5016,6 +5131,7 @@ class Panel:
             "front_path_clear": front_path_clear,
             "centered_depth_completion": centered_depth_completion,
             "reliable_memory_entry_id": str(reliable_memory_entry.get("entry_id", "") or "") if reliable_memory_entry else "",
+            "stop_gate_status": stop_gate,
         }
 
     def _should_override_to_forward_approach(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
@@ -5325,9 +5441,70 @@ class Panel:
         normalized["reason"] = (reason + " | " if reason else "") + boost_text
         return normalized
 
+    def _apply_premature_stop_continue_search_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if not bool(normalized.get("stop", False)):
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        gate = self._entry_stop_gate_status(labeling_dir, fusion, house_id)
+        if not bool(gate.get("block_premature_proxy_stop", False)):
+            return normalized
+
+        original = dict(normalized)
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        distance_cm = self._as_float_or_none(gate.get("entry_distance_cm"))
+        remaining_cm = None
+        if distance_cm is not None:
+            remaining_cm = max(0.0, distance_cm - float(LLM_ENTRY_REACHED_DISTANCE_CM))
+        repeat = self._safe_forward_repeat_from_depth(
+            obstacle,
+            fallback_repeat=int(LLM_PREMATURE_STOP_CONTINUE_REPEAT),
+            remaining_cm=remaining_cm,
+        )
+        repeat = max(1, min(int(LLM_PREMATURE_STOP_CONTINUE_REPEAT), int(repeat), int(self._llm_control_repeat_cap())))
+
+        normalized = dict(normalized)
+        normalized["stop"] = False
+        normalized["action_symbol"] = "w"
+        normalized["repeat"] = repeat
+        normalized["need_capture_after"] = True
+        normalized["stop_gate_status"] = gate
+        normalized["rule_override"] = {
+            "type": "premature_stop_continue_search",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "original_stop": original.get("stop"),
+            "stop_gate_status": gate,
+            "front_obstacle": obstacle,
+            "reason": "proxy stop blocked: only partial house-face coverage is available and the entry is still beyond the true reach threshold",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        override_reason = (
+            "proxy stop blocked by coverage gate; continue forward/over traversable foreground while collecting the next face"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + override_reason
+        self._append_llm_control_log(
+            "Rule override: blocked premature stop; "
+            f"house={house_id} entry_dist={distance_cm if distance_cm is not None else 'unknown'}cm "
+            f"faces={gate.get('observed_face_count')}/{gate.get('min_observed_face_count_for_proxy')} -> w x{repeat}"
+        )
+
+        routed = self._apply_front_obstacle_detour_override(normalized, labeling_dir)
+        if routed is not normalized:
+            routed = dict(routed)
+            routed.setdefault("stop_gate_status", gate)
+        return routed
+
     def _apply_llm_control_rule_overrides(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
         if bool(normalized.get("stop", False)):
-            return normalized
+            normalized = self._apply_premature_stop_continue_search_override(normalized, labeling_dir)
+            if bool(normalized.get("stop", False)):
+                return normalized
+            rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+            if rule_type == "premature_stop_continue_search":
+                return normalized
         normalized = self._apply_target_reacquire_yaw_lock(normalized, labeling_dir)
         if bool(normalized.get("stop", False)):
             return normalized
@@ -5460,6 +5637,8 @@ class Panel:
                 "entry_reached_pose_proxy_cm": float(LLM_ENTRY_REACHED_POSE_PROXY_CM),
                 "entry_reached_large_bbox_proxy_cm": float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM),
                 "entry_reached_centered_depth_proxy_cm": float(LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM),
+                "proxy_stop_min_observed_face_count": int(LLM_PROXY_STOP_MIN_OBSERVED_FACE_COUNT),
+                "proxy_stop_min_observed_coverage_ratio": float(LLM_PROXY_STOP_MIN_OBSERVED_COVERAGE_RATIO),
             },
             "target_reacquire_lock": dict(self.llm_target_reacquire_lock) if isinstance(self.llm_target_reacquire_lock, dict) else {},
             "obstacle_detour_lock": dict(self.llm_obstacle_detour_lock) if isinstance(self.llm_obstacle_detour_lock, dict) else {},
@@ -5475,6 +5654,7 @@ class Panel:
                 "target_entry_reached": "Finish the current house when a reliable enterable target-house entry is within 300cm. close door/closed door is not enterable completion evidence.",
                 "large_bbox_proxy": "Also treat the current house as reached when an enterable target-house entry fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
                 "centered_depth_proxy": "Also finish when an enterable target-house entry is roughly centered, has a sufficiently large YOLO bbox, YOLO+Depth marks the opening traversable, and the doorway/target-house distance is within the near-entry proxy range.",
+                "coverage_gated_proxy_stop": "Near-entry proxy stop is coverage-gated: if the entry is still beyond 300cm and only one face or low perimeter coverage has been observed, do not set stop=true. Continue approaching/crossing a traversable low wall or continue face search until true reach or sufficient coverage.",
                 "closed_entry_full_coverage": "If only close door/closed/non-traversable narrow-door evidence is found, do not finish until perimeter_coverage_status.full_coverage_ready=true and no open/traversable/approachable entry remains.",
                 "face_edge_coverage": "During no-entry/closed-entry search, use face_coverage_status to avoid revisiting the same house face segment. Continue orbiting toward unobserved face segments before declaring no enterable entry.",
                 "face_corner_forward": "If the current face edge segment is already repeatedly observed and the front corridor has enough clearance, advance forward along the house edge to reveal the next face instead of continuing lateral strafe into side obstacles. Do not use corner-forward when the front wall/porch/ceiling is closer than the safety clearance.",
@@ -5557,6 +5737,9 @@ class Panel:
             "is near 3-5m, treat it as reached rather than continuing through the doorway. If a target-house door/open "
             "door/close door is roughly centered, large enough in YOLO/RGB, and semantic depth says the opening is "
             "traversable within the near-entry proxy range, stop the current house instead of yawing away for reacquire. Avoid left/right oscillation; "
+            "But do not use this near-entry proxy stop when only one house face or low perimeter coverage has been observed "
+            "and the entry is still beyond 300cm. In that case continue approaching, cross/over traversable foreground "
+            "such as a low wall when depth allows, or keep searching the next face instead of ending the house early. "
             "if lateral moves do not improve evidence, move forward, back off, yaw to a new sector, or stop for review.\n"
             "If the search appears complete or unsafe, set stop=true.\n"
             "Return only one JSON object. No markdown. No commentary."
