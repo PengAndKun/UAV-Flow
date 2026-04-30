@@ -70,6 +70,8 @@ LLM_CONTROL_OUTPUT_SCHEMA: Dict[str, Any] = {
     "confidence": 0.85,
     "reason": "Short memory-aware control rationale.",
 }
+LLM_CONTROL_REQUEST_MAX_ATTEMPTS = 3
+LLM_CONTROL_REQUEST_RETRY_DELAY_S = 2.0
 LLM_ENTRY_REACHED_DISTANCE_CM = 300.0
 LLM_APPROACHABLE_DISTANCE_MARGIN_CM = 320.0
 LLM_ENTRY_REACHED_POSE_PROXY_CM = 350.0
@@ -98,6 +100,10 @@ LLM_FACE_COVERAGE_CORNER_FORWARD_REPEAT = 5
 LLM_FACE_COVERAGE_CORNER_BEARING_LIMIT_DEG = 35.0
 LLM_FACE_COVERAGE_CORNER_MIN_FORWARD_CLEARANCE_CM = 260.0
 LLM_FACE_COVERAGE_CORNER_KEEP_CLEARANCE_CM = 180.0
+LLM_FACE_RANGE_ADVANCE_REPEAT_THRESHOLD = 8
+LLM_FACE_RANGE_ADVANCE_REPEAT = 3
+LLM_FACE_RANGE_ADVANCE_MIN_CLEARANCE_CM = 210.0
+LLM_FACE_RANGE_ADVANCE_NONENTERABLE_STOP_CM = 380.0
 LLM_COVERAGE_ALTITUDE_RAISE_CM = 120.0
 LLM_COVERAGE_ALTITUDE_STEP_REPEAT = 3
 LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM = 25.0
@@ -112,6 +118,9 @@ LLM_OBSTACLE_FRONT_MIN_BACKOFF_CM = 90.0
 LLM_OBSTACLE_DETOUR_SIDE_STEPS = 3
 LLM_OBSTACLE_DETOUR_MAX_STEPS = 10
 LLM_OBSTACLE_DEFAULT_DETOUR_SYMBOL = "a"
+LLM_LATERAL_SAFETY_FORWARD_REPEAT = 3
+LLM_COLLISION_WARNING_FRONT_MIN_CM = 180.0
+LLM_COLLISION_CRITICAL_FRONT_MIN_CM = 90.0
 LLM_TARGET_BOUNDARY_MARGIN_CM = 800.0
 LLM_TARGET_BOUNDARY_MIN_SEARCH_DISTANCE_CM = 1800.0
 LLM_TARGET_BOUNDARY_ALIGN_TOLERANCE_DEG = 18.0
@@ -347,6 +356,7 @@ class Panel:
         self.llm_control_last_action_var = tk.StringVar(value="Last action: none")
         self.llm_control_last_capture_var = tk.StringVar(value="Last capture: none")
         self.llm_control_reason_var = tk.StringVar(value="Reason: -")
+        self.llm_collision_warning_var = tk.StringVar(value="Collision: clear")
         self.llm_task_text_var = tk.StringVar(value="先探索 house 1，再探索 house 3。")
         self.llm_task_status_var = tk.StringVar(value="LLM Task: no plan")
         self.llm_task_plan_summary_var = tk.StringVar(value="Plan: none")
@@ -2824,6 +2834,7 @@ class Panel:
                 self.llm_control_step_var,
                 self.llm_control_last_action_var,
                 self.llm_control_last_capture_var,
+                self.llm_collision_warning_var,
                 self.llm_control_reason_var,
             )
         ):
@@ -2962,21 +2973,45 @@ class Panel:
                     break
 
                 self._set_llm_control_var(self.llm_control_last_capture_var, f"Last capture: {Path(labeling_dir).parent.name}")
+                fusion_for_warning = self._fusion_payload_from_labeling_dir(labeling_dir)
+                capture_collision_warning = self._collision_warning_status(fusion_for_warning, labeling_dir)
+                self._set_llm_control_var(
+                    self.llm_collision_warning_var,
+                    self._format_collision_warning_status(capture_collision_warning),
+                )
                 completion = self._evaluate_llm_house_completion(labeling_dir)
                 if bool(completion.get("completed", False)):
                     switched = self._advance_llm_task_plan_after_completion(completion)
                     if switched:
                         continue
                     break
-                decision = self._request_llm_control_decision(labeling_dir=labeling_dir, decision_index=decision_index)
+                decision = self._request_llm_control_decision_with_retries(labeling_dir=labeling_dir, decision_index=decision_index)
                 normalized = self._normalize_llm_control_decision(decision)
                 normalized = self._apply_llm_control_rule_overrides(normalized, labeling_dir)
-                self._write_llm_control_decision(labeling_dir, decision, normalized, decision_index)
-                self.llm_control_decision_history.append(normalized)
-                self.llm_control_decision_history = self.llm_control_decision_history[-12:]
 
                 symbol = str(normalized.get("action_symbol", "x") or "x")
                 repeat = int(normalized.get("repeat", 1) or 1)
+                planned_collision_warning = normalized.get("collision_warning_status")
+                if not isinstance(planned_collision_warning, dict):
+                    planned_collision_warning = self._collision_warning_status(
+                        fusion_for_warning,
+                        labeling_dir,
+                        planned_action_symbol=symbol,
+                        planned_repeat=repeat,
+                    )
+                    normalized["collision_warning_status"] = planned_collision_warning
+                self._set_llm_control_var(
+                    self.llm_collision_warning_var,
+                    self._format_collision_warning_status(planned_collision_warning),
+                )
+                if str(planned_collision_warning.get("level", "clear") or "clear") != "clear":
+                    self._append_llm_control_log(
+                        "Collision warning: "
+                        + self._format_collision_warning_status(planned_collision_warning)
+                    )
+                self._write_llm_control_decision(labeling_dir, decision, normalized, decision_index)
+                self.llm_control_decision_history.append(normalized)
+                self.llm_control_decision_history = self.llm_control_decision_history[-12:]
                 reason = str(normalized.get("reason", "") or "-")
                 confidence = float(normalized.get("confidence", 0.0) or 0.0)
                 self._set_llm_control_var(
@@ -3701,6 +3736,68 @@ class Panel:
                 return clearance
         return None
 
+    def _yaw_symbol_for_lateral_symbol(self, lateral_symbol: str) -> str:
+        return "q" if str(lateral_symbol or "").strip().lower() == "a" else "e"
+
+    def _labeling_is_yaw_confirmation_capture(self, labeling_dir: str) -> bool:
+        metadata = self._metadata_from_labeling_dir(labeling_dir)
+        capture_source = str(metadata.get("capture_source", "") or "").strip().lower()
+        if capture_source == "llm_yaw":
+            return True
+        note = str(metadata.get("note", "") or "").strip().lower()
+        return "immediate capture after yaw" in note
+
+    def _collision_warning_status(
+        self,
+        fusion: Dict[str, Any],
+        labeling_dir: str,
+        *,
+        planned_action_symbol: str = "",
+        planned_repeat: int = 1,
+    ) -> Dict[str, Any]:
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        front_clearance_cm = self._front_clearance_cm_from_obstacle(obstacle)
+        action_symbol = str(planned_action_symbol or "").strip().lower()
+        yaw_confirmed = self._labeling_is_yaw_confirmation_capture(labeling_dir)
+        lateral_unconfirmed = bool(action_symbol in {"a", "d"} and not yaw_confirmed)
+        too_close = bool(obstacle.get("too_close", False))
+        blocking = bool(obstacle.get("blocking", False))
+        level = "clear"
+        reasons: List[str] = []
+        if too_close or (front_clearance_cm is not None and front_clearance_cm <= LLM_COLLISION_CRITICAL_FRONT_MIN_CM):
+            level = "critical"
+            reasons.append("front/body-height clearance is critically close")
+        elif blocking or (front_clearance_cm is not None and front_clearance_cm <= LLM_COLLISION_WARNING_FRONT_MIN_CM):
+            level = "warning"
+            reasons.append("front/body-height clearance is near the warning threshold")
+        if lateral_unconfirmed:
+            level = "warning" if level == "clear" else level
+            reasons.append("lateral a/d motion requested before yaw-confirming side clearance")
+        return {
+            "level": level,
+            "planned_action_symbol": action_symbol,
+            "planned_repeat": int(planned_repeat or 1),
+            "front_clearance_cm": front_clearance_cm,
+            "front_obstacle": obstacle,
+            "lateral_unconfirmed": lateral_unconfirmed,
+            "yaw_confirmation_capture": yaw_confirmed,
+            "warning_threshold_cm": float(LLM_COLLISION_WARNING_FRONT_MIN_CM),
+            "critical_threshold_cm": float(LLM_COLLISION_CRITICAL_FRONT_MIN_CM),
+            "reasons": reasons,
+        }
+
+    def _format_collision_warning_status(self, status: Dict[str, Any]) -> str:
+        if not isinstance(status, dict) or not status:
+            return "Collision: unknown"
+        level = str(status.get("level", "clear") or "clear")
+        clearance = self._as_float_or_none(status.get("front_clearance_cm"))
+        action = str(status.get("planned_action_symbol", "") or "-")
+        reasons = status.get("reasons", []) if isinstance(status.get("reasons"), list) else []
+        reason_text = "; ".join(str(item) for item in reasons[:2]) if reasons else "front clear"
+        if clearance is None:
+            return f"Collision: {level} action={action} ({reason_text})"
+        return f"Collision: {level} action={action} front={clearance:.0f}cm ({reason_text})"
+
     def _detour_side_symbol_from_fusion(self, fusion: Dict[str, Any]) -> str:
         for key in ("recommended_subgoal", "target_conditioned_subgoal"):
             value = str(fusion.get(key, "") or "").lower()
@@ -3780,10 +3877,16 @@ class Panel:
                 lock["side_symbol"] = side_symbol
                 lock["side_steps"] = 0
                 side_steps = 0
-            action_symbol = side_symbol
-            repeat = min(self._llm_control_repeat_cap(), 2)
-            phase = "side_detour"
-            lock["side_steps"] = side_steps + 1
+            if self._labeling_is_yaw_confirmation_capture(labeling_dir):
+                action_symbol = "s"
+                repeat = 1
+                phase = "post_yaw_blocked_backoff"
+                lock["backoff_steps"] = backoff_steps + 1
+            else:
+                action_symbol = self._yaw_symbol_for_lateral_symbol(side_symbol)
+                repeat = 1
+                phase = "side_clearance_yaw_check"
+                lock["side_steps"] = side_steps + 1
         lock["total_steps"] = total_steps + 1
         lock["last_step_index"] = step_index
         lock["last_front_obstacle"] = obstacle
@@ -3794,7 +3897,7 @@ class Panel:
         normalized["action_symbol"] = action_symbol
         normalized["repeat"] = max(1, int(repeat))
         normalized["stop"] = False
-        normalized["need_capture_after"] = False
+        normalized["need_capture_after"] = action_symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS
         normalized["obstacle_detour_lock"] = dict(lock)
         normalized["rule_override"] = {
             "type": "front_obstacle_structured_detour",
@@ -3808,7 +3911,7 @@ class Panel:
             "front_obstacle": obstacle,
             "recommended_subgoal": fusion.get("recommended_subgoal"),
             "recommended_action_hint": fusion.get("recommended_action_hint"),
-            "reason": "front obstacle is too close; execute physical backoff/strafe detour instead of yaw-only observation or forward motion",
+            "reason": "front obstacle is too close or blocking; first back off or yaw-confirm the intended side corridor before any lateral strafe",
         }
         reason = str(normalized.get("reason", "") or "")
         detour_text = (
@@ -5275,6 +5378,28 @@ class Panel:
             return normalized
         if self._target_entry_visible_for_current_house(fusion) and self._is_enterable_entry_evidence(fusion):
             return normalized
+        non_enterable = self._non_enterable_entry_status(fusion)
+        non_enterable_distance_cm = self._as_float_or_none(non_enterable.get("entry_distance_cm"))
+        if (
+            current_symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS
+            and bool(non_enterable.get("is_doorlike", False))
+            and not bool(non_enterable.get("enterable", False))
+            and non_enterable_distance_cm is not None
+            and non_enterable_distance_cm <= float(LLM_FACE_RANGE_ADVANCE_NONENTERABLE_STOP_CM)
+        ):
+            return normalized
+        if current_symbol == "w":
+            front_clearance_cm = self._front_clearance_cm_from_obstacle(front_obstacle)
+            if (
+                self._front_path_clear_for_approach(fusion)
+                and not bool(front_obstacle.get("blocking", False))
+                and not bool(front_obstacle.get("too_close", False))
+                and (
+                    front_clearance_cm is None
+                    or front_clearance_cm >= float(LLM_FACE_RANGE_ADVANCE_MIN_CLEARANCE_CM)
+                )
+            ):
+                return normalized
         face_status = self._face_coverage_status_for_house(labeling_dir, house_id)
         if not face_status:
             return normalized
@@ -5441,6 +5566,292 @@ class Panel:
         normalized["reason"] = (reason + " | " if reason else "") + boost_text
         return normalized
 
+    def _apply_face_coverage_range_advance_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        current_symbol = str(normalized.get("action_symbol", "") or "").strip().lower()
+        if current_symbol not in {"w", "x", "q", "e", "a", "d"}:
+            return normalized
+        current_rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if current_rule_type in {"front_obstacle_structured_detour", "coverage_search_altitude_raise"}:
+            return normalized
+
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        target_state = str(fusion.get("target_conditioned_state", "") or "")
+        if target_state != "target_house_not_in_view" and current_symbol != "w":
+            return normalized
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        recent_history = self.llm_control_decision_history if isinstance(self.llm_control_decision_history, list) else []
+        recent_rule = {}
+        if recent_history and isinstance(recent_history[-1], dict):
+            recent_rule = recent_history[-1].get("rule_override", {}) if isinstance(recent_history[-1].get("rule_override"), dict) else {}
+        if current_symbol != "w" and str(recent_rule.get("type", "") or "") == "face_coverage_range_advance":
+            return normalized
+        boundary = self._target_boundary_context(fusion, house_id)
+        if bool(boundary.get("outside_search_boundary", False)):
+            return normalized
+        if self._target_entry_visible_for_current_house(fusion) and self._is_enterable_entry_evidence(fusion):
+            return normalized
+
+        face_status = self._face_coverage_status_for_house(labeling_dir, house_id)
+        if not face_status or bool(face_status.get("full_coverage_ready", False)) or bool(face_status.get("face_coverage_ready", False)):
+            return normalized
+        current_segment = face_status.get("current_segment", {}) if isinstance(face_status.get("current_segment"), dict) else {}
+        segment_visual_count = int(current_segment.get("visual_observation_count", 0) or 0)
+        segment_visit_count = int(current_segment.get("visit_count", 0) or 0)
+        last_face_id = str(face_status.get("last_face_id", "") or "")
+        face_payload = face_status.get("faces", {}).get(last_face_id, {}) if isinstance(face_status.get("faces"), dict) else {}
+        face_visual_count = int(face_payload.get("visual_observation_count", 0) or 0) if isinstance(face_payload, dict) else 0
+        repeated_segment = bool(
+            segment_visual_count >= int(LLM_FACE_RANGE_ADVANCE_REPEAT_THRESHOLD)
+            or segment_visit_count >= int(LLM_FACE_RANGE_ADVANCE_REPEAT_THRESHOLD + 2)
+            or face_visual_count >= int(LLM_FACE_RANGE_ADVANCE_REPEAT_THRESHOLD * 2)
+        )
+        if not repeated_segment:
+            return normalized
+
+        segments = face_payload.get("segments", []) if isinstance(face_payload, dict) and isinstance(face_payload.get("segments"), list) else []
+        unobserved_segments = [
+            index
+            for index, segment in enumerate(segments)
+            if isinstance(segment, dict) and not bool(segment.get("observed", False))
+        ]
+        if not unobserved_segments:
+            segment_count = int(face_status.get("segment_count_per_face", 0) or 0)
+            observed_indices = face_payload.get("observed_segments", []) if isinstance(face_payload, dict) and isinstance(face_payload.get("observed_segments"), list) else []
+            observed_index_set = set()
+            for index in observed_indices:
+                try:
+                    observed_index_set.add(int(index))
+                except Exception:
+                    continue
+            if segment_count > 0:
+                unobserved_segments = [index for index in range(segment_count) if index not in observed_index_set]
+        if not unobserved_segments:
+            return normalized
+
+        non_enterable = self._non_enterable_entry_status(fusion)
+        non_enterable_distance_cm = self._as_float_or_none(non_enterable.get("entry_distance_cm"))
+        if (
+            bool(non_enterable.get("is_doorlike", False))
+            and not bool(non_enterable.get("enterable", False))
+            and non_enterable_distance_cm is not None
+            and non_enterable_distance_cm <= float(LLM_FACE_RANGE_ADVANCE_NONENTERABLE_STOP_CM)
+        ):
+            return normalized
+
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        if bool(obstacle.get("blocking", False)) or bool(obstacle.get("too_close", False)):
+            return normalized
+        front_clearance_cm = self._front_clearance_cm_from_obstacle(obstacle)
+        if front_clearance_cm is not None and front_clearance_cm < float(LLM_FACE_RANGE_ADVANCE_MIN_CLEARANCE_CM):
+            return normalized
+
+        repeat = self._safe_forward_repeat_from_depth(
+            obstacle,
+            fallback_repeat=int(LLM_FACE_RANGE_ADVANCE_REPEAT),
+            remaining_cm=float(LLM_FACE_RANGE_ADVANCE_REPEAT) * abs(float(MOVE_COMMANDS.get("w", {}).get("forward_cm", 20.0) or 20.0)),
+        )
+        repeat = max(1, min(int(LLM_FACE_RANGE_ADVANCE_REPEAT), int(repeat), int(self._llm_control_repeat_cap())))
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = "w"
+        normalized["repeat"] = repeat
+        normalized["stop"] = False
+        normalized["need_capture_after"] = True
+        normalized["rule_override"] = {
+            "type": "face_coverage_range_advance",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "target_house_id": house_id,
+            "action_symbol": "w",
+            "repeat": int(repeat),
+            "face_coverage_status": face_status,
+            "front_obstacle": obstacle,
+            "front_clearance_cm": front_clearance_cm,
+            "unobserved_segments_on_face": unobserved_segments,
+            "reason": "current house-face range has already been explored; advance forward to the next range before yawing/re-sampling the same closed-door/window area",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        range_text = (
+            f"face range advance: {last_face_id or 'unknown'} segment "
+            f"{current_segment.get('segment_index', '?')} repeated "
+            f"{segment_visual_count}/{segment_visit_count}; move w x{repeat} to next range before yaw search"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + range_text
+        self._append_llm_control_log(
+            f"Face range advance: action={original.get('action_symbol')} -> w repeat={repeat}; "
+            f"target={house_id} face={last_face_id} seg={current_segment.get('segment_index')}"
+        )
+        return normalized
+
+    def _apply_face_range_advance_followup_yaw_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        current_symbol = str(normalized.get("action_symbol", "") or "").strip().lower()
+        if current_symbol in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return normalized
+        history = self.llm_control_decision_history if isinstance(self.llm_control_decision_history, list) else []
+        if not history or not isinstance(history[-1], dict):
+            return normalized
+        recent_rule = history[-1].get("rule_override", {}) if isinstance(history[-1].get("rule_override"), dict) else {}
+        if str(recent_rule.get("type", "") or "") != "face_coverage_range_advance":
+            return normalized
+
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        yaw_symbol = ""
+        for key in ("target_conditioned_action_hint", "recommended_action_hint"):
+            yaw_symbol = self._action_hint_to_yaw_symbol(fusion.get(key))
+            if yaw_symbol:
+                break
+        if not yaw_symbol:
+            target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+            bearing = self._as_float_or_none(target_context.get("target_house_bearing_deg"))
+            yaw_symbol = "q" if bearing is None or bearing < 0.0 else "e"
+
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = yaw_symbol
+        normalized["repeat"] = 1
+        normalized["stop"] = False
+        normalized["need_capture_after"] = True
+        normalized["rule_override"] = {
+            "type": "face_range_advance_followup_yaw",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "yaw_symbol": yaw_symbol,
+            "previous_rule": recent_rule,
+            "reason": "after advancing to a new observation range, yaw once to inspect the new sector before moving again",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        normalized["reason"] = (
+            reason + " | " if reason else ""
+        ) + f"range advance follow-up: yaw {yaw_symbol} once to inspect the next sector"
+        self._append_llm_control_log(
+            f"Range advance follow-up: action={original.get('action_symbol')} -> {yaw_symbol} after prior range advance."
+        )
+        return normalized
+
+    def _apply_lateral_clearance_safety_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        lateral_symbol = str(normalized.get("action_symbol", "") or "").strip().lower()
+        if lateral_symbol not in {"a", "d"}:
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        yaw_confirmed = self._labeling_is_yaw_confirmation_capture(labeling_dir)
+        non_enterable = self._non_enterable_entry_status(fusion)
+        non_enterable_distance_cm = self._as_float_or_none(non_enterable.get("entry_distance_cm"))
+        warning = self._collision_warning_status(
+            fusion,
+            labeling_dir,
+            planned_action_symbol=lateral_symbol,
+            planned_repeat=int(normalized.get("repeat", 1) or 1),
+        )
+
+        original = dict(normalized)
+        if (
+            yaw_confirmed
+            and bool(non_enterable.get("is_doorlike", False))
+            and not bool(non_enterable.get("enterable", False))
+            and non_enterable_distance_cm is not None
+            and non_enterable_distance_cm <= float(LLM_FACE_RANGE_ADVANCE_NONENTERABLE_STOP_CM)
+        ):
+            yaw_symbol = self._yaw_symbol_for_lateral_symbol(lateral_symbol)
+            normalized = dict(normalized)
+            normalized["action_symbol"] = yaw_symbol
+            normalized["repeat"] = 1
+            normalized["stop"] = False
+            normalized["need_capture_after"] = True
+            normalized["collision_warning_status"] = warning
+            normalized["rule_override"] = {
+                "type": "nonenterable_close_entry_yaw_away",
+                "original_action_symbol": original.get("action_symbol"),
+                "original_repeat": original.get("repeat"),
+                "yaw_symbol": yaw_symbol,
+                "non_enterable_entry": non_enterable,
+                "front_obstacle": obstacle,
+                "reason": "a close door-like candidate is closed/narrow/non-traversable, so do not convert the yaw-confirmed side plan into forward motion",
+            }
+            reason = str(normalized.get("reason", "") or "")
+            normalized["reason"] = (
+                reason + " | " if reason else ""
+            ) + f"non-enterable entry near {non_enterable_distance_cm:.1f}cm; continue yaw {yaw_symbol} instead of moving forward into it"
+            self._append_llm_control_log(
+                f"Non-enterable close-entry guard: blocked forward conversion; yaw {yaw_symbol} "
+                f"(distance={non_enterable_distance_cm:.1f}cm)."
+            )
+            return normalized
+
+        if yaw_confirmed and not bool(obstacle.get("blocking", False)) and not bool(obstacle.get("too_close", False)):
+            remaining_cm = None
+            distance_cm = self._candidate_entry_distance_cm(fusion)
+            if distance_cm is not None and distance_cm > LLM_ENTRY_REACHED_DISTANCE_CM:
+                remaining_cm = max(0.0, distance_cm - LLM_ENTRY_REACHED_DISTANCE_CM)
+            repeat = self._safe_forward_repeat_from_depth(
+                obstacle,
+                fallback_repeat=int(LLM_LATERAL_SAFETY_FORWARD_REPEAT),
+                remaining_cm=remaining_cm,
+            )
+            repeat = max(1, min(int(LLM_LATERAL_SAFETY_FORWARD_REPEAT), int(repeat), int(self._llm_control_repeat_cap())))
+            normalized = dict(normalized)
+            normalized["action_symbol"] = "w"
+            normalized["repeat"] = repeat
+            normalized["stop"] = False
+            normalized["need_capture_after"] = True
+            normalized["collision_warning_status"] = self._collision_warning_status(
+                fusion,
+                labeling_dir,
+                planned_action_symbol="w",
+                planned_repeat=repeat,
+            )
+            normalized["rule_override"] = {
+                "type": "lateral_after_yaw_to_forward",
+                "original_action_symbol": original.get("action_symbol"),
+                "original_repeat": original.get("repeat"),
+                "yaw_confirmation_capture": True,
+                "front_obstacle": obstacle,
+                "collision_warning_before": warning,
+                "reason": "side direction was just yaw-confirmed as the camera front; use forward motion instead of blind lateral strafe",
+            }
+            reason = str(normalized.get("reason", "") or "")
+            normalized["reason"] = (
+                reason + " | " if reason else ""
+            ) + f"lateral safety: converted {lateral_symbol} to w x{repeat} after yaw-confirmed front clearance"
+            self._append_llm_control_log(
+                f"Lateral safety: {lateral_symbol} -> w x{repeat} after yaw-confirmed clearance; "
+                f"front={self._front_clearance_cm_from_obstacle(obstacle)}cm"
+            )
+            return normalized
+
+        yaw_symbol = self._yaw_symbol_for_lateral_symbol(lateral_symbol)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = yaw_symbol
+        normalized["repeat"] = 1
+        normalized["stop"] = False
+        normalized["need_capture_after"] = True
+        normalized["collision_warning_status"] = warning
+        normalized["rule_override"] = {
+            "type": "lateral_clearance_yaw_check",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "yaw_symbol": yaw_symbol,
+            "collision_warning_status": warning,
+            "front_obstacle": obstacle,
+            "reason": "lateral a/d motion has unknown side clearance; yaw toward that side and capture before moving",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        normalized["reason"] = (
+            reason + " | " if reason else ""
+        ) + f"lateral safety: replace blind {lateral_symbol} with {yaw_symbol} to inspect side corridor before moving"
+        self._append_llm_control_log(
+            f"Lateral safety warning: blocked blind {lateral_symbol}; yaw {yaw_symbol} first to inspect side corridor."
+        )
+        return normalized
+
     def _apply_premature_stop_continue_search_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
         if not bool(normalized.get("stop", False)):
             return normalized
@@ -5505,6 +5916,14 @@ class Panel:
             rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
             if rule_type == "premature_stop_continue_search":
                 return normalized
+        normalized = self._apply_face_range_advance_followup_yaw_override(normalized, labeling_dir)
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "face_range_advance_followup_yaw":
+            return normalized
+        normalized = self._apply_face_coverage_range_advance_override(normalized, labeling_dir)
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "face_coverage_range_advance":
+            return normalized
         normalized = self._apply_target_reacquire_yaw_lock(normalized, labeling_dir)
         if bool(normalized.get("stop", False)):
             return normalized
@@ -5522,6 +5941,7 @@ class Panel:
         normalized = self._apply_face_coverage_orbit_override(normalized, labeling_dir)
         rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
         if rule_type in {"face_coverage_continue_orbit", "face_coverage_corner_forward_search"}:
+            normalized = self._apply_lateral_clearance_safety_override(normalized, labeling_dir)
             return normalized
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
@@ -5531,11 +5951,23 @@ class Panel:
         normalized = self._apply_closed_entry_coverage_orbit_override(normalized, labeling_dir)
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
+        normalized = self._apply_lateral_clearance_safety_override(normalized, labeling_dir)
+        if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return normalized
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "lateral_after_yaw_to_forward":
+            return normalized
         normalized = self._apply_target_entry_alignment_override(normalized, labeling_dir)
         if bool(normalized.get("stop", False)):
             return normalized
         rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
         if rule_type == "align_visible_target_entry_before_forward":
+            return normalized
+        normalized = self._apply_lateral_clearance_safety_override(normalized, labeling_dir)
+        if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+            return normalized
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "lateral_after_yaw_to_forward":
             return normalized
         override = self._should_override_to_forward_approach(normalized, labeling_dir)
         if not bool(override.get("override", False)):
@@ -5613,6 +6045,7 @@ class Panel:
         target_boundary_context = self._target_boundary_context(fusion, house_id) if house_id else {}
         axis_aligned_transit_plan = self._axis_aligned_boundary_transit_plan(fusion, house_id, target_boundary_context) if house_id else {}
         height_aware_front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        collision_warning_status = self._collision_warning_status(fusion, labeling_dir)
         target_entry_alignment = self._target_entry_alignment_status(fusion)
         perimeter_coverage_status = self._perimeter_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
         face_coverage_status = self._face_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
@@ -5645,6 +6078,7 @@ class Panel:
             "target_boundary_context": target_boundary_context,
             "axis_aligned_transit_plan": axis_aligned_transit_plan,
             "height_aware_front_obstacle": height_aware_front_obstacle,
+            "collision_warning_status": collision_warning_status,
             "target_entry_alignment": target_entry_alignment,
             "perimeter_coverage_status": perimeter_coverage_status,
             "face_coverage_status": face_coverage_status,
@@ -5658,10 +6092,13 @@ class Panel:
                 "closed_entry_full_coverage": "If only close door/closed/non-traversable narrow-door evidence is found, do not finish until perimeter_coverage_status.full_coverage_ready=true and no open/traversable/approachable entry remains.",
                 "face_edge_coverage": "During no-entry/closed-entry search, use face_coverage_status to avoid revisiting the same house face segment. Continue orbiting toward unobserved face segments before declaring no enterable entry.",
                 "face_corner_forward": "If the current face edge segment is already repeatedly observed and the front corridor has enough clearance, advance forward along the house edge to reveal the next face instead of continuing lateral strafe into side obstacles. Do not use corner-forward when the front wall/porch/ceiling is closer than the safety clearance.",
+                "face_range_advance": "If the current house-face segment/range has already been repeatedly observed and only rejected window/closed/narrow non-enterable evidence is present, move forward to the next observation range first, then yaw to continue searching. Do not re-sample the same closed-door area.",
+                "face_range_followup_yaw": "After a face-range forward advance, yaw once and capture to inspect the new sector before moving forward again.",
                 "temporary_search_altitude": "Only during incomplete target-house perimeter search, if a wall-like front obstacle blocks ground-level orbiting, climb temporarily with r, recapture, then continue only if depth becomes safe. Restore altitude after the current house search finishes.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
-                "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not use yaw-only observation or forward motion as detour; physically back off and strafe left/right until the front path clears.",
+                "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not move forward. Back off if too close; otherwise yaw toward the intended side and capture first, then use forward w if the newly front-facing corridor is clear.",
+                "collision_warning": "Treat collision_warning_status.level=warning/critical as a hard safety cue. Do not use lateral a/d unless that side has just been yaw-confirmed by an immediate yaw capture; prefer yaw-check then forward w if clear.",
                 "low_obstacle_passable": "If height_aware_front_obstacle.low_obstacle_passable=true, the near depth is only in the lower image band and the UAV body-height corridor is clear; do not treat it as a blocking front obstacle.",
                 "target_boundary_transit": "If target_boundary_context.mode=transit_to_target_boundary, ignore intermediate non-target house entrances and follow axis_aligned_transit_plan first; start entrance/house judging only after reaching the target search boundary.",
                 "approach_vs_cross": "cross_ready=false means do not enter/cross the doorway yet; it does not mean you cannot approach the doorway.",
@@ -5694,8 +6131,9 @@ class Panel:
             "as warnings against crossing the doorway, not as automatic reasons to stop approaching. If global_front_obstacle.present=false "
             "and the target door is still around 3-12m away, forward approach is usually the preferred data-collection action.\n"
             "If global_front_obstacle.present=true with high/severe severity or front_min_depth is around 120cm or less, "
-            "do not keep moving forward and do not treat yaw-only observation as a real detour. First back off if the "
-            "obstacle is very close, then strafe left/right according to detour guidance until the front path clears.\n"
+            "do not keep moving forward. First back off if the obstacle is very close; otherwise yaw toward the intended "
+            "side and capture before moving. Because depth is forward-facing, blind a/d strafe is unsafe unless that "
+            "side has just been turned into the camera-front view and confirmed clear.\n"
             "Depth is height-sensitive: if height_aware_front_obstacle.low_obstacle_passable=true, the near depth is "
             "concentrated in the lower image band while the UAV body-height corridor is clear. In that case do not "
             "treat bushes/curbs/low foreground objects as a hard front blockage; continue target-boundary transit or "
@@ -5711,12 +6149,18 @@ class Panel:
             "field of view and cause the next frame to lock onto the wrong door.\n"
             "A close door/closed door or a narrow non-traversable door is not evidence that the house search is finished. "
             "It is only evidence that this face may not provide an enterable opening. If non_enterable_entry_status.enterable=false "
-            "and perimeter_coverage_status.full_coverage_ready=false, orbit around the target house with lateral movement "
-            "and short recentering yaws to observe the remaining perimeter bins before declaring no enterable entry.\n"
+            "and perimeter_coverage_status.full_coverage_ready=false, orbit around the target house cautiously: prefer "
+            "yaw-check then forward w along the newly confirmed corridor over blind lateral a/d motion.\n"
             "Use face_coverage_status as an edge-range memory: each target house has four approximate faces and each face "
             "is split into coarse searched segments. If the current face/current segment has already been observed repeatedly "
-            "and face_coverage_status.full_coverage_ready=false, do not turn back to resample the same edge. Keep the same "
-            "lateral orbit direction with a/d toward unobserved face segments, using short yaw only when re-centering is needed.\n"
+            "and face_coverage_status.full_coverage_ready=false, do not turn back to resample the same edge. Continue "
+            "toward unobserved face segments, but if this requires a/d, yaw toward that side and capture first; after "
+            "confirmation, move with w rather than blind side strafe.\n"
+            "If the same house-face segment/range has already been observed many times and the visible evidence is only "
+            "closed/narrow/non-traversable door or rejected windows, do not keep yawing back to the same area. If the "
+            "front/body-height corridor is safe and the non-enterable door is not immediately close, move forward with "
+            "w to the next observation range, capture, then yaw once to inspect the next sector before any additional "
+            "forward movement.\n"
             "At a house-face corner, lateral orbit is not always correct. If the current face edge segment is saturated, "
             "the target house remains roughly in view, and depth says the forward corridor has enough safety clearance, advance forward with w "
             "to continue searching along the next face. Do not keep strafing sideways into fences/walls or away from the "
@@ -6002,6 +6446,90 @@ class Panel:
             encoding="utf-8",
         )
         return manifest
+
+    def _append_llm_control_request_error(
+        self,
+        *,
+        labeling_dir: str,
+        decision_index: int,
+        attempt: int,
+        max_attempts: int,
+        exc: Exception,
+    ) -> None:
+        try:
+            artifact_dir = self._llm_control_artifact_dir(labeling_dir, decision_index)
+            payload = {
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "decision_index": int(decision_index),
+                "attempt": int(attempt),
+                "max_attempts": int(max_attempts),
+                "source_labeling_dir": str(labeling_dir),
+                "error_class": exc.__class__.__name__,
+                "error": str(exc),
+            }
+            with (artifact_dir / "llm_control_request_errors.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _request_llm_control_decision_with_retries(self, *, labeling_dir: str, decision_index: int) -> Dict[str, Any]:
+        max_attempts = int(LLM_CONTROL_REQUEST_MAX_ATTEMPTS)
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            if self.llm_control_stop_event.is_set():
+                raise RuntimeError("LLM control stopped before request retry completed.")
+            if attempt > 1:
+                self._set_llm_control_var(
+                    self.llm_control_status_var,
+                    f"LLM Control: retrying LLM request {attempt}/{max_attempts}",
+                )
+                self._append_llm_control_log(
+                    f"Retrying LLM request for decision {decision_index}: attempt {attempt}/{max_attempts}"
+                )
+            try:
+                decision = self._request_llm_control_decision(labeling_dir=labeling_dir, decision_index=decision_index)
+                if attempt > 1:
+                    self._append_llm_control_log(
+                        f"LLM request recovered for decision {decision_index} on attempt {attempt}/{max_attempts}."
+                    )
+                    self._append_llm_control_session_event(
+                        {
+                            "event_type": "llm_request_recovered",
+                            "decision_index": int(decision_index),
+                            "attempt": int(attempt),
+                            "max_attempts": int(max_attempts),
+                            "source_labeling_dir": str(labeling_dir),
+                        }
+                    )
+                return decision
+            except Exception as exc:
+                last_exc = exc
+                self._append_llm_control_request_error(
+                    labeling_dir=labeling_dir,
+                    decision_index=decision_index,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    exc=exc,
+                )
+                self._append_llm_control_session_event(
+                    {
+                        "event_type": "llm_request_failed_attempt",
+                        "decision_index": int(decision_index),
+                        "attempt": int(attempt),
+                        "max_attempts": int(max_attempts),
+                        "source_labeling_dir": str(labeling_dir),
+                        "error_class": exc.__class__.__name__,
+                        "error": str(exc),
+                    }
+                )
+                self._append_llm_control_log(
+                    f"LLM request failed for decision {decision_index}: attempt {attempt}/{max_attempts}; {exc}"
+                )
+                if attempt >= max_attempts:
+                    break
+                if self.llm_control_stop_event.wait(float(LLM_CONTROL_REQUEST_RETRY_DELAY_S)):
+                    raise RuntimeError("LLM control stopped during request retry wait.") from exc
+        raise RuntimeError(f"LLM request failed after {max_attempts} attempts: {last_exc}") from last_exc
 
     def _request_llm_control_decision(self, *, labeling_dir: str, decision_index: int) -> Dict[str, Any]:
         from anthropic import Anthropic
