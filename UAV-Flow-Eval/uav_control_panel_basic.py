@@ -91,6 +91,8 @@ LLM_COVERAGE_ORBIT_REPEAT = 4
 LLM_COVERAGE_ORBIT_DEFAULT_SYMBOL = "d"
 LLM_FACE_COVERAGE_REPEAT_THRESHOLD = 4
 LLM_FACE_COVERAGE_ORBIT_REPEAT = 5
+LLM_FACE_COVERAGE_CORNER_FORWARD_REPEAT = 5
+LLM_FACE_COVERAGE_CORNER_BEARING_LIMIT_DEG = 35.0
 LLM_COVERAGE_ALTITUDE_RAISE_CM = 120.0
 LLM_COVERAGE_ALTITUDE_STEP_REPEAT = 3
 LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM = 25.0
@@ -2895,25 +2897,52 @@ class Panel:
 
     def _llm_control_loop(self, *, max_steps: int) -> None:
         self.llm_control_running = True
-        self.llm_control_decision_history = []
-        self.llm_target_reacquire_lock = {}
-        self.llm_obstacle_detour_lock = {}
-        self.llm_search_altitude_lock = {}
-        reuse_labeling_dir = ""
+        resume_state = self._restore_llm_control_resume_state()
+        if int(resume_state.get("existing_decision_count", 0) or 0) <= 0:
+            self.llm_target_reacquire_lock = {}
+            self.llm_obstacle_detour_lock = {}
+            self.llm_search_altitude_lock = {}
+        else:
+            if not isinstance(self.llm_target_reacquire_lock, dict):
+                self.llm_target_reacquire_lock = {}
+            if not isinstance(self.llm_obstacle_detour_lock, dict):
+                self.llm_obstacle_detour_lock = {}
+            if not isinstance(self.llm_search_altitude_lock, dict):
+                self.llm_search_altitude_lock = {}
         self._set_llm_control_var(self.llm_control_status_var, "LLM Control: running")
-        self._append_llm_control_log(f"Started LLM control loop with max_decisions={max_steps}.")
+        next_decision_index = max(1, int(resume_state.get("next_decision_index", 1) or 1))
+        self._append_llm_control_log(
+            f"Started LLM control loop with max_decisions={max_steps}; "
+            f"resume_decisions={int(resume_state.get('existing_decision_count', 0) or 0)} "
+            f"next_decision={next_decision_index}."
+        )
+        reuse_labeling_dir = str(resume_state.get("pending_labeling_dir", "") or "")
+        reuse_labeling_note = "pending interrupted decision" if reuse_labeling_dir else ""
+        self._append_llm_control_session_event(
+            {
+                "event_type": "control_loop_started",
+                "max_decisions": int(max_steps),
+                "next_decision_index": int(next_decision_index),
+                "existing_decision_count": int(resume_state.get("existing_decision_count", 0) or 0),
+                "resumed": bool(resume_state.get("resumed", False)),
+                "pending_labeling_dir": reuse_labeling_dir,
+            }
+        )
         try:
             if not self._prepare_llm_plan_execution():
                 return
             self._ensure_movement_enabled_for_llm()
-            for decision_index in range(1, int(max_steps) + 1):
+            for local_index in range(1, int(max_steps) + 1):
+                decision_index = next_decision_index + local_index - 1
                 if self.llm_control_stop_event.is_set():
                     break
-                self._set_llm_control_var(self.llm_control_step_var, f"{decision_index}/{max_steps}")
+                self._set_llm_control_var(self.llm_control_step_var, f"{decision_index} (+{local_index}/{max_steps})")
                 if reuse_labeling_dir:
                     labeling_dir = reuse_labeling_dir
                     reuse_labeling_dir = ""
-                    self._append_llm_control_log(f"Reusing immediate yaw capture: {Path(labeling_dir).parent.name}")
+                    note = reuse_labeling_note or "immediate yaw capture"
+                    reuse_labeling_note = ""
+                    self._append_llm_control_log(f"Reusing {note}: {Path(labeling_dir).parent.name}")
                 else:
                     labeling_dir = self._run_llm_control_capture(
                         capture_source="llm_control",
@@ -2979,10 +3008,18 @@ class Panel:
             logger.exception("LLM control loop failed")
             self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: error {exc}")
             self._append_llm_control_log(f"ERROR: {exc}")
+            self._append_llm_control_session_event(
+                {
+                    "event_type": "control_loop_error",
+                    "error": str(exc),
+                    "error_class": exc.__class__.__name__,
+                }
+            )
         finally:
             self.llm_control_running = False
             if self.llm_control_stop_event.is_set():
                 self._set_llm_control_var(self.llm_control_status_var, "LLM Control: stopped")
+            self._append_llm_control_session_event({"event_type": "control_loop_ended"})
             self._append_llm_control_log("LLM control loop ended.")
 
     def _ensure_movement_enabled_for_llm(self) -> None:
@@ -4592,6 +4629,7 @@ class Panel:
             "visited_face_count": int(coverage.get("visited_face_count", 0) or 0),
             "observed_segment_count": int(coverage.get("observed_segment_count", 0) or 0),
             "total_segment_count": int(coverage.get("total_segment_count", 0) or 0),
+            "segment_count_per_face": int(coverage.get("segment_count_per_face", 0) or 0),
             "last_face_id": last_face_id,
             "last_segment_index": last_segment_index,
             "last_edge_t": coverage.get("last_edge_t"),
@@ -5090,6 +5128,54 @@ class Panel:
         repeated_current_face = face_visual_count >= int(LLM_FACE_COVERAGE_REPEAT_THRESHOLD + 3)
         if not repeated_current_segment and not repeated_current_face:
             return normalized
+        segment_count = int(face_status.get("segment_count_per_face", 0) or 0)
+        try:
+            segment_index = int(current_segment.get("segment_index"))
+        except Exception:
+            segment_index = -1
+        at_face_edge = bool(segment_count > 0 and segment_index in {0, segment_count - 1})
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        bearing = self._as_float_or_none(target_context.get("target_house_bearing_deg"))
+        front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        front_clear = bool(
+            self._front_path_clear_for_approach(fusion)
+            and not bool(front_obstacle.get("blocking", False))
+            and not bool(front_obstacle.get("too_close", False))
+        )
+        bearing_ok = bool(bearing is None or abs(float(bearing)) <= float(LLM_FACE_COVERAGE_CORNER_BEARING_LIMIT_DEG))
+        if at_face_edge and front_clear and bearing_ok:
+            repeat = min(self._llm_control_repeat_cap(), int(LLM_FACE_COVERAGE_CORNER_FORWARD_REPEAT))
+            original = dict(normalized)
+            normalized = dict(normalized)
+            normalized["action_symbol"] = "w"
+            normalized["repeat"] = max(1, int(repeat))
+            normalized["stop"] = False
+            normalized["need_capture_after"] = True
+            normalized["rule_override"] = {
+                "type": "face_coverage_corner_forward_search",
+                "original_action_symbol": original.get("action_symbol"),
+                "original_repeat": original.get("repeat"),
+                "target_house_id": house_id,
+                "action_symbol": "w",
+                "repeat": int(normalized["repeat"]),
+                "face_coverage_status": face_status,
+                "front_obstacle": front_obstacle,
+                "target_bearing_deg": bearing,
+                "reason": "current house face is already saturated at an edge segment and the forward corridor is clear; advance forward along the house edge to observe the next face instead of continuing lateral strafe into side obstruction",
+            }
+            reason = str(normalized.get("reason", "") or "")
+            forward_text = (
+                f"face coverage corner advance: {last_face_id or 'unknown'} segment "
+                f"{segment_index}/{max(0, segment_count - 1)} repeated "
+                f"{segment_visual_count}/{segment_visit_count}, front_clear=1; "
+                f"advance w x{int(normalized['repeat'])}"
+            )
+            normalized["reason"] = (reason + " | " if reason else "") + forward_text
+            self._append_llm_control_log(
+                f"Face coverage corner advance: action={original.get('action_symbol')} -> w repeat={normalized['repeat']}; "
+                f"target={house_id} face={last_face_id} seg={segment_index}/{max(0, segment_count - 1)}"
+            )
+            return normalized
         orbit_symbol = self._preferred_face_orbit_symbol(current_symbol)
         repeat = min(self._llm_control_repeat_cap(), int(LLM_FACE_COVERAGE_ORBIT_REPEAT))
         original = dict(normalized)
@@ -5192,7 +5278,7 @@ class Panel:
             return normalized
         normalized = self._apply_face_coverage_orbit_override(normalized, labeling_dir)
         rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
-        if rule_type == "face_coverage_continue_orbit":
+        if rule_type in {"face_coverage_continue_orbit", "face_coverage_corner_forward_search"}:
             return normalized
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
@@ -5325,6 +5411,7 @@ class Panel:
                 "centered_depth_proxy": "Also finish when an enterable target-house entry is roughly centered, has a sufficiently large YOLO bbox, YOLO+Depth marks the opening traversable, and the doorway/target-house distance is within the near-entry proxy range.",
                 "closed_entry_full_coverage": "If only close door/closed/non-traversable narrow-door evidence is found, do not finish until perimeter_coverage_status.full_coverage_ready=true and no open/traversable/approachable entry remains.",
                 "face_edge_coverage": "During no-entry/closed-entry search, use face_coverage_status to avoid revisiting the same house face segment. Continue orbiting toward unobserved face segments before declaring no enterable entry.",
+                "face_corner_forward": "If the current face edge segment is already repeatedly observed and the front corridor is clear, advance forward along the house edge to reveal the next face instead of continuing lateral strafe into side obstacles.",
                 "temporary_search_altitude": "Only during incomplete target-house perimeter search, if a wall-like front obstacle blocks ground-level orbiting, climb temporarily with r, recapture, then continue only if depth becomes safe. Restore altitude after the current house search finishes.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
@@ -5384,6 +5471,10 @@ class Panel:
             "is split into coarse searched segments. If the current face/current segment has already been observed repeatedly "
             "and face_coverage_status.full_coverage_ready=false, do not turn back to resample the same edge. Keep the same "
             "lateral orbit direction with a/d toward unobserved face segments, using short yaw only when re-centering is needed.\n"
+            "At a house-face corner, lateral orbit is not always correct. If the current face edge segment is saturated, "
+            "the target house remains roughly in view, and depth says the forward corridor is clear, advance forward with w "
+            "to continue searching along the next face. Do not keep strafing sideways into fences/walls or away from the "
+            "target just because face coverage is incomplete.\n"
             "Temporary altitude is allowed only for target-house perimeter search: if coverage_altitude_status.should_raise=true, "
             "use r to climb and capture again to check whether the front wall/fence-like obstacle becomes passable from above. "
             "Do not use high altitude for ordinary approach or target-boundary transit. After this house search finishes, "
@@ -5441,6 +5532,166 @@ class Panel:
         session_dir = root / self._safe_llm_control_path_fragment(episode_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir
+
+    def _llm_control_decision_records_for_session(self, session_dir: Path) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        if not session_dir.exists():
+            return records
+        for artifact_dir in session_dir.glob("decision_*"):
+            if not artifact_dir.is_dir():
+                continue
+            payload = self._read_json_file(artifact_dir / "llm_control_decision.json")
+            if not payload:
+                continue
+            decision_index = payload.get("decision_index")
+            if decision_index in (None, ""):
+                parts = artifact_dir.name.split("_")
+                decision_index = parts[1] if len(parts) > 1 else 0
+            try:
+                index = int(decision_index)
+            except Exception:
+                continue
+            normalized = payload.get("normalized_decision", {})
+            raw = payload.get("raw_decision", {})
+            records.append(
+                {
+                    "decision_index": index,
+                    "artifact_dir": str(artifact_dir),
+                    "labeling_dir": str(payload.get("labeling_dir", "") or ""),
+                    "normalized_decision": normalized if isinstance(normalized, dict) else {},
+                    "raw_decision": raw if isinstance(raw, dict) else {},
+                    "created_at": str(payload.get("created_at", "") or ""),
+                }
+            )
+        records.sort(key=lambda item: int(item.get("decision_index", 0) or 0))
+        return records
+
+    def _llm_control_pending_prompt_records_for_session(self, session_dir: Path) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        if not session_dir.exists():
+            return records
+        for artifact_dir in session_dir.glob("decision_*"):
+            if not artifact_dir.is_dir():
+                continue
+            if (artifact_dir / "llm_control_decision.json").is_file():
+                continue
+            prompt_path = artifact_dir / "llm_control_prompt.json"
+            if not prompt_path.is_file():
+                continue
+            parts = artifact_dir.name.split("_")
+            try:
+                index = int(parts[1]) if len(parts) > 1 else 0
+            except Exception:
+                continue
+            payload = self._read_json_file(prompt_path)
+            labeling_dir = str(payload.get("source_labeling_dir", "") or "").strip()
+            if not labeling_dir:
+                prompt_payload = payload.get("control_prompt_payload", {}) if isinstance(payload.get("control_prompt_payload"), dict) else {}
+                labeling_dir = str(prompt_payload.get("labeling_dir", "") or "").strip()
+            if not labeling_dir or not Path(labeling_dir).exists():
+                continue
+            records.append(
+                {
+                    "decision_index": index,
+                    "artifact_dir": str(artifact_dir),
+                    "labeling_dir": labeling_dir,
+                    "prompt_path": str(prompt_path),
+                }
+            )
+        records.sort(key=lambda item: int(item.get("decision_index", 0) or 0))
+        return records
+
+    def _restore_llm_control_resume_state(self) -> Dict[str, Any]:
+        session_dir = self._llm_control_session_dir_for_current_episode()
+        records = self._llm_control_decision_records_for_session(session_dir)
+        if records:
+            history = [
+                record.get("normalized_decision", {})
+                for record in records[-12:]
+                if isinstance(record.get("normalized_decision"), dict) and record.get("normalized_decision")
+            ]
+            self.llm_control_decision_history = history
+            latest = records[-1]
+            normalized = latest.get("normalized_decision", {}) if isinstance(latest.get("normalized_decision"), dict) else {}
+            if normalized:
+                symbol = str(normalized.get("action_symbol", "x") or "x")
+                repeat = int(normalized.get("repeat", 1) or 1)
+                confidence = float(normalized.get("confidence", 0.0) or 0.0)
+                self._set_llm_control_var(
+                    self.llm_control_last_action_var,
+                    f"Last action: {symbol} x{repeat} conf={confidence:.2f} (resumed)",
+                )
+                self._set_llm_control_var(self.llm_control_reason_var, f"Reason: {str(normalized.get('reason', '') or '-')}")
+            latest_labeling = str(latest.get("labeling_dir", "") or "")
+            if latest_labeling:
+                self._set_llm_control_var(self.llm_control_last_capture_var, f"Last capture: {Path(latest_labeling).parent.name}")
+        else:
+            self.llm_control_decision_history = []
+
+        plan_path = session_dir / "task_plan.json"
+        trace_path = session_dir / "execution_trace.json"
+        existing_plan = self._read_json_file(plan_path)
+        existing_trace = self._read_json_file(trace_path)
+        loaded_plan = False
+        if existing_plan and (not isinstance(self.llm_task_plan, dict) or not self.llm_task_plan):
+            self.llm_task_plan = existing_plan
+            self.llm_task_plan_applied = bool(existing_plan.get("ordered_targets"))
+            loaded_plan = True
+        if existing_trace:
+            if not isinstance(self.llm_task_execution_trace, dict) or not self.llm_task_execution_trace:
+                self.llm_task_execution_trace = existing_trace
+            try:
+                self.llm_task_current_index = int(existing_trace.get("current_target_index", self.llm_task_current_index) or 0)
+            except Exception:
+                pass
+        if loaded_plan or existing_trace:
+            try:
+                self.root.after(0, self._refresh_llm_task_preview)
+            except Exception:
+                pass
+
+        max_index = max([int(record.get("decision_index", 0) or 0) for record in records], default=0)
+        pending_records = [
+            record
+            for record in self._llm_control_pending_prompt_records_for_session(session_dir)
+            if int(record.get("decision_index", 0) or 0) == max_index + 1
+        ]
+        pending = pending_records[0] if pending_records else {}
+        state = {
+            "session_dir": str(session_dir),
+            "existing_decision_count": len(records),
+            "next_decision_index": max_index + 1,
+            "resumed": bool(records or loaded_plan or existing_trace),
+            "loaded_plan": loaded_plan,
+            "pending_labeling_dir": str(pending.get("labeling_dir", "") or ""),
+            "pending_artifact_dir": str(pending.get("artifact_dir", "") or ""),
+        }
+        if records:
+            self._append_llm_control_log(
+                f"Resumed LLM control session: {session_dir.name}; "
+                f"existing_decisions={len(records)} next_decision={max_index + 1}."
+            )
+            if pending:
+                self._append_llm_control_log(
+                    f"Found pending decision prompt for decision {max_index + 1}; "
+                    f"will reuse capture {Path(str(pending.get('labeling_dir', ''))).parent.name}."
+                )
+        elif loaded_plan or existing_trace:
+            self._append_llm_control_log(f"Resumed LLM task files for session: {session_dir.name}.")
+        return state
+
+    def _append_llm_control_session_event(self, event: Dict[str, Any]) -> None:
+        try:
+            session_dir = self._llm_control_session_dir_for_current_episode()
+            payload = dict(event) if isinstance(event, dict) else {"event_type": str(event)}
+            memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+            payload.setdefault("time", datetime.now().isoformat(timespec="seconds"))
+            payload.setdefault("episode_id", str(memory_collection.get("episode_id", "") or session_dir.name))
+            payload.setdefault("step_index", int(memory_collection.get("step_index", 0) or 0))
+            with (session_dir / "control_session_events.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
 
     def _resolve_llm_control_capture_root(self, labeling_dir: str) -> Path:
         labeling_path = Path(labeling_dir).resolve()
