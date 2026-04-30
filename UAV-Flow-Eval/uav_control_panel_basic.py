@@ -93,9 +93,13 @@ LLM_FACE_COVERAGE_REPEAT_THRESHOLD = 4
 LLM_FACE_COVERAGE_ORBIT_REPEAT = 5
 LLM_FACE_COVERAGE_CORNER_FORWARD_REPEAT = 5
 LLM_FACE_COVERAGE_CORNER_BEARING_LIMIT_DEG = 35.0
+LLM_FACE_COVERAGE_CORNER_MIN_FORWARD_CLEARANCE_CM = 260.0
+LLM_FACE_COVERAGE_CORNER_KEEP_CLEARANCE_CM = 180.0
 LLM_COVERAGE_ALTITUDE_RAISE_CM = 120.0
 LLM_COVERAGE_ALTITUDE_STEP_REPEAT = 3
 LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM = 25.0
+LLM_COVERAGE_ALTITUDE_MIN_UPPER_P10_CM = 220.0
+LLM_COVERAGE_ALTITUDE_MAX_UPPER_CLOSE_RATIO = 0.08
 LLM_YAW_STEP_DEG = 30.0
 LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG = 18.0
 LLM_TARGET_REACQUIRE_MAX_YAW_STEPS = 12
@@ -3618,9 +3622,19 @@ class Panel:
             status["height_aware_front_corridor"] = height_aware
             if bool(height_aware.get("available", False)):
                 if bool(height_aware.get("body_corridor_blocking", False)):
-                    status["blocking"] = bool(status["present"])
-                    status["too_close"] = bool(status["too_close"] or severe)
+                    status["present"] = True
+                    status["blocking"] = True
+                    effective_min = self._as_float_or_none(height_aware.get("effective_front_min_depth_cm"))
+                    effective_p10 = self._as_float_or_none(height_aware.get("effective_front_p10_depth_cm"))
+                    status["too_close"] = bool(
+                        status["too_close"]
+                        or severe
+                        or (effective_min is not None and effective_min <= LLM_OBSTACLE_FRONT_MIN_BACKOFF_CM)
+                        or (effective_p10 is not None and effective_p10 <= LLM_OBSTACLE_FRONT_MIN_BLOCK_CM)
+                    )
                     status["blocking_reason"] = str(height_aware.get("reason", "") or "")
+                    status["effective_front_min_depth_cm"] = height_aware.get("effective_front_min_depth_cm")
+                    status["effective_front_p10_depth_cm"] = height_aware.get("effective_front_p10_depth_cm")
                 elif bool(height_aware.get("low_obstacle_passable", False)):
                     status["low_obstacle_passable"] = True
                     status["blocking"] = False
@@ -3667,6 +3681,20 @@ class Panel:
             needed_repeat = max(1, int(math.ceil(max(0.0, float(remaining_cm)) / max(1.0, forward_step_cm))))
             safe_repeat = min(int(safe_repeat), needed_repeat)
         return max(1, min(cap, int(safe_repeat)))
+
+    def _front_clearance_cm_from_obstacle(self, obstacle: Dict[str, Any]) -> Optional[float]:
+        if not isinstance(obstacle, dict):
+            return None
+        for key in ("effective_front_min_depth_cm", "front_min_depth_cm"):
+            clearance = self._as_float_or_none(obstacle.get(key))
+            if clearance is not None:
+                return clearance
+        height_aware = obstacle.get("height_aware_front_corridor", {}) if isinstance(obstacle.get("height_aware_front_corridor"), dict) else {}
+        for key in ("effective_front_min_depth_cm", "effective_front_p10_depth_cm", "body_corridor_p10_depth_cm"):
+            clearance = self._as_float_or_none(height_aware.get(key))
+            if clearance is not None:
+                return clearance
+        return None
 
     def _detour_side_symbol_from_fusion(self, fusion: Dict[str, Any]) -> str:
         for key in ("recommended_subgoal", "target_conditioned_subgoal"):
@@ -4704,6 +4732,17 @@ class Panel:
         )
         inside_search_boundary = bool(house_id and not bool(boundary.get("outside_search_boundary", False)))
         front_blocking = bool(obstacle.get("blocking", False)) and not bool(obstacle.get("low_obstacle_passable", False))
+        height_aware = obstacle.get("height_aware_front_corridor", {}) if isinstance(obstacle.get("height_aware_front_corridor"), dict) else {}
+        upper_band = height_aware.get("upper_band", {}) if isinstance(height_aware.get("upper_band"), dict) else {}
+        upper_p10 = self._as_float_or_none(upper_band.get("p10_cm"))
+        upper_close_ratio = self._as_float_or_none(upper_band.get("close_ratio_140"))
+        climb_clearance_ok = bool(
+            not bool(height_aware.get("available", False))
+            or (
+                (upper_p10 is None or upper_p10 >= float(LLM_COVERAGE_ALTITUDE_MIN_UPPER_P10_CM))
+                and (upper_close_ratio is None or upper_close_ratio <= float(LLM_COVERAGE_ALTITUDE_MAX_UPPER_CLOSE_RATIO))
+            )
+        )
         elevated = bool(
             current_z is not None
             and target_z is not None
@@ -4713,6 +4752,7 @@ class Panel:
             inside_search_boundary
             and coverage_incomplete
             and front_blocking
+            and climb_clearance_ok
             and current_z is not None
             and target_z is not None
             and current_z < target_z - float(LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM)
@@ -4728,6 +4768,9 @@ class Panel:
             "coverage_incomplete": coverage_incomplete,
             "perimeter_coverage": coverage,
             "front_obstacle": obstacle,
+            "climb_clearance_ok": climb_clearance_ok,
+            "upper_p10_cm": upper_p10,
+            "upper_close_ratio_140": upper_close_ratio,
             "active_lock": lock,
             "reason": "front obstacle blocks perimeter search; climb temporarily to inspect/pass over wall-like obstruction" if should_raise else "",
         }
@@ -5101,9 +5144,15 @@ class Panel:
         current_symbol = str(normalized.get("action_symbol", "") or "").strip().lower()
         if current_symbol not in {"w", "x", "q", "e", "a", "d"}:
             return normalized
+        current_rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if current_rule_type == "front_obstacle_structured_detour":
+            return normalized
         fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
         house_id = self._current_target_house_id_from_fusion(fusion)
         if not house_id:
+            return normalized
+        front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        if bool(front_obstacle.get("blocking", False)) or bool(front_obstacle.get("too_close", False)):
             return normalized
         boundary = self._target_boundary_context(fusion, house_id)
         if bool(boundary.get("outside_search_boundary", False)):
@@ -5136,15 +5185,31 @@ class Panel:
         at_face_edge = bool(segment_count > 0 and segment_index in {0, segment_count - 1})
         target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
         bearing = self._as_float_or_none(target_context.get("target_house_bearing_deg"))
-        front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        front_clearance_cm = self._front_clearance_cm_from_obstacle(front_obstacle)
         front_clear = bool(
             self._front_path_clear_for_approach(fusion)
             and not bool(front_obstacle.get("blocking", False))
             and not bool(front_obstacle.get("too_close", False))
+            and (
+                front_clearance_cm is None
+                or front_clearance_cm >= float(LLM_FACE_COVERAGE_CORNER_MIN_FORWARD_CLEARANCE_CM)
+            )
         )
         bearing_ok = bool(bearing is None or abs(float(bearing)) <= float(LLM_FACE_COVERAGE_CORNER_BEARING_LIMIT_DEG))
         if at_face_edge and front_clear and bearing_ok:
             repeat = min(self._llm_control_repeat_cap(), int(LLM_FACE_COVERAGE_CORNER_FORWARD_REPEAT))
+            if front_clearance_cm is not None:
+                forward_step_cm = abs(float(MOVE_COMMANDS.get("w", {}).get("forward_cm", 20.0) or 20.0))
+                clearance_repeat = int(
+                    max(
+                        0.0,
+                        float(front_clearance_cm) - float(LLM_FACE_COVERAGE_CORNER_KEEP_CLEARANCE_CM),
+                    )
+                    // max(1.0, forward_step_cm)
+                )
+                repeat = min(int(repeat), int(clearance_repeat))
+            if repeat <= 0:
+                return normalized
             original = dict(normalized)
             normalized = dict(normalized)
             normalized["action_symbol"] = "w"
@@ -5160,6 +5225,7 @@ class Panel:
                 "repeat": int(normalized["repeat"]),
                 "face_coverage_status": face_status,
                 "front_obstacle": front_obstacle,
+                "front_clearance_cm": front_clearance_cm,
                 "target_bearing_deg": bearing,
                 "reason": "current house face is already saturated at an edge segment and the forward corridor is clear; advance forward along the house edge to observe the next face instead of continuing lateral strafe into side obstruction",
             }
@@ -5167,7 +5233,7 @@ class Panel:
             forward_text = (
                 f"face coverage corner advance: {last_face_id or 'unknown'} segment "
                 f"{segment_index}/{max(0, segment_count - 1)} repeated "
-                f"{segment_visual_count}/{segment_visit_count}, front_clear=1; "
+                f"{segment_visual_count}/{segment_visit_count}, front_clearance={front_clearance_cm}; "
                 f"advance w x{int(normalized['repeat'])}"
             )
             normalized["reason"] = (reason + " | " if reason else "") + forward_text
@@ -5274,7 +5340,7 @@ class Panel:
             return normalized
         normalized = self._apply_front_obstacle_detour_override(normalized, labeling_dir)
         rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
-        if rule_type == "coverage_search_altitude_raise":
+        if rule_type in {"coverage_search_altitude_raise", "front_obstacle_structured_detour"}:
             return normalized
         normalized = self._apply_face_coverage_orbit_override(normalized, labeling_dir)
         rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
@@ -5411,7 +5477,7 @@ class Panel:
                 "centered_depth_proxy": "Also finish when an enterable target-house entry is roughly centered, has a sufficiently large YOLO bbox, YOLO+Depth marks the opening traversable, and the doorway/target-house distance is within the near-entry proxy range.",
                 "closed_entry_full_coverage": "If only close door/closed/non-traversable narrow-door evidence is found, do not finish until perimeter_coverage_status.full_coverage_ready=true and no open/traversable/approachable entry remains.",
                 "face_edge_coverage": "During no-entry/closed-entry search, use face_coverage_status to avoid revisiting the same house face segment. Continue orbiting toward unobserved face segments before declaring no enterable entry.",
-                "face_corner_forward": "If the current face edge segment is already repeatedly observed and the front corridor is clear, advance forward along the house edge to reveal the next face instead of continuing lateral strafe into side obstacles.",
+                "face_corner_forward": "If the current face edge segment is already repeatedly observed and the front corridor has enough clearance, advance forward along the house edge to reveal the next face instead of continuing lateral strafe into side obstacles. Do not use corner-forward when the front wall/porch/ceiling is closer than the safety clearance.",
                 "temporary_search_altitude": "Only during incomplete target-house perimeter search, if a wall-like front obstacle blocks ground-level orbiting, climb temporarily with r, recapture, then continue only if depth becomes safe. Restore altitude after the current house search finishes.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
@@ -5472,9 +5538,10 @@ class Panel:
             "and face_coverage_status.full_coverage_ready=false, do not turn back to resample the same edge. Keep the same "
             "lateral orbit direction with a/d toward unobserved face segments, using short yaw only when re-centering is needed.\n"
             "At a house-face corner, lateral orbit is not always correct. If the current face edge segment is saturated, "
-            "the target house remains roughly in view, and depth says the forward corridor is clear, advance forward with w "
+            "the target house remains roughly in view, and depth says the forward corridor has enough safety clearance, advance forward with w "
             "to continue searching along the next face. Do not keep strafing sideways into fences/walls or away from the "
-            "target just because face coverage is incomplete.\n"
+            "target just because face coverage is incomplete. If the front minimum/effective clearance is close, first back off "
+            "or detour; never use long forward motion into a wall-like/porch/ceiling surface.\n"
             "Temporary altitude is allowed only for target-house perimeter search: if coverage_altitude_status.should_raise=true, "
             "use r to climb and capture again to check whether the front wall/fence-like obstacle becomes passable from above. "
             "Do not use high altitude for ordinary approach or target-boundary transit. After this house search finishes, "
