@@ -37,8 +37,13 @@ DEFAULT_PERIMETER_BIN_IDS = [
     "south",
     "south_east",
 ]
+DEFAULT_FACE_IDS = ["east", "north", "west", "south"]
+DEFAULT_FACE_SEGMENT_COUNT = 5
+DEFAULT_FACE_OBSERVED_RANGE_HALF = 0.18
 NO_ENTRY_MIN_VISITED_COVERAGE_RATIO = 0.75
 NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO = 0.50
+NO_ENTRY_MIN_FACE_OBSERVED_COVERAGE_RATIO = 0.45
+NO_ENTRY_MIN_OBSERVED_FACE_COUNT = 3
 NO_ENTRY_MIN_TOTAL_OBSERVATIONS = 8
 RELIABLE_ENTRY_ASSOCIATION_THRESHOLD = 0.65
 NON_ENTERABLE_MAX_OPENING_WIDTH_CM = 90.0
@@ -123,6 +128,10 @@ def _safe_float(value: Any, default: Optional[float] = 0.0) -> Optional[float]:
         return default
 
 
+def _clamp_float(value: float, low: float, high: float) -> float:
+    return max(float(low), min(float(high), float(value)))
+
+
 def _normalize_angle_360(angle_deg: float) -> float:
     return float(angle_deg) % 360.0
 
@@ -164,13 +173,72 @@ def _default_perimeter_coverage() -> Dict[str, Any]:
     }
 
 
+def _default_face_segment() -> Dict[str, Any]:
+    return {
+        "visited": False,
+        "observed": False,
+        "visit_count": 0,
+        "visual_observation_count": 0,
+        "last_visit_time": None,
+        "last_viewpoint_angle_deg": None,
+        "last_target_bearing_deg": None,
+        "last_distance_cm": None,
+    }
+
+
+def _default_face_record() -> Dict[str, Any]:
+    return {
+        "visited": False,
+        "observed": False,
+        "visit_count": 0,
+        "visual_observation_count": 0,
+        "visited_segment_count": 0,
+        "observed_segment_count": 0,
+        "coverage_ratio": 0.0,
+        "observed_coverage_ratio": 0.0,
+        "last_visit_time": None,
+        "last_edge_t": None,
+        "last_segment_index": None,
+        "segments": [_default_face_segment() for _ in range(DEFAULT_FACE_SEGMENT_COUNT)],
+    }
+
+
+def _default_face_coverage() -> Dict[str, Any]:
+    segment_count = max(1, int(DEFAULT_FACE_SEGMENT_COUNT))
+    total_segment_count = len(DEFAULT_FACE_IDS) * segment_count
+    return {
+        "face_count": len(DEFAULT_FACE_IDS),
+        "segment_count_per_face": segment_count,
+        "total_segment_count": total_segment_count,
+        "visited_face_count": 0,
+        "observed_face_count": 0,
+        "visited_segment_count": 0,
+        "observed_segment_count": 0,
+        "visited_coverage_ratio": 0.0,
+        "observed_coverage_ratio": 0.0,
+        "total_observations": 0,
+        "visual_observation_count": 0,
+        "last_face_id": "",
+        "last_segment_index": None,
+        "last_edge_t": None,
+        "last_viewpoint_angle_deg": None,
+        "last_distance_cm": None,
+        "faces": {face_id: _default_face_record() for face_id in DEFAULT_FACE_IDS},
+    }
+
+
 def _default_search_completion_evidence() -> Dict[str, Any]:
     return {
         "no_entry_after_full_coverage": False,
         "full_coverage_ready": False,
+        "perimeter_coverage_ready": False,
+        "face_coverage_ready": False,
         "has_reliable_entry": False,
         "visited_coverage_ratio": 0.0,
         "observed_coverage_ratio": 0.0,
+        "face_visited_coverage_ratio": 0.0,
+        "face_observed_coverage_ratio": 0.0,
+        "observed_face_count": 0,
         "total_observations": 0,
         "candidate_entry_count": 0,
         "rejected_entry_count": 0,
@@ -182,6 +250,8 @@ def _default_search_completion_evidence() -> Dict[str, Any]:
         "thresholds": {
             "min_visited_coverage_ratio": NO_ENTRY_MIN_VISITED_COVERAGE_RATIO,
             "min_observed_coverage_ratio": NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO,
+            "min_face_observed_coverage_ratio": NO_ENTRY_MIN_FACE_OBSERVED_COVERAGE_RATIO,
+            "min_observed_face_count": NO_ENTRY_MIN_OBSERVED_FACE_COUNT,
             "min_total_observations": NO_ENTRY_MIN_TOTAL_OBSERVATIONS,
             "reliable_entry_association_threshold": RELIABLE_ENTRY_ASSOCIATION_THRESHOLD,
             "non_enterable_max_opening_width_cm": NON_ENTERABLE_MAX_OPENING_WIDTH_CM,
@@ -217,6 +287,7 @@ def _default_semantic_memory() -> Dict[str, Any]:
             "rejected_entry_count": 0,
         },
         "perimeter_coverage": _default_perimeter_coverage(),
+        "face_coverage": _default_face_coverage(),
         "search_completion_evidence": _default_search_completion_evidence(),
         "searched_sectors": {
             sector_id: {
@@ -297,6 +368,7 @@ class EntrySearchMemoryStore:
         self.recent_decisions_limit = max(1, int(recent_decisions_limit))
         self.top_candidates_limit = max(1, int(top_candidates_limit))
         self.episodic_limit = max(1, int(episodic_limit))
+        self._houses_config_cache: Optional[Dict[str, Any]] = None
         self.data: Dict[str, Any] = {
             "version": DEFAULT_VERSION,
             "updated_at": _now_text(),
@@ -423,6 +495,154 @@ class EntrySearchMemoryStore:
         if ensure:
             return self.ensure_house(hid)
         return None
+
+    def _load_houses_config(self) -> Dict[str, Any]:
+        if isinstance(self._houses_config_cache, dict):
+            return self._houses_config_cache
+        if not os.path.exists(DEFAULT_HOUSES_CONFIG_PATH):
+            self._houses_config_cache = {}
+            return self._houses_config_cache
+        try:
+            with open(DEFAULT_HOUSES_CONFIG_PATH, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            self._houses_config_cache = payload if isinstance(payload, dict) else {}
+        except Exception:
+            self._houses_config_cache = {}
+        return self._houses_config_cache
+
+    def _house_config_for_id(self, house_id: str) -> Dict[str, Any]:
+        config = self._load_houses_config()
+        houses = config.get("houses", []) if isinstance(config.get("houses"), list) else []
+        target_id = str(house_id or "").strip()
+        for house in houses:
+            if isinstance(house, dict) and str(house.get("id", "") or "").strip() == target_id:
+                return house
+        return {}
+
+    def _image_to_world_from_houses_config(self, image_x: float, image_y: float) -> Optional[Dict[str, float]]:
+        config = self._load_houses_config()
+        overhead = config.get("overhead_map", {}) if isinstance(config.get("overhead_map"), dict) else {}
+        calibration = overhead.get("calibration", {}) if isinstance(overhead.get("calibration"), dict) else {}
+        affine = calibration.get("affine_world_to_image", [])
+        if (
+            not isinstance(affine, list)
+            or len(affine) < 2
+            or not isinstance(affine[0], list)
+            or not isinstance(affine[1], list)
+            or len(affine[0]) < 3
+            or len(affine[1]) < 3
+        ):
+            return None
+        a = _safe_float(affine[0][0], None)
+        b = _safe_float(affine[0][1], None)
+        c = _safe_float(affine[0][2], None)
+        d = _safe_float(affine[1][0], None)
+        e = _safe_float(affine[1][1], None)
+        f = _safe_float(affine[1][2], None)
+        if None in (a, b, c, d, e, f):
+            return None
+        det = float(a) * float(e) - float(b) * float(d)
+        if abs(det) < 1e-8:
+            return None
+        ix = float(image_x) - float(c)
+        iy = float(image_y) - float(f)
+        world_x = (float(e) * ix - float(b) * iy) / det
+        world_y = (-float(d) * ix + float(a) * iy) / det
+        return {"x": float(world_x), "y": float(world_y)}
+
+    def _house_world_bbox_for_face_memory(self, house_id: str, target_context: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        house = self._house_config_for_id(house_id)
+        bbox = house.get("map_bbox_image", {}) if isinstance(house.get("map_bbox_image"), dict) else {}
+        points: List[Dict[str, float]] = []
+        if bbox:
+            x1 = _safe_float(bbox.get("x1"), None)
+            y1 = _safe_float(bbox.get("y1"), None)
+            x2 = _safe_float(bbox.get("x2"), None)
+            y2 = _safe_float(bbox.get("y2"), None)
+            if None not in (x1, y1, x2, y2):
+                for px, py in ((x1, y1), (x1, y2), (x2, y1), (x2, y2)):
+                    world = self._image_to_world_from_houses_config(float(px), float(py))
+                    if world:
+                        points.append(world)
+        if points:
+            xs = [float(point["x"]) for point in points]
+            ys = [float(point["y"]) for point in points]
+            return {
+                "min_x": min(xs),
+                "max_x": max(xs),
+                "min_y": min(ys),
+                "max_y": max(ys),
+                "center_x": (min(xs) + max(xs)) / 2.0,
+                "center_y": (min(ys) + max(ys)) / 2.0,
+                "source": "map_bbox_image_affine",
+            }
+
+        target_context = target_context if isinstance(target_context, dict) else {}
+        center = target_context.get("target_house_center_world", {})
+        center = center if isinstance(center, dict) else {}
+        center_x = _safe_float(house.get("center_x"), None)
+        center_y = _safe_float(house.get("center_y"), None)
+        if center_x is None:
+            center_x = _safe_float(center.get("x"), None)
+        if center_y is None:
+            center_y = _safe_float(center.get("y"), None)
+        radius = _safe_float(house.get("radius_cm"), None)
+        if radius is None:
+            radius = _safe_float(target_context.get("target_house_radius_cm"), None)
+        if None in (center_x, center_y, radius):
+            return None
+        half = max(150.0, float(radius) * 0.45)
+        return {
+            "min_x": float(center_x) - half,
+            "max_x": float(center_x) + half,
+            "min_y": float(center_y) - half,
+            "max_y": float(center_y) + half,
+            "center_x": float(center_x),
+            "center_y": float(center_y),
+            "source": "center_radius_fallback",
+        }
+
+    def _face_segment_from_pose(
+        self,
+        house_id: str,
+        target_context: Dict[str, Any],
+        *,
+        segment_count: int = DEFAULT_FACE_SEGMENT_COUNT,
+    ) -> Optional[Dict[str, Any]]:
+        target_context = target_context if isinstance(target_context, dict) else {}
+        pose = target_context.get("uav_pose_world", {})
+        pose = pose if isinstance(pose, dict) else {}
+        uav_x = _safe_float(pose.get("x"), None)
+        uav_y = _safe_float(pose.get("y"), None)
+        bbox = self._house_world_bbox_for_face_memory(house_id, target_context)
+        if bbox is None or None in (uav_x, uav_y):
+            return None
+        min_x = float(bbox["min_x"])
+        max_x = float(bbox["max_x"])
+        min_y = float(bbox["min_y"])
+        max_y = float(bbox["max_y"])
+        center_x = float(bbox["center_x"])
+        center_y = float(bbox["center_y"])
+        half_x = max(1.0, (max_x - min_x) / 2.0)
+        half_y = max(1.0, (max_y - min_y) / 2.0)
+        dx = float(uav_x) - center_x
+        dy = float(uav_y) - center_y
+        if abs(dx) / half_x >= abs(dy) / half_y:
+            face_id = "east" if dx >= 0.0 else "west"
+            edge_t = (float(uav_y) - min_y) / max(1.0, max_y - min_y)
+        else:
+            face_id = "north" if dy >= 0.0 else "south"
+            edge_t = (float(uav_x) - min_x) / max(1.0, max_x - min_x)
+        edge_t = _clamp_float(edge_t, 0.0, 1.0)
+        count = max(1, int(segment_count))
+        segment_index = min(count - 1, max(0, int(edge_t * float(count))))
+        return {
+            "face_id": face_id,
+            "edge_t": round(float(edge_t), 4),
+            "segment_index": int(segment_index),
+            "bbox_world": bbox,
+            "uav_pose_world": {"x": float(uav_x), "y": float(uav_y)},
+        }
 
     @property
     def house_registry(self) -> Dict[str, Dict[str, Any]]:
@@ -587,6 +807,87 @@ class EntrySearchMemoryStore:
         self._normalize_root()
         return memory
 
+    def _update_face_coverage(
+        self,
+        semantic_memory: Dict[str, Any],
+        house_id: str,
+        target_context: Dict[str, Any],
+        *,
+        viewpoint_angle: float,
+        target_bearing: Optional[float],
+        distance_cm: Optional[float],
+        visually_observed: bool,
+        visit_time: Optional[float],
+    ) -> None:
+        coverage = semantic_memory.setdefault("face_coverage", _default_face_coverage())
+        if not isinstance(coverage, dict):
+            coverage = _default_face_coverage()
+            semantic_memory["face_coverage"] = coverage
+        segment_count = max(1, int(coverage.get("segment_count_per_face", DEFAULT_FACE_SEGMENT_COUNT) or DEFAULT_FACE_SEGMENT_COUNT))
+        face_hit = self._face_segment_from_pose(house_id, target_context, segment_count=segment_count)
+        if not face_hit:
+            return
+        faces = coverage.setdefault("faces", {})
+        if not isinstance(faces, dict):
+            faces = {}
+            coverage["faces"] = faces
+        face_id = str(face_hit.get("face_id") or "")
+        if face_id not in DEFAULT_FACE_IDS:
+            return
+        face = faces.get(face_id)
+        if not isinstance(face, dict):
+            face = _default_face_record()
+            faces[face_id] = face
+        segments = face.get("segments", [])
+        if not isinstance(segments, list):
+            segments = []
+        while len(segments) < segment_count:
+            segments.append(_default_face_segment())
+        if len(segments) > segment_count:
+            del segments[segment_count:]
+        face["segments"] = segments
+
+        edge_t = float(face_hit.get("edge_t", 0.0) or 0.0)
+        start_t = _clamp_float(edge_t - DEFAULT_FACE_OBSERVED_RANGE_HALF, 0.0, 1.0)
+        end_t = _clamp_float(edge_t + DEFAULT_FACE_OBSERVED_RANGE_HALF, 0.0, 1.0)
+        touched_indices: List[int] = []
+        timestamp = visit_time if visit_time is not None else datetime.now().timestamp()
+        for index, segment in enumerate(segments):
+            if not isinstance(segment, dict):
+                segment = _default_face_segment()
+                segments[index] = segment
+            seg_start = float(index) / float(segment_count)
+            seg_end = float(index + 1) / float(segment_count)
+            if seg_end < start_t or seg_start > end_t:
+                continue
+            touched_indices.append(index)
+            segment["visited"] = True
+            segment["visit_count"] = int(segment.get("visit_count", 0) or 0) + 1
+            if visually_observed:
+                segment["observed"] = True
+                segment["visual_observation_count"] = int(segment.get("visual_observation_count", 0) or 0) + 1
+            segment["last_visit_time"] = timestamp
+            segment["last_viewpoint_angle_deg"] = round(float(viewpoint_angle), 3)
+            segment["last_target_bearing_deg"] = None if target_bearing is None else round(float(target_bearing), 3)
+            segment["last_distance_cm"] = None if distance_cm is None else round(float(distance_cm), 3)
+
+        face["visited"] = True
+        face["visit_count"] = int(face.get("visit_count", 0) or 0) + 1
+        if visually_observed:
+            face["observed"] = True
+            face["visual_observation_count"] = int(face.get("visual_observation_count", 0) or 0) + 1
+        face["last_visit_time"] = timestamp
+        face["last_edge_t"] = round(edge_t, 4)
+        face["last_segment_index"] = int(face_hit.get("segment_index", 0) or 0)
+
+        coverage["last_face_id"] = face_id
+        coverage["last_segment_index"] = int(face_hit.get("segment_index", 0) or 0)
+        coverage["last_edge_t"] = round(edge_t, 4)
+        coverage["last_viewpoint_angle_deg"] = round(float(viewpoint_angle), 3)
+        coverage["last_distance_cm"] = None if distance_cm is None else round(float(distance_cm), 3)
+        coverage["last_bbox_world"] = face_hit.get("bbox_world", {})
+        coverage["last_touched_segments"] = touched_indices
+
     def update_perimeter_coverage(
         self,
         house_id: str,
@@ -653,6 +954,16 @@ class EntrySearchMemoryStore:
         if visually_observed:
             coverage["visual_observation_count"] = int(coverage.get("visual_observation_count", 0) or 0) + 1
 
+        self._update_face_coverage(
+            semantic_memory,
+            house_id,
+            target_context,
+            viewpoint_angle=float(viewpoint_angle),
+            target_bearing=target_bearing,
+            distance_cm=distance_cm,
+            visually_observed=visually_observed,
+            visit_time=visit_time,
+        )
         self._normalize_semantic_memory(memory)
         memory["updated_at"] = _now_text()
         self._normalize_root()
@@ -886,6 +1197,7 @@ class EntrySearchMemoryStore:
         semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
         candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
         coverage = semantic_memory.get("perimeter_coverage", {}) if isinstance(semantic_memory.get("perimeter_coverage"), dict) else {}
+        face_coverage = semantic_memory.get("face_coverage", {}) if isinstance(semantic_memory.get("face_coverage"), dict) else {}
         completion_evidence = (
             semantic_memory.get("search_completion_evidence", {})
             if isinstance(semantic_memory.get("search_completion_evidence"), dict)
@@ -917,6 +1229,8 @@ class EntrySearchMemoryStore:
                 "searched": bool(search_status in {"SEARCHED", "ENTERED", "NO_ENTRY_FOUND"}) or str(memory.get("house_status", "") or "").strip() in {"EXPLORED", "PERSON_FOUND"},
                 "visited_coverage_ratio": round(float(coverage.get("visited_coverage_ratio", 0.0) or 0.0), 4),
                 "observed_coverage_ratio": round(float(coverage.get("observed_coverage_ratio", 0.0) or 0.0), 4),
+                "face_observed_coverage_ratio": round(float(face_coverage.get("observed_coverage_ratio", 0.0) or 0.0), 4),
+                "observed_face_count": int(face_coverage.get("observed_face_count", 0) or 0),
                 "no_entry_after_full_coverage": bool(completion_evidence.get("no_entry_after_full_coverage", False)),
                 "updated_at": _now_text(),
             }
@@ -1040,6 +1354,95 @@ class EntrySearchMemoryStore:
         coverage["observed_bins"] = [bin_id for bin_id in DEFAULT_PERIMETER_BIN_IDS if bins[bin_id].get("observed")]
         return coverage
 
+    def _refresh_face_coverage(self, semantic_memory: Dict[str, Any]) -> Dict[str, Any]:
+        coverage = semantic_memory.get("face_coverage", {})
+        if not isinstance(coverage, dict):
+            coverage = _default_face_coverage()
+            semantic_memory["face_coverage"] = coverage
+        defaults = _default_face_coverage()
+        for key, value in defaults.items():
+            coverage.setdefault(key, copy.deepcopy(value))
+        segment_count = max(1, int(coverage.get("segment_count_per_face", DEFAULT_FACE_SEGMENT_COUNT) or DEFAULT_FACE_SEGMENT_COUNT))
+        coverage["segment_count_per_face"] = segment_count
+        faces = coverage.get("faces", {})
+        if not isinstance(faces, dict):
+            faces = {}
+            coverage["faces"] = faces
+        visited_face_count = 0
+        observed_face_count = 0
+        visited_segment_count = 0
+        observed_segment_count = 0
+        total_observations = 0
+        visual_observation_count = 0
+        for face_id in DEFAULT_FACE_IDS:
+            face = faces.get(face_id)
+            if not isinstance(face, dict):
+                face = _default_face_record()
+                faces[face_id] = face
+            for key, value in _default_face_record().items():
+                if key == "segments":
+                    continue
+                face.setdefault(key, copy.deepcopy(value))
+            segments = face.get("segments", [])
+            if not isinstance(segments, list):
+                segments = []
+            while len(segments) < segment_count:
+                segments.append(_default_face_segment())
+            if len(segments) > segment_count:
+                del segments[segment_count:]
+            face["segments"] = segments
+            face_visited_segments = 0
+            face_observed_segments = 0
+            face_visits = 0
+            face_visuals = 0
+            for index, segment in enumerate(segments):
+                if not isinstance(segment, dict):
+                    segment = _default_face_segment()
+                    segments[index] = segment
+                for key, value in _default_face_segment().items():
+                    segment.setdefault(key, copy.deepcopy(value))
+                segment["visit_count"] = max(0, int(segment.get("visit_count", 0) or 0))
+                segment["visual_observation_count"] = max(0, int(segment.get("visual_observation_count", 0) or 0))
+                segment["visited"] = bool(segment.get("visited", False) or segment["visit_count"] > 0)
+                segment["observed"] = bool(segment.get("observed", False) or segment["visual_observation_count"] > 0)
+                if segment["visited"]:
+                    face_visited_segments += 1
+                if segment["observed"]:
+                    face_observed_segments += 1
+                face_visits += int(segment["visit_count"])
+                face_visuals += int(segment["visual_observation_count"])
+            face["visit_count"] = max(int(face.get("visit_count", 0) or 0), face_visits)
+            face["visual_observation_count"] = max(int(face.get("visual_observation_count", 0) or 0), face_visuals)
+            face["visited_segment_count"] = face_visited_segments
+            face["observed_segment_count"] = face_observed_segments
+            face["visited"] = bool(face.get("visited", False) or face_visited_segments > 0)
+            face["observed"] = bool(face.get("observed", False) or face_observed_segments > 0)
+            face["coverage_ratio"] = round(float(face_visited_segments) / float(segment_count), 4)
+            face["observed_coverage_ratio"] = round(float(face_observed_segments) / float(segment_count), 4)
+            if face["visited"]:
+                visited_face_count += 1
+            if face["observed"]:
+                observed_face_count += 1
+            visited_segment_count += face_visited_segments
+            observed_segment_count += face_observed_segments
+            total_observations += int(face["visit_count"])
+            visual_observation_count += int(face["visual_observation_count"])
+        total_segment_count = max(1, len(DEFAULT_FACE_IDS) * segment_count)
+        coverage["face_count"] = len(DEFAULT_FACE_IDS)
+        coverage["total_segment_count"] = total_segment_count
+        coverage["visited_face_count"] = visited_face_count
+        coverage["observed_face_count"] = observed_face_count
+        coverage["visited_segment_count"] = visited_segment_count
+        coverage["observed_segment_count"] = observed_segment_count
+        coverage["visited_coverage_ratio"] = round(float(visited_segment_count) / float(total_segment_count), 4)
+        coverage["observed_coverage_ratio"] = round(float(observed_segment_count) / float(total_segment_count), 4)
+        coverage["total_observations"] = max(int(coverage.get("total_observations", 0) or 0), total_observations)
+        coverage["visual_observation_count"] = max(int(coverage.get("visual_observation_count", 0) or 0), visual_observation_count)
+        coverage["visited_faces"] = [face_id for face_id in DEFAULT_FACE_IDS if faces[face_id].get("visited")]
+        coverage["observed_faces"] = [face_id for face_id in DEFAULT_FACE_IDS if faces[face_id].get("observed")]
+        coverage["unobserved_faces"] = [face_id for face_id in DEFAULT_FACE_IDS if not faces[face_id].get("observed")]
+        return coverage
+
     def _entry_is_reliable_target_entry(self, entry: Dict[str, Any]) -> bool:
         status = str(entry.get("status") or entry.get("entry_state") or "").strip().lower()
         entry_type = str(entry.get("entry_type") or entry.get("semantic_class") or "").strip().lower().replace("_", " ")
@@ -1096,6 +1499,7 @@ class EntrySearchMemoryStore:
         semantic_memory = memory.get("semantic_memory", {}) if isinstance(memory.get("semantic_memory"), dict) else {}
         search_summary = semantic_memory.get("search_summary", {}) if isinstance(semantic_memory.get("search_summary"), dict) else {}
         coverage = semantic_memory.get("perimeter_coverage", {}) if isinstance(semantic_memory.get("perimeter_coverage"), dict) else {}
+        face_coverage = semantic_memory.get("face_coverage", {}) if isinstance(semantic_memory.get("face_coverage"), dict) else {}
         candidate_entries = semantic_memory.get("candidate_entries", []) if isinstance(semantic_memory.get("candidate_entries"), list) else []
         candidate_count = len(candidate_entries)
         rejected_count = int(search_summary.get("rejected_entry_count", 0) or 0)
@@ -1104,6 +1508,10 @@ class EntrySearchMemoryStore:
         visited_ratio = float(coverage.get("visited_coverage_ratio", 0.0) or 0.0)
         observed_ratio = float(coverage.get("observed_coverage_ratio", 0.0) or 0.0)
         total_observations = int(coverage.get("total_observations", 0) or 0)
+        face_visited_ratio = float(face_coverage.get("visited_coverage_ratio", 0.0) or 0.0)
+        face_observed_ratio = float(face_coverage.get("observed_coverage_ratio", 0.0) or 0.0)
+        observed_face_count = int(face_coverage.get("observed_face_count", 0) or 0)
+        face_observations = int(face_coverage.get("total_observations", 0) or 0)
         has_reliable_entry = any(
             self._entry_is_reliable_target_entry(entry)
             for entry in candidate_entries
@@ -1121,11 +1529,16 @@ class EntrySearchMemoryStore:
             and (self._entry_is_rejected_candidate(entry) or self._entry_is_non_enterable_candidate(entry))
         )
         unresolved_count = max(0, candidate_count - rejected_or_non_enterable_count)
-        full_coverage_ready = (
+        perimeter_coverage_ready = (
             visited_ratio >= NO_ENTRY_MIN_VISITED_COVERAGE_RATIO
             and observed_ratio >= NO_ENTRY_MIN_OBSERVED_COVERAGE_RATIO
             and total_observations >= NO_ENTRY_MIN_TOTAL_OBSERVATIONS
         )
+        face_coverage_ready = (
+            face_observed_ratio >= NO_ENTRY_MIN_FACE_OBSERVED_COVERAGE_RATIO
+            and observed_face_count >= NO_ENTRY_MIN_OBSERVED_FACE_COUNT
+        )
+        full_coverage_ready = bool(perimeter_coverage_ready and (face_coverage_ready or face_observations <= 0))
         all_candidates_rejected_or_none = candidate_count == 0 or rejected_or_non_enterable_count >= candidate_count
         no_entry_after_full_coverage = bool(
             full_coverage_ready
@@ -1134,10 +1547,14 @@ class EntrySearchMemoryStore:
             and all_candidates_rejected_or_none
         )
         reasons: List[str] = []
-        if full_coverage_ready:
+        if perimeter_coverage_ready:
             reasons.append("perimeter_coverage_ready")
         else:
             reasons.append("perimeter_coverage_incomplete")
+        if face_coverage_ready:
+            reasons.append("face_coverage_ready")
+        elif face_observations > 0:
+            reasons.append("face_coverage_incomplete")
         if has_reliable_entry:
             reasons.append("reliable_entry_present")
         else:
@@ -1155,9 +1572,14 @@ class EntrySearchMemoryStore:
             {
                 "no_entry_after_full_coverage": no_entry_after_full_coverage,
                 "full_coverage_ready": full_coverage_ready,
+                "perimeter_coverage_ready": perimeter_coverage_ready,
+                "face_coverage_ready": face_coverage_ready,
                 "has_reliable_entry": has_reliable_entry,
                 "visited_coverage_ratio": round(visited_ratio, 4),
                 "observed_coverage_ratio": round(observed_ratio, 4),
+                "face_visited_coverage_ratio": round(face_visited_ratio, 4),
+                "face_observed_coverage_ratio": round(face_observed_ratio, 4),
+                "observed_face_count": observed_face_count,
                 "total_observations": total_observations,
                 "candidate_entry_count": candidate_count,
                 "rejected_entry_count": rejected_count,
@@ -1264,6 +1686,7 @@ class EntrySearchMemoryStore:
             "rejected_entry_count": rejected_entry_count,
         }
         self._refresh_perimeter_coverage(semantic_memory)
+        self._refresh_face_coverage(semantic_memory)
         self._refresh_search_completion_evidence(memory)
 
 
@@ -1271,6 +1694,7 @@ __all__ = [
     "DEFAULT_ENTRY_SEARCH_MEMORY_PATH",
     "DEFAULT_HOUSES_CONFIG_PATH",
     "DEFAULT_PERIMETER_BIN_IDS",
+    "DEFAULT_FACE_IDS",
     "DEFAULT_SECTOR_IDS",
     "EntrySearchMemoryStore",
 ]

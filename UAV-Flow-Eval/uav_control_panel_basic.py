@@ -89,6 +89,11 @@ LLM_ENTERABLE_ENTRY_MIN_OPENING_WIDTH_CM = 90.0
 LLM_CLOSED_ENTRY_ORBIT_DISTANCE_CM = 650.0
 LLM_COVERAGE_ORBIT_REPEAT = 4
 LLM_COVERAGE_ORBIT_DEFAULT_SYMBOL = "d"
+LLM_FACE_COVERAGE_REPEAT_THRESHOLD = 4
+LLM_FACE_COVERAGE_ORBIT_REPEAT = 5
+LLM_COVERAGE_ALTITUDE_RAISE_CM = 120.0
+LLM_COVERAGE_ALTITUDE_STEP_REPEAT = 3
+LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM = 25.0
 LLM_YAW_STEP_DEG = 30.0
 LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG = 18.0
 LLM_TARGET_REACQUIRE_MAX_YAW_STEPS = 12
@@ -432,6 +437,7 @@ class Panel:
         self.llm_task_execution_trace: Dict[str, Any] = {}
         self.llm_target_reacquire_lock: Dict[str, Any] = {}
         self.llm_obstacle_detour_lock: Dict[str, Any] = {}
+        self.llm_search_altitude_lock: Dict[str, Any] = {}
 
         self.eval_dir = os.path.dirname(os.path.abspath(__file__))
         self.houses_config_path = os.path.join(self.eval_dir, "houses_config.json")
@@ -2718,6 +2724,7 @@ class Panel:
         self.llm_task_current_index = 0
         self.llm_target_reacquire_lock = {}
         self.llm_obstacle_detour_lock = {}
+        self.llm_search_altitude_lock = {}
         targets = self.llm_task_plan.get("ordered_targets", []) if isinstance(self.llm_task_plan.get("ordered_targets"), list) else []
         for idx, item in enumerate(targets):
             if isinstance(item, dict):
@@ -2738,6 +2745,7 @@ class Panel:
         self.llm_task_execution_trace = {}
         self.llm_target_reacquire_lock = {}
         self.llm_obstacle_detour_lock = {}
+        self.llm_search_altitude_lock = {}
         self._refresh_llm_task_preview()
         self.llm_task_status_var.set("LLM Task: cleared.")
 
@@ -2890,6 +2898,7 @@ class Panel:
         self.llm_control_decision_history = []
         self.llm_target_reacquire_lock = {}
         self.llm_obstacle_detour_lock = {}
+        self.llm_search_altitude_lock = {}
         reuse_labeling_dir = ""
         self._set_llm_control_var(self.llm_control_status_var, "LLM Control: running")
         self._append_llm_control_log(f"Started LLM control loop with max_decisions={max_steps}.")
@@ -3059,6 +3068,7 @@ class Panel:
         finish_type = str(completion.get("finish_type", "") or "")
         source_labeling_dir = str(completion.get("source_labeling_dir", "") or "")
         self._append_llm_control_log(f"House search finished: house={house_id} finish_type={finish_type} reason={completion.get('reason', '')}")
+        self._restore_search_altitude_if_needed(source_labeling_dir, house_id, reason=finish_type)
         if not self.llm_task_plan_applied:
             self._set_llm_control_var(self.llm_control_status_var, f"LLM Control: house {house_id} finished")
             self.llm_control_stop_event.set()
@@ -3098,6 +3108,7 @@ class Panel:
             return False
         self.llm_target_reacquire_lock = {}
         self.llm_obstacle_detour_lock = {}
+        self.llm_search_altitude_lock = {}
         self._append_llm_task_event("target_started", next_house_id, {"reason": f"previous_finished:{finish_type}"})
         self._save_llm_task_plan_files(source_labeling_dir)
         self.root.after(0, self._refresh_llm_task_preview)
@@ -3662,6 +3673,9 @@ class Panel:
             if self.llm_obstacle_detour_lock:
                 self.llm_obstacle_detour_lock = {}
             return normalized
+        altitude_normalized = self._apply_coverage_altitude_override(normalized, labeling_dir)
+        if str(altitude_normalized.get("action_symbol", "") or "") == "r":
+            return altitude_normalized
         metadata = self._metadata_from_labeling_dir(labeling_dir)
         step_index = int(metadata.get("step_index", 0) or 0)
         lock = self.llm_obstacle_detour_lock if isinstance(self.llm_obstacle_detour_lock, dict) else {}
@@ -4514,6 +4528,255 @@ class Panel:
             "completion_reasons": completion.get("reasons", []) if isinstance(completion.get("reasons"), list) else [],
         }
 
+    def _face_coverage_status_for_house(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
+        snapshot = self._read_json_file(Path(labeling_dir) / "entry_search_memory_snapshot_after.json")
+        memory = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
+        memories = memory.get("memories", {}) if isinstance(memory.get("memories"), dict) else {}
+        house_memory = memories.get(str(house_id), {}) if isinstance(memories, dict) else {}
+        semantic = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
+        coverage = semantic.get("face_coverage", {}) if isinstance(semantic.get("face_coverage"), dict) else {}
+        completion = semantic.get("search_completion_evidence", {}) if isinstance(semantic.get("search_completion_evidence"), dict) else {}
+        faces = coverage.get("faces", {}) if isinstance(coverage.get("faces"), dict) else {}
+        face_summaries: Dict[str, Any] = {}
+        for face_id, face in faces.items():
+            if not isinstance(face, dict):
+                continue
+            segments = face.get("segments", []) if isinstance(face.get("segments"), list) else []
+            observed_indices = [
+                index
+                for index, segment in enumerate(segments)
+                if isinstance(segment, dict) and bool(segment.get("observed", False))
+            ]
+            visited_indices = [
+                index
+                for index, segment in enumerate(segments)
+                if isinstance(segment, dict) and bool(segment.get("visited", False))
+            ]
+            face_summaries[str(face_id)] = {
+                "visited": bool(face.get("visited", False)),
+                "observed": bool(face.get("observed", False)),
+                "coverage_ratio": self._as_float_or_none(face.get("coverage_ratio")) or 0.0,
+                "observed_coverage_ratio": self._as_float_or_none(face.get("observed_coverage_ratio")) or 0.0,
+                "visit_count": int(face.get("visit_count", 0) or 0),
+                "visual_observation_count": int(face.get("visual_observation_count", 0) or 0),
+                "observed_segments": observed_indices,
+                "visited_segments": visited_indices,
+                "last_segment_index": face.get("last_segment_index"),
+                "last_edge_t": face.get("last_edge_t"),
+            }
+        last_face_id = str(coverage.get("last_face_id", "") or "")
+        last_segment_index = coverage.get("last_segment_index")
+        current_segment: Dict[str, Any] = {}
+        if last_face_id and last_face_id in faces:
+            face_payload = faces.get(last_face_id, {})
+            segments = face_payload.get("segments", []) if isinstance(face_payload, dict) and isinstance(face_payload.get("segments"), list) else []
+            try:
+                segment_index = int(last_segment_index)
+            except Exception:
+                segment_index = -1
+            if 0 <= segment_index < len(segments) and isinstance(segments[segment_index], dict):
+                segment = segments[segment_index]
+                current_segment = {
+                    "face_id": last_face_id,
+                    "segment_index": segment_index,
+                    "visited": bool(segment.get("visited", False)),
+                    "observed": bool(segment.get("observed", False)),
+                    "visit_count": int(segment.get("visit_count", 0) or 0),
+                    "visual_observation_count": int(segment.get("visual_observation_count", 0) or 0),
+                }
+        return {
+            "house_id": str(house_id or ""),
+            "visited_coverage_ratio": self._as_float_or_none(coverage.get("visited_coverage_ratio")) or 0.0,
+            "observed_coverage_ratio": self._as_float_or_none(coverage.get("observed_coverage_ratio")) or 0.0,
+            "observed_face_count": int(coverage.get("observed_face_count", 0) or 0),
+            "visited_face_count": int(coverage.get("visited_face_count", 0) or 0),
+            "observed_segment_count": int(coverage.get("observed_segment_count", 0) or 0),
+            "total_segment_count": int(coverage.get("total_segment_count", 0) or 0),
+            "last_face_id": last_face_id,
+            "last_segment_index": last_segment_index,
+            "last_edge_t": coverage.get("last_edge_t"),
+            "last_touched_segments": coverage.get("last_touched_segments", []) if isinstance(coverage.get("last_touched_segments"), list) else [],
+            "observed_faces": coverage.get("observed_faces", []) if isinstance(coverage.get("observed_faces"), list) else [],
+            "unobserved_faces": coverage.get("unobserved_faces", []) if isinstance(coverage.get("unobserved_faces"), list) else [],
+            "faces": face_summaries,
+            "current_segment": current_segment,
+            "face_coverage_ready": bool(completion.get("face_coverage_ready", False)),
+            "full_coverage_ready": bool(completion.get("full_coverage_ready", False)),
+            "completion_reasons": completion.get("reasons", []) if isinstance(completion.get("reasons"), list) else [],
+        }
+
+    def _pose_z_from_labeling_dir_or_state(self, fusion: Dict[str, Any], labeling_dir: str = "") -> Optional[float]:
+        target_context = fusion.get("target_context", {}) if isinstance(fusion.get("target_context"), dict) else {}
+        pose = target_context.get("uav_pose_world", {}) if isinstance(target_context.get("uav_pose_world"), dict) else {}
+        z = self._as_float_or_none(pose.get("z"))
+        if z is not None:
+            return z
+        labeling_path = Path(labeling_dir) if labeling_dir else Path()
+        for candidate in (
+            labeling_path / "pose_history_summary.json",
+            labeling_path / "state.json",
+        ):
+            payload = self._read_json_file(candidate)
+            pose_payload = payload.get("pose", {}) if isinstance(payload.get("pose"), dict) else {}
+            z = self._as_float_or_none(pose_payload.get("z"))
+            if z is not None:
+                return z
+            mission = payload.get("house_mission", {}) if isinstance(payload.get("house_mission"), dict) else {}
+            z = self._as_float_or_none(mission.get("uav_z"))
+            if z is not None:
+                return z
+        metadata = self._metadata_from_labeling_dir(labeling_dir) if labeling_dir else {}
+        capture_run_dir_raw = str(metadata.get("capture_run_dir", "") or "").strip()
+        if capture_run_dir_raw:
+            capture_run_dir = Path(capture_run_dir_raw)
+            state_payload = self._read_json_file(capture_run_dir / "inputs" / "state.json")
+            pose_payload = state_payload.get("pose", {}) if isinstance(state_payload.get("pose"), dict) else {}
+            z = self._as_float_or_none(pose_payload.get("z"))
+            if z is not None:
+                return z
+            mission = state_payload.get("house_mission", {}) if isinstance(state_payload.get("house_mission"), dict) else {}
+            z = self._as_float_or_none(mission.get("uav_z"))
+            if z is not None:
+                return z
+        latest_pose = self.latest_state.get("pose", {}) if isinstance(self.latest_state.get("pose"), dict) else {}
+        z = self._as_float_or_none(latest_pose.get("z"))
+        if z is not None:
+            return z
+        latest_mission = self.latest_state.get("house_mission", {}) if isinstance(self.latest_state.get("house_mission"), dict) else {}
+        return self._as_float_or_none(latest_mission.get("uav_z"))
+
+    def _coverage_altitude_status(self, fusion: Dict[str, Any], labeling_dir: str, house_id: str) -> Dict[str, Any]:
+        coverage = self._perimeter_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+        boundary = self._target_boundary_context(fusion, house_id) if house_id else {}
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        current_z = self._pose_z_from_labeling_dir_or_state(fusion, labeling_dir)
+        lock = self.llm_search_altitude_lock if isinstance(self.llm_search_altitude_lock, dict) else {}
+        if str(lock.get("target_house_id", "") or "") != str(house_id or ""):
+            lock = {}
+        base_z = self._as_float_or_none(lock.get("base_z_cm"))
+        if base_z is None:
+            base_z = current_z
+        target_z = None if base_z is None else base_z + float(LLM_COVERAGE_ALTITUDE_RAISE_CM)
+        coverage_incomplete = bool(
+            not bool(coverage.get("full_coverage_ready", False))
+            and (
+                (self._as_float_or_none(coverage.get("visited_coverage_ratio")) or 0.0) < 0.75
+                or (self._as_float_or_none(coverage.get("observed_coverage_ratio")) or 0.0) < 0.50
+            )
+        )
+        inside_search_boundary = bool(house_id and not bool(boundary.get("outside_search_boundary", False)))
+        front_blocking = bool(obstacle.get("blocking", False)) and not bool(obstacle.get("low_obstacle_passable", False))
+        elevated = bool(
+            current_z is not None
+            and target_z is not None
+            and current_z >= target_z - float(LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM)
+        )
+        should_raise = bool(
+            inside_search_boundary
+            and coverage_incomplete
+            and front_blocking
+            and current_z is not None
+            and target_z is not None
+            and current_z < target_z - float(LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM)
+        )
+        return {
+            "target_house_id": str(house_id or ""),
+            "current_z_cm": current_z,
+            "base_z_cm": base_z,
+            "target_z_cm": target_z,
+            "elevated": elevated,
+            "should_raise": should_raise,
+            "inside_search_boundary": inside_search_boundary,
+            "coverage_incomplete": coverage_incomplete,
+            "perimeter_coverage": coverage,
+            "front_obstacle": obstacle,
+            "active_lock": lock,
+            "reason": "front obstacle blocks perimeter search; climb temporarily to inspect/pass over wall-like obstruction" if should_raise else "",
+        }
+
+    def _apply_coverage_altitude_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        altitude = self._coverage_altitude_status(fusion, labeling_dir, house_id)
+        if not bool(altitude.get("should_raise", False)):
+            return normalized
+        current_z = self._as_float_or_none(altitude.get("current_z_cm"))
+        base_z = self._as_float_or_none(altitude.get("base_z_cm"))
+        target_z = self._as_float_or_none(altitude.get("target_z_cm"))
+        if current_z is None or base_z is None or target_z is None:
+            return normalized
+        up_step_cm = abs(float(MOVE_COMMANDS.get("r", {}).get("up_cm", 20.0) or 20.0))
+        needed_repeat = max(1, int(math.ceil(max(0.0, target_z - current_z) / max(1.0, up_step_cm))))
+        repeat = min(self._llm_control_repeat_cap(), int(LLM_COVERAGE_ALTITUDE_STEP_REPEAT), needed_repeat)
+        lock = dict(altitude.get("active_lock", {}) if isinstance(altitude.get("active_lock"), dict) else {})
+        lock.update(
+            {
+                "target_house_id": house_id,
+                "base_z_cm": float(base_z),
+                "target_z_cm": float(target_z),
+                "restore_pending": True,
+                "mode": "coverage_search_temporary_altitude",
+                "updated_at_step": int((self._metadata_from_labeling_dir(labeling_dir) or {}).get("step_index", 0) or 0),
+            }
+        )
+        self.llm_search_altitude_lock = lock
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = "r"
+        normalized["repeat"] = max(1, int(repeat))
+        normalized["stop"] = False
+        normalized["need_capture_after"] = True
+        normalized["search_altitude_lock"] = dict(lock)
+        normalized["rule_override"] = {
+            "type": "coverage_search_altitude_raise",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "target_house_id": house_id,
+            "action_symbol": "r",
+            "repeat": int(repeat),
+            "altitude": altitude,
+            "reason": "perimeter search is incomplete and a front wall-like obstacle blocks ground-level motion; climb temporarily before judging whether forward/orbit is safe",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        raise_text = f"coverage-search altitude raise: r x{int(repeat)} from z={current_z:.1f} toward {target_z:.1f}cm"
+        normalized["reason"] = (reason + " | " if reason else "") + raise_text
+        self._append_llm_control_log(
+            f"Coverage altitude override: action={original.get('action_symbol')} -> r repeat={int(repeat)}; "
+            f"target={house_id} z={current_z:.1f}->{target_z:.1f}"
+        )
+        return normalized
+
+    def _restore_search_altitude_if_needed(self, labeling_dir: str, house_id: str, *, reason: str = "") -> None:
+        lock = self.llm_search_altitude_lock if isinstance(self.llm_search_altitude_lock, dict) else {}
+        if not lock or str(lock.get("target_house_id", "") or "") != str(house_id or ""):
+            return
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        current_z = self._pose_z_from_labeling_dir_or_state(fusion, labeling_dir)
+        base_z = self._as_float_or_none(lock.get("base_z_cm"))
+        if current_z is None or base_z is None:
+            self.llm_search_altitude_lock = {}
+            return
+        delta = current_z - base_z
+        if delta <= float(LLM_COVERAGE_ALTITUDE_RESTORE_TOLERANCE_CM):
+            self.llm_search_altitude_lock = {}
+            return
+        down_step_cm = abs(float(MOVE_COMMANDS.get("f", {}).get("up_cm", -20.0) or -20.0))
+        repeat = min(self._llm_control_repeat_cap(), max(1, int(math.ceil(delta / max(1.0, down_step_cm)))))
+        self._append_llm_control_log(
+            f"Restoring search altitude for house {house_id}: f x{repeat} from z={current_z:.1f} toward base={base_z:.1f} reason={reason}"
+        )
+        for _ in range(int(repeat)):
+            if self.llm_control_stop_event.is_set():
+                break
+            if not self._execute_move("f", from_sequence=False):
+                break
+            time.sleep(self._llm_control_delay_s())
+        self.llm_search_altitude_lock = {}
+
     def _best_reliable_memory_entry_for_house(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
         snapshot = self._read_json_file(Path(labeling_dir) / "entry_search_memory_snapshot_after.json")
         memory = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
@@ -4780,6 +5043,85 @@ class Panel:
         )
         return normalized
 
+    def _preferred_face_orbit_symbol(self, current_symbol: str = "") -> str:
+        current = str(current_symbol or "").strip().lower()
+        history = self.llm_control_decision_history if isinstance(self.llm_control_decision_history, list) else []
+        for item in reversed(history[-12:]):
+            if not isinstance(item, dict):
+                continue
+            for key in ("executed_action_symbol", "action_symbol", "normalized_action_symbol"):
+                symbol = str(item.get(key, "") or "").strip().lower()
+                if symbol in {"a", "d"}:
+                    return symbol
+        if current in {"a", "d"}:
+            return current
+        return LLM_COVERAGE_ORBIT_DEFAULT_SYMBOL
+
+    def _apply_face_coverage_orbit_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        if bool(normalized.get("stop", False)):
+            return normalized
+        current_symbol = str(normalized.get("action_symbol", "") or "").strip().lower()
+        if current_symbol not in {"w", "x", "q", "e", "a", "d"}:
+            return normalized
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        boundary = self._target_boundary_context(fusion, house_id)
+        if bool(boundary.get("outside_search_boundary", False)):
+            return normalized
+        if self._target_entry_visible_for_current_house(fusion) and self._is_enterable_entry_evidence(fusion):
+            return normalized
+        face_status = self._face_coverage_status_for_house(labeling_dir, house_id)
+        if not face_status:
+            return normalized
+        if bool(face_status.get("full_coverage_ready", False)):
+            return normalized
+        if bool(face_status.get("face_coverage_ready", False)):
+            return normalized
+        observed_ratio = self._as_float_or_none(face_status.get("observed_coverage_ratio")) or 0.0
+        current_segment = face_status.get("current_segment", {}) if isinstance(face_status.get("current_segment"), dict) else {}
+        segment_visual_count = int(current_segment.get("visual_observation_count", 0) or 0)
+        segment_visit_count = int(current_segment.get("visit_count", 0) or 0)
+        last_face_id = str(face_status.get("last_face_id", "") or "")
+        face_payload = face_status.get("faces", {}).get(last_face_id, {}) if isinstance(face_status.get("faces"), dict) else {}
+        face_visual_count = int(face_payload.get("visual_observation_count", 0) or 0) if isinstance(face_payload, dict) else 0
+        repeated_current_segment = segment_visual_count >= int(LLM_FACE_COVERAGE_REPEAT_THRESHOLD)
+        repeated_current_face = face_visual_count >= int(LLM_FACE_COVERAGE_REPEAT_THRESHOLD + 3)
+        if not repeated_current_segment and not repeated_current_face:
+            return normalized
+        orbit_symbol = self._preferred_face_orbit_symbol(current_symbol)
+        repeat = min(self._llm_control_repeat_cap(), int(LLM_FACE_COVERAGE_ORBIT_REPEAT))
+        original = dict(normalized)
+        normalized = dict(normalized)
+        normalized["action_symbol"] = orbit_symbol
+        normalized["repeat"] = max(1, int(repeat))
+        normalized["stop"] = False
+        normalized["need_capture_after"] = True
+        normalized["rule_override"] = {
+            "type": "face_coverage_continue_orbit",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "target_house_id": house_id,
+            "orbit_symbol": orbit_symbol,
+            "repeat": int(normalized["repeat"]),
+            "face_coverage_status": face_status,
+            "reason": "current house face/edge segment has already been observed repeatedly while face coverage is incomplete; keep orbiting in one lateral direction toward unobserved edge ranges instead of turning back",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        face_text = (
+            f"face coverage orbit: {last_face_id or 'unknown'} segment "
+            f"{current_segment.get('segment_index', '?')} repeated "
+            f"{segment_visual_count}/{segment_visit_count}, observed_ratio={observed_ratio:.3f}; "
+            f"continue {orbit_symbol} x{int(normalized['repeat'])}"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + face_text
+        self._append_llm_control_log(
+            f"Face coverage orbit: action={original.get('action_symbol')} -> {orbit_symbol} repeat={normalized['repeat']}; "
+            f"target={house_id} face={last_face_id} seg={current_segment.get('segment_index')} observed_ratio={observed_ratio:.3f}"
+        )
+        return normalized
+
     def _apply_safe_forward_repeat_boost(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") != "w":
             return normalized
@@ -4845,6 +5187,13 @@ class Panel:
                 return self._apply_front_obstacle_detour_override(normalized, labeling_dir)
             return normalized
         normalized = self._apply_front_obstacle_detour_override(normalized, labeling_dir)
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "coverage_search_altitude_raise":
+            return normalized
+        normalized = self._apply_face_coverage_orbit_override(normalized, labeling_dir)
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "face_coverage_continue_orbit":
+            return normalized
         if bool(normalized.get("stop", False)) or str(normalized.get("action_symbol", "") or "") in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
             return normalized
         normalized = self._apply_target_boundary_transit_override(normalized, labeling_dir)
@@ -4937,7 +5286,9 @@ class Panel:
         height_aware_front_obstacle = self._front_obstacle_status(fusion, labeling_dir)
         target_entry_alignment = self._target_entry_alignment_status(fusion)
         perimeter_coverage_status = self._perimeter_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+        face_coverage_status = self._face_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
         non_enterable_entry_status = self._non_enterable_entry_status(fusion)
+        coverage_altitude_status = self._coverage_altitude_status(fusion, labeling_dir, house_id) if house_id else {}
         return {
             "version": "memory_aware_llm_control_prompt_v1",
             "prompt_type": "memory_aware_direct_control",
@@ -4965,12 +5316,16 @@ class Panel:
             "height_aware_front_obstacle": height_aware_front_obstacle,
             "target_entry_alignment": target_entry_alignment,
             "perimeter_coverage_status": perimeter_coverage_status,
+            "face_coverage_status": face_coverage_status,
             "non_enterable_entry_status": non_enterable_entry_status,
+            "coverage_altitude_status": coverage_altitude_status,
             "completion_rules": {
                 "target_entry_reached": "Finish the current house when a reliable enterable target-house entry is within 300cm. close door/closed door is not enterable completion evidence.",
                 "large_bbox_proxy": "Also treat the current house as reached when an enterable target-house entry fills most of the image and target-house distance is near the doorway, because close-range depth may overestimate.",
                 "centered_depth_proxy": "Also finish when an enterable target-house entry is roughly centered, has a sufficiently large YOLO bbox, YOLO+Depth marks the opening traversable, and the doorway/target-house distance is within the near-entry proxy range.",
                 "closed_entry_full_coverage": "If only close door/closed/non-traversable narrow-door evidence is found, do not finish until perimeter_coverage_status.full_coverage_ready=true and no open/traversable/approachable entry remains.",
+                "face_edge_coverage": "During no-entry/closed-entry search, use face_coverage_status to avoid revisiting the same house face segment. Continue orbiting toward unobserved face segments before declaring no enterable entry.",
+                "temporary_search_altitude": "Only during incomplete target-house perimeter search, if a wall-like front obstacle blocks ground-level orbiting, climb temporarily with r, recapture, then continue only if depth becomes safe. Restore altitude after the current house search finishes.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
                 "geometric_reacquire": "When a new target house is outside the view, the executor computes the world-angle difference from UAV pose to the target house center and locks q/e for the planned yaw step count before judging again.",
                 "front_obstacle_detour": "If front_obstacle is high/severe or front_min_depth is very close, do not use yaw-only observation or forward motion as detour; physically back off and strafe left/right until the front path clears.",
@@ -5025,6 +5380,14 @@ class Panel:
             "It is only evidence that this face may not provide an enterable opening. If non_enterable_entry_status.enterable=false "
             "and perimeter_coverage_status.full_coverage_ready=false, orbit around the target house with lateral movement "
             "and short recentering yaws to observe the remaining perimeter bins before declaring no enterable entry.\n"
+            "Use face_coverage_status as an edge-range memory: each target house has four approximate faces and each face "
+            "is split into coarse searched segments. If the current face/current segment has already been observed repeatedly "
+            "and face_coverage_status.full_coverage_ready=false, do not turn back to resample the same edge. Keep the same "
+            "lateral orbit direction with a/d toward unobserved face segments, using short yaw only when re-centering is needed.\n"
+            "Temporary altitude is allowed only for target-house perimeter search: if coverage_altitude_status.should_raise=true, "
+            "use r to climb and capture again to check whether the front wall/fence-like obstacle becomes passable from above. "
+            "Do not use high altitude for ordinary approach or target-boundary transit. After this house search finishes, "
+            "the executor restores the original altitude before switching targets.\n"
             "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
             "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
             "follow axis_aligned_transit_plan first. Prefer x-first or y-first horizontal/vertical world-axis movement "
