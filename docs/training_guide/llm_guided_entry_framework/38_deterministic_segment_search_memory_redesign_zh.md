@@ -969,6 +969,52 @@ E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\results\segment_search_memo
 segment_search_memory_control_summary.json
 ```
 
+同时为了减少 LLM 上下文消耗，当前控制器采用“双 payload”：
+
+- 发给 LLM：`memory_aware_llm_control_prompt_compact_v1`
+- 本地完整保留：`llm_control_full_prompt_payload.json`
+
+compact payload 保留以下关键上下文：
+
+- 当前 target house / task plan
+- target boundary transit 状态
+- front depth / collision warning / altitude 状态
+- target entry alignment 状态
+- perimeter / face / segment search memory 摘要
+- YOLO top detections
+- depth entry/traversability 结论
+- best memory entry 与少量 candidate entries
+- 最近少量 LLM 决策摘要
+
+compact payload 会主动裁剪：
+
+- 长文本 reason
+- 大量历史 candidate entries
+- 完整 bbox history
+- 完整 memory evidence
+- 完整 completed segment 列表
+- 冗长 completion rule 文本
+
+但本地 artifact 仍然保留完整上下文，方便后续复盘。
+
+每次 prompt artifact 里会包含：
+
+```json
+{
+  "control_prompt_payload": "compact payload actually sent to LLM",
+  "full_control_prompt_payload_path": "path to full local payload",
+  "prompt_context_stats": {
+    "system_prompt_chars": 1842,
+    "user_prompt_chars": 9372,
+    "full_payload_chars": 31315,
+    "compact_payload_chars": 9489,
+    "payload_reduction_ratio": 0.697
+  }
+}
+```
+
+上面的数字是一个历史 open-door capture 的 smoke test 示例，说明发送给 LLM 的上下文相比 full payload 约减少 70%。不同 episode 会略有变化。
+
 这样重跑实验后，可以直接检查当前 prompt 是否正确看到了：
 
 - 哪些 segment 不要再搜

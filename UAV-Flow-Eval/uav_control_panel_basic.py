@@ -142,6 +142,11 @@ LLM_BODY_CLOSE_RATIO_MAX = 0.03
 LLM_LOW_CLOSE_RATIO_MIN = 0.08
 LLM_SEGMENT_MEMORY_DO_NOT_REVISIT_LIMIT = 16
 LLM_SEGMENT_MEMORY_NEXT_SEGMENT_LIMIT = 10
+LLM_COMPACT_RECENT_DECISION_LIMIT = 4
+LLM_COMPACT_YOLO_DETECTION_LIMIT = 5
+LLM_COMPACT_MEMORY_ENTRY_LIMIT = 2
+LLM_COMPACT_SEGMENT_DO_NOT_REVISIT_LIMIT = 8
+LLM_COMPACT_SEGMENT_NEXT_LIMIT = 6
 LLM_CONTROL_LABELING_INPUT_FILES = (
     "fusion_result.json",
     "sample_metadata.json",
@@ -6580,6 +6585,392 @@ class Panel:
         self._append_llm_control_log(f"Capture failed: {message}")
         return ""
 
+    def _truncate_for_prompt(self, value: Any, max_chars: int = 220) -> str:
+        text = str(value or "").strip()
+        if len(text) <= int(max_chars):
+            return text
+        return text[: max(0, int(max_chars) - 3)].rstrip() + "..."
+
+    def _compact_dict_for_prompt(self, payload: Dict[str, Any], keys: List[str]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        result: Dict[str, Any] = {}
+        for key in keys:
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if value in (None, "", [], {}):
+                continue
+            result[key] = value
+        return result
+
+    def _compact_bbox_for_prompt(self, bbox: Any) -> Dict[str, float]:
+        if not isinstance(bbox, list) or len(bbox) < 4:
+            return {}
+        try:
+            x1, y1, x2, y2 = [float(value) for value in bbox[:4]]
+        except Exception:
+            return {}
+        return {
+            "x1": round(x1, 1),
+            "y1": round(y1, 1),
+            "x2": round(x2, 1),
+            "y2": round(y2, 1),
+            "cx": round((x1 + x2) / 2.0, 1),
+            "cy": round((y1 + y2) / 2.0, 1),
+            "w": round(max(0.0, x2 - x1), 1),
+            "h": round(max(0.0, y2 - y1), 1),
+        }
+
+    def _compact_detection_for_prompt(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        result = self._compact_dict_for_prompt(
+            item,
+            ["candidate_id", "class_name", "confidence", "associated_house_id", "target_match_score"],
+        )
+        bbox = self._compact_bbox_for_prompt(item.get("bbox") or item.get("bbox_xyxy") or item.get("xyxy"))
+        if bbox:
+            result["bbox"] = bbox
+        return result
+
+    def _compact_entry_for_prompt(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        return self._compact_dict_for_prompt(
+            item,
+            [
+                "entry_id",
+                "entry_type",
+                "status",
+                "associated_house_id",
+                "observation_count",
+                "target_match_score",
+                "association_confidence",
+                "is_best_candidate",
+                "is_searched",
+                "is_entered",
+            ],
+        )
+
+    def _compact_structured_observation_for_prompt(self, structured_input: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(structured_input, dict):
+            return {}
+        target_context = structured_input.get("target_context", {}) if isinstance(structured_input.get("target_context"), dict) else {}
+        temporal_context = structured_input.get("temporal_context", {}) if isinstance(structured_input.get("temporal_context"), dict) else {}
+        yolo = structured_input.get("yolo_rgb_evidence", {}) if isinstance(structured_input.get("yolo_rgb_evidence"), dict) else {}
+        depth = structured_input.get("depth_evidence", {}) if isinstance(structured_input.get("depth_evidence"), dict) else {}
+        memory = structured_input.get("memory_evidence", {}) if isinstance(structured_input.get("memory_evidence"), dict) else {}
+        rule = structured_input.get("fusion_rule_reference", {}) if isinstance(structured_input.get("fusion_rule_reference"), dict) else {}
+
+        detections = yolo.get("detections", []) if isinstance(yolo.get("detections"), list) else []
+        compact_detections = [
+            item
+            for item in (self._compact_detection_for_prompt(det) for det in detections[: int(LLM_COMPACT_YOLO_DETECTION_LIMIT)])
+            if item
+        ]
+        candidate_entries = memory.get("candidate_entries", []) if isinstance(memory.get("candidate_entries"), list) else []
+        compact_entries = [
+            item
+            for item in (self._compact_entry_for_prompt(entry) for entry in candidate_entries[: int(LLM_COMPACT_MEMORY_ENTRY_LIMIT)])
+            if item
+        ]
+        guidance = rule.get("memory_decision_guidance", {}) if isinstance(rule.get("memory_decision_guidance"), dict) else {}
+        return {
+            "task": structured_input.get("task", ""),
+            "target_context": self._compact_dict_for_prompt(
+                target_context,
+                [
+                    "target_house_id",
+                    "current_house_id",
+                    "target_house_in_fov",
+                    "target_house_expected_side",
+                    "target_house_bearing_deg",
+                    "target_house_distance_cm",
+                    "uav_pose_world",
+                ],
+            ),
+            "temporal_context": self._compact_dict_for_prompt(
+                temporal_context,
+                [
+                    "episode_id",
+                    "step_index",
+                    "capture_source",
+                    "previous_action",
+                    "action_count_since_last_capture",
+                    "target_house_id",
+                    "current_house_id",
+                ],
+            ),
+            "yolo_rgb_evidence": {
+                "num_detections": int(yolo.get("num_detections", len(detections)) or 0),
+                "top_detections": compact_detections,
+            },
+            "depth_evidence": self._compact_dict_for_prompt(
+                depth,
+                [
+                    "best_target_candidate_id",
+                    "entry_distance_cm",
+                    "opening_width_cm",
+                    "traversable",
+                    "crossing_ready",
+                    "front_obstacle_present",
+                    "front_min_depth_cm",
+                    "front_obstacle_severity",
+                ],
+            ),
+            "memory_evidence": {
+                "search_status": memory.get("search_status", ""),
+                "entry_search_status": memory.get("entry_search_status", ""),
+                "candidate_entry_count": int(memory.get("candidate_entry_count", 0) or 0),
+                "best_entry": self._compact_entry_for_prompt(memory.get("best_entry", {}) if isinstance(memory.get("best_entry"), dict) else {}),
+                "candidate_entries": compact_entries,
+            },
+            "fusion_rule_reference": {
+                "state": rule.get("rule_target_conditioned_state", ""),
+                "subgoal": rule.get("rule_target_conditioned_subgoal", ""),
+                "action_hint": rule.get("rule_target_conditioned_action_hint", ""),
+                "reason": self._truncate_for_prompt(rule.get("rule_target_conditioned_reason", ""), 180),
+                "memory_decision": self._compact_dict_for_prompt(
+                    guidance,
+                    [
+                        "decision_override_applied",
+                        "override_reason",
+                        "current_sector_id",
+                        "best_memory_status",
+                        "best_memory_similarity",
+                        "blocked_attempt_count",
+                    ],
+                ),
+            },
+        }
+
+    def _compact_segment_record_for_prompt(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            return {}
+        return self._compact_dict_for_prompt(
+            item,
+            [
+                "segment_key",
+                "segment_id",
+                "face_id",
+                "segment_index",
+                "state",
+                "is_search_complete",
+                "observation_count",
+                "last_observed_step",
+                "evidence_type",
+                "candidate_class",
+                "candidate_confidence",
+                "roi_depth_median_cm",
+                "depth_gap_cm",
+                "center_band_far_ratio",
+                "vertical_clearance_ratio",
+            ],
+        )
+
+    def _compact_segment_search_memory_for_prompt(self, memory: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(memory, dict) or not bool(memory.get("available", False)):
+            return memory if isinstance(memory, dict) else {}
+        entry_gate = memory.get("entry_found_open_gate", {}) if isinstance(memory.get("entry_found_open_gate"), dict) else {}
+        current_capture = memory.get("current_capture", {}) if isinstance(memory.get("current_capture"), dict) else {}
+        return {
+            "available": True,
+            "house_id": memory.get("house_id", ""),
+            "summary": memory.get("summary", {}) if isinstance(memory.get("summary"), dict) else {},
+            "do_not_revisit_segments": [
+                item
+                for item in (
+                    self._compact_segment_record_for_prompt(seg)
+                    for seg in (memory.get("do_not_revisit_segments", []) if isinstance(memory.get("do_not_revisit_segments"), list) else [])
+                )
+                if item
+            ][: int(LLM_COMPACT_SEGMENT_DO_NOT_REVISIT_LIMIT)],
+            "next_unsearched_segments": [
+                item
+                for item in (
+                    self._compact_segment_record_for_prompt(seg)
+                    for seg in (memory.get("next_unsearched_segments", []) if isinstance(memory.get("next_unsearched_segments"), list) else [])
+                )
+                if item
+            ][: int(LLM_COMPACT_SEGMENT_NEXT_LIMIT)],
+            "entry_found_open_gate": {
+                "present": bool(entry_gate.get("present", False)),
+                "current_capture_entry_found_open": bool(entry_gate.get("current_capture_entry_found_open", False)),
+                "best_entry_distance_cm": entry_gate.get("best_entry_distance_cm"),
+                "best_entry_segment": self._compact_segment_record_for_prompt(
+                    entry_gate.get("best_entry_segment", {}) if isinstance(entry_gate.get("best_entry_segment"), dict) else {}
+                ),
+            },
+            "current_capture": {
+                "capture_name": current_capture.get("capture_name", ""),
+                "repeat_completed_observation": bool(current_capture.get("repeat_completed_observation", False)),
+                "repeated_completed_segments": [
+                    self._compact_dict_for_prompt(
+                        update,
+                        ["segment_id", "face_id", "segment_index", "previous_state", "new_state", "evidence_type"],
+                    )
+                    for update in (
+                        current_capture.get("repeated_completed_segments", [])
+                        if isinstance(current_capture.get("repeated_completed_segments"), list)
+                        else []
+                    )
+                    if isinstance(update, dict)
+                ],
+            },
+        }
+
+    def _compact_recent_llm_decisions_for_prompt(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not isinstance(history, list):
+            return []
+        compact: List[Dict[str, Any]] = []
+        for item in history[-int(LLM_COMPACT_RECENT_DECISION_LIMIT):]:
+            if not isinstance(item, dict):
+                continue
+            rule = item.get("rule_override", {}) if isinstance(item.get("rule_override"), dict) else {}
+            compact.append(
+                {
+                    "action_symbol": item.get("action_symbol"),
+                    "repeat": item.get("repeat"),
+                    "stop": bool(item.get("stop", False)),
+                    "rule_type": rule.get("type", ""),
+                    "reason": self._truncate_for_prompt(item.get("reason", ""), 180),
+                }
+            )
+        return compact
+
+    def _compact_llm_control_prompt_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        active_plan = payload.get("active_task_plan", {}) if isinstance(payload.get("active_task_plan"), dict) else {}
+        ordered_targets = active_plan.get("ordered_targets", []) if isinstance(active_plan.get("ordered_targets"), list) else []
+        return {
+            "version": "memory_aware_llm_control_prompt_compact_v1",
+            "source_payload_version": payload.get("version", ""),
+            "prompt_type": payload.get("prompt_type", ""),
+            "decision_index": payload.get("decision_index", 0),
+            "allowed_action_symbols": payload.get("allowed_action_symbols", []),
+            "repeat_cap": payload.get("repeat_cap", self._llm_control_repeat_cap()),
+            "output_schema": payload.get("output_schema", LLM_CONTROL_OUTPUT_SCHEMA),
+            "active_task_plan": {
+                "applied": bool(active_plan.get("applied", False)),
+                "current_target_index": active_plan.get("current_target_index", 0),
+                "current_target": active_plan.get("current_target", {}),
+                "ordered_targets": [
+                    self._compact_dict_for_prompt(target, ["order", "house_id", "house_alias", "goal", "finish_condition", "status"])
+                    for target in ordered_targets
+                    if isinstance(target, dict)
+                ],
+                "entry_reached_distance_cm": active_plan.get("entry_reached_distance_cm"),
+                "entry_reached_large_bbox_proxy_cm": active_plan.get("entry_reached_large_bbox_proxy_cm"),
+            },
+            "target_reacquire_lock": payload.get("target_reacquire_lock", {}),
+            "obstacle_detour_lock": payload.get("obstacle_detour_lock", {}),
+            "target_boundary_context": self._compact_dict_for_prompt(
+                payload.get("target_boundary_context", {}) if isinstance(payload.get("target_boundary_context"), dict) else {},
+                [
+                    "mode",
+                    "target_house_id",
+                    "current_house_id",
+                    "outside_search_boundary",
+                    "target_house_distance_cm",
+                    "search_distance_cm",
+                    "target_house_bearing_deg",
+                    "reason",
+                ],
+            ),
+            "axis_aligned_transit_plan": self._compact_dict_for_prompt(
+                payload.get("axis_aligned_transit_plan", {}) if isinstance(payload.get("axis_aligned_transit_plan"), dict) else {},
+                [
+                    "active",
+                    "axis",
+                    "phase",
+                    "action_symbol",
+                    "repeat",
+                    "axis_remaining_to_boundary_cm",
+                    "preferred_axis",
+                    "reason",
+                ],
+            ),
+            "height_aware_front_obstacle": self._compact_dict_for_prompt(
+                payload.get("height_aware_front_obstacle", {}) if isinstance(payload.get("height_aware_front_obstacle"), dict) else {},
+                [
+                    "blocking",
+                    "too_close",
+                    "severity",
+                    "front_min_depth_cm",
+                    "front_effective_clearance_cm",
+                    "body_corridor_clear",
+                    "low_obstacle_passable",
+                    "upper_corridor_clear",
+                    "reason",
+                ],
+            ),
+            "collision_warning_status": self._compact_dict_for_prompt(
+                payload.get("collision_warning_status", {}) if isinstance(payload.get("collision_warning_status"), dict) else {},
+                ["level", "message", "planned_action_symbol", "planned_repeat", "front_min_depth_cm", "too_close"],
+            ),
+            "target_entry_alignment": payload.get("target_entry_alignment", {}),
+            "perimeter_coverage_status": self._compact_dict_for_prompt(
+                payload.get("perimeter_coverage_status", {}) if isinstance(payload.get("perimeter_coverage_status"), dict) else {},
+                ["observed_coverage_ratio", "full_coverage_ready", "no_entry_after_full_coverage", "observed_bins"],
+            ),
+            "face_coverage_status": self._compact_dict_for_prompt(
+                payload.get("face_coverage_status", {}) if isinstance(payload.get("face_coverage_status"), dict) else {},
+                [
+                    "observed_face_count",
+                    "observed_coverage_ratio",
+                    "face_coverage_ready",
+                    "full_coverage_ready",
+                    "observed_faces",
+                    "last_face_id",
+                    "current_segment",
+                ],
+            ),
+            "segment_search_memory": self._compact_segment_search_memory_for_prompt(
+                payload.get("segment_search_memory", {}) if isinstance(payload.get("segment_search_memory"), dict) else {}
+            ),
+            "non_enterable_entry_status": payload.get("non_enterable_entry_status", {}),
+            "coverage_altitude_status": self._compact_dict_for_prompt(
+                payload.get("coverage_altitude_status", {}) if isinstance(payload.get("coverage_altitude_status"), dict) else {},
+                ["should_raise", "should_restore", "current_altitude_cm", "target_altitude_cm", "reason"],
+            ),
+            "completion_rules": [
+                "Do not revisit completed segment_search_memory.do_not_revisit_segments.",
+                "If current_capture.repeat_completed_observation=true and no open-entry gate is active, move toward next_unsearched_segments.",
+                "If entry_found_open_gate.present=true, prioritize align/approach/stop for that open entry.",
+                "Stop current house when enterable target entry is actually reached or proxy gate allows it.",
+                "Closed/narrow door is not final no-entry unless coverage is complete.",
+                "Avoid blind lateral a/d; yaw-check side clearance first, then use w if clear.",
+                "Use longer w repeats when body-height depth corridor is clear.",
+            ],
+            "structured_observation": self._compact_structured_observation_for_prompt(
+                payload.get("structured_observation", {}) if isinstance(payload.get("structured_observation"), dict) else {}
+            ),
+            "recent_llm_decisions": self._compact_recent_llm_decisions_for_prompt(
+                payload.get("recent_llm_decisions", []) if isinstance(payload.get("recent_llm_decisions"), list) else []
+            ),
+        }
+
+    def _llm_prompt_context_stats(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        full_payload: Dict[str, Any],
+        compact_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        full_chars = len(json.dumps(full_payload, ensure_ascii=False))
+        compact_chars = len(json.dumps(compact_payload, ensure_ascii=False))
+        return {
+            "system_prompt_chars": len(system_prompt),
+            "user_prompt_chars": len(user_prompt),
+            "full_payload_chars": full_chars,
+            "compact_payload_chars": compact_chars,
+            "payload_reduction_ratio": round(1.0 - (compact_chars / max(1, full_chars)), 4),
+            "sent_payload_version": compact_payload.get("version", ""),
+        }
+
     def _build_llm_control_prompt_payload(self, labeling_dir: str, decision_index: int) -> Dict[str, Any]:
         from phase2_multimodal_fusion_analysis.memory_aware_llm_teacher_prompt_builder import build_prompt_payload
 
@@ -6661,92 +7052,25 @@ class Panel:
 
     def _build_llm_control_system_prompt(self) -> str:
         return (
-            "You are a memory-aware UAV control pilot. You directly choose low-level control symbols "
-            "for collecting target-house entry search data.\n"
-            "Use the provided YOLO/RGB evidence, depth traversability evidence, target-house context, "
-            "temporal actions, and structured memory.\n"
-            "Allowed controls: w=forward, s=backward, a=left, d=right, r=up, f=down, q=yaw_left, "
-            "e=yaw_right, x=hold.\n"
-            "w/a/s/d/r/f may use repeat>1 for a short continuous move. q/e must always use repeat=1 "
-            "because yaw changes the view and the controller will capture immediately after yaw.\n"
-            "Do not chase non-target entries. If the target house is not in view, reorient with q/e.\n"
-            "When switching to a new target house that is outside the field of view, keep yawing in the same "
-            "geometrically planned direction for the planned number of yaw steps. The executor estimates this from the "
-            "UAV world pose and the target house center. Do not alternate q/e based on short-term noisy bearing wrap-around.\n"
-            "Important: cross_ready=false only means do not cross/enter the doorway yet. It does not mean you cannot "
-            "approach a visible target-house door. If a target-house door/open door/close door is visible and the UAV "
-            "is farther than 3m from it, prefer small forward repeats when the front path is not severely blocked.\n"
-            "Treat rule-based labels such as target_house_entry_blocked, blocked_temporary, or persistent_blocked_shift "
-            "as warnings against crossing the doorway, not as automatic reasons to stop approaching. If global_front_obstacle.present=false "
-            "and the target door is still around 3-12m away, forward approach is usually the preferred data-collection action.\n"
-            "If global_front_obstacle.present=true with high/severe severity or front_min_depth is around 120cm or less, "
-            "do not keep moving forward. First back off if the obstacle is very close; otherwise yaw toward the intended "
-            "side and capture before moving. Because depth is forward-facing, blind a/d strafe is unsafe unless that "
-            "side has just been turned into the camera-front view and confirmed clear.\n"
-            "Depth is height-sensitive: if height_aware_front_obstacle.low_obstacle_passable=true, the near depth is "
-            "concentrated in the lower image band while the UAV body-height corridor is clear. In that case do not "
-            "treat bushes/curbs/low foreground objects as a hard front blockage; continue target-boundary transit or "
-            "approach cautiously instead of backoff/side oscillation.\n"
-            "Be decisive with continuous forward motion: when the depth/body corridor is clear and the current plan is "
-            "axis-aligned transit or target-entry approach, use repeat near repeat_cap. Do not keep choosing tiny "
-            "w x2/w x3 moves when the available forward clearance supports a longer safe command; the executor will "
-            "still clamp repeat if depth clearance is not enough.\n"
-            "However, forward confidence requires visual alignment and YOLO+Depth agreement: once inside the target "
-            "house search radius, if a door/open door/close door has a semantic-depth candidate but it is near the image "
-            "edge, or target_entry_alignment.needed=true, first re-center it with q/e or a/d and capture again. Do not "
-            "run a long forward repeat when the candidate door is at the far left/right edge, because it can leave the "
-            "field of view and cause the next frame to lock onto the wrong door.\n"
-            "A close door/closed door or a narrow non-traversable door is not evidence that the house search is finished. "
-            "It is only evidence that this face may not provide an enterable opening. If non_enterable_entry_status.enterable=false "
-            "and perimeter_coverage_status.full_coverage_ready=false, orbit around the target house cautiously: prefer "
-            "yaw-check then forward w along the newly confirmed corridor over blind lateral a/d motion.\n"
-            "Use face_coverage_status as an edge-range memory: each target house has four approximate faces and each face "
-            "is split into coarse searched segments. If the current face/current segment has already been observed repeatedly "
-            "and face_coverage_status.full_coverage_ready=false, do not turn back to resample the same edge. Continue "
-            "toward unobserved face segments, but if this requires a/d, yaw toward that side and capture first; after "
-            "confirmation, move with w rather than blind side strafe.\n"
-            "Use segment_search_memory as the strongest deterministic search-progress memory. "
-            "segment_search_memory.do_not_revisit_segments lists house-face segments that RGB/YOLO+Depth has already "
-            "closed as searched_no_entry, searched_closed_entry, searched_window_only, or entry_found_open. Do not "
-            "actively re-sample those segments. segment_search_memory.next_unsearched_segments lists the next useful "
-            "search units. If segment_search_memory.current_capture.repeat_completed_observation=true and there is no "
-            "entry_found_open gate to approach, leave the repeated completed segment and move toward the next unsearched "
-            "segment instead of yawing back to the same window/closed-door/wall evidence.\n"
-            "If segment_search_memory.entry_found_open_gate.present=true, treat that as a high-priority open-entry "
-            "memory. Do not continue generic full-coverage orbit around the house. Re-center the door if it is near "
-            "the image edge, approach it with safe forward motion if it is not reached, and stop the current house "
-            "when the actual/proxy reach gate says the entry is reached.\n"
-            "If the same house-face segment/range has already been observed many times and the visible evidence is only "
-            "closed/narrow/non-traversable door or rejected windows, do not keep yawing back to the same area. If the "
-            "front/body-height corridor is safe and the non-enterable door is not immediately close, move forward with "
-            "w to the next observation range, capture, then yaw once to inspect the next sector before any additional "
-            "forward movement.\n"
-            "At a house-face corner, lateral orbit is not always correct. If the current face edge segment is saturated, "
-            "the target house remains roughly in view, and depth says the forward corridor has enough safety clearance, advance forward with w "
-            "to continue searching along the next face. Do not keep strafing sideways into fences/walls or away from the "
-            "target just because face coverage is incomplete. If the front minimum/effective clearance is close, first back off "
-            "or detour; never use long forward motion into a wall-like/porch/ceiling surface.\n"
-            "Temporary altitude is allowed only for target-house perimeter search: if coverage_altitude_status.should_raise=true, "
-            "use r to climb and capture again to check whether the front wall/fence-like obstacle becomes passable from above. "
-            "Do not use high altitude for ordinary approach or target-boundary transit. After this house search finishes, "
-            "the executor restores the original altitude before switching targets.\n"
-            "Before the UAV reaches the target house boundary/search radius, treat visible door/window evidence from "
-            "nearby buildings as intermediate distractors. Do not start target-entry search or chase those candidates; "
-            "follow axis_aligned_transit_plan first. Prefer x-first or y-first horizontal/vertical world-axis movement "
-            "that has fewer non-target house intersections; avoid diagonal shortcuts through intermediate houses. "
-            "Only after reaching the target search boundary should you begin detailed building/entry judgment.\n"
-            "The current house search is finished when the UAV is within about 300cm of a reliable enterable target-house entry; "
-            "the executor will switch to the next house. Close-range depth can be noisy: if the target-house entry bbox "
-            "fills most of the image or a reliable remembered target-house entry exists while the target-house distance "
-            "is near 3-5m, treat it as reached rather than continuing through the doorway. If a target-house door/open "
-            "door/close door is roughly centered, large enough in YOLO/RGB, and semantic depth says the opening is "
-            "traversable within the near-entry proxy range, stop the current house instead of yawing away for reacquire. Avoid left/right oscillation; "
-            "But do not use this near-entry proxy stop when only one house face or low perimeter coverage has been observed "
-            "and the entry is still beyond 300cm. In that case continue approaching, cross/over traversable foreground "
-            "such as a low wall when depth allows, or keep searching the next face instead of ending the house early. "
-            "if lateral moves do not improve evidence, move forward, back off, yaw to a new sector, or stop for review.\n"
-            "If the search appears complete or unsafe, set stop=true.\n"
-            "Return only one JSON object. No markdown. No commentary."
+            "You are a memory-aware UAV control pilot. Choose one low-level control JSON action.\n"
+            "Controls: w=forward, s=backward, a=left, d=right, r=up, f=down, q=yaw_left, e=yaw_right, x=hold. "
+            "q/e must use repeat=1 because yaw triggers an immediate capture. w/a/s/d/r/f may repeat.\n"
+            "Priority order: 1) safety/depth clearance, 2) active target-house task, 3) segment_search_memory progress, "
+            "4) YOLO+Depth entry evidence, 5) recent action history.\n"
+            "Do not chase non-target entries. During target-boundary transit, follow axis_aligned_transit_plan and ignore "
+            "intermediate door/window evidence until inside the target search boundary.\n"
+            "Use segment_search_memory as hard progress memory: do_not_revisit_segments are closed search units; "
+            "next_unsearched_segments are the preferred next search units. If current_capture.repeat_completed_observation=true "
+            "and no open-entry gate is active, leave that segment instead of resampling it.\n"
+            "If entry_found_open_gate.present=true, prioritize that open entry: align if near image edge, approach with "
+            "safe forward motion if not reached, and stop when actual/proxy reach gate allows. Do not continue generic orbit.\n"
+            "Closed/narrow/non-traversable door is not final house completion unless coverage says full/no-entry ready. "
+            "For side movement, avoid blind a/d; yaw-check side clearance first, then move w if the corridor is clear.\n"
+            "If body-height depth corridor is clear, use larger w repeat up to repeat_cap; if front obstacle is severe "
+            "or too close, back off or yaw-check before moving. Low-only obstacles may be passable when body corridor is clear.\n"
+            "Finish current house only when an enterable target-house entry is reached, a valid proxy stop gate is active, "
+            "or full coverage proves no entry. If uncertain or unsafe, use x/stop for review.\n"
+            "Return only one strict JSON object matching output_schema. No markdown. No commentary."
         )
 
     def _build_llm_control_user_prompt(self, payload: Dict[str, Any]) -> str:
@@ -6759,10 +7083,10 @@ class Panel:
                 "The chosen action will be executed before the next visual analysis. Continuous moves repeat without intermediate screenshots. q/e yaw actions are single-step and trigger an immediate capture.",
                 "",
                 "Control input:",
-                json.dumps(payload, indent=2, ensure_ascii=False),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
                 "",
                 "Return strict JSON with this schema:",
-                json.dumps(LLM_CONTROL_OUTPUT_SCHEMA, indent=2, ensure_ascii=False),
+                json.dumps(LLM_CONTROL_OUTPUT_SCHEMA, ensure_ascii=False, separators=(",", ":")),
             ]
         )
 
@@ -7488,17 +7812,28 @@ class Panel:
         from anthropic import Anthropic
         from phase2_multimodal_fusion_analysis.memory_aware_llm_teacher_label_validator import extract_json_object
 
-        prompt_payload = self._build_llm_control_prompt_payload(labeling_dir, decision_index)
+        full_prompt_payload = self._build_llm_control_prompt_payload(labeling_dir, decision_index)
+        prompt_payload = self._compact_llm_control_prompt_payload(full_prompt_payload)
         system_prompt = self._build_llm_control_system_prompt()
         user_prompt = self._build_llm_control_user_prompt(prompt_payload)
         artifact_dir = self._llm_control_artifact_dir(labeling_dir, decision_index)
         if isinstance(self.llm_task_plan, dict) and self.llm_task_plan:
             self._save_llm_task_plan_files(labeling_dir)
         labeling_inputs_manifest = self._sync_llm_control_labeling_inputs(labeling_dir, artifact_dir)
-        segment_summary = prompt_payload.get("segment_search_memory", {}) if isinstance(prompt_payload.get("segment_search_memory"), dict) else {}
+        segment_summary = full_prompt_payload.get("segment_search_memory", {}) if isinstance(full_prompt_payload.get("segment_search_memory"), dict) else {}
         (artifact_dir / "segment_search_memory_control_summary.json").write_text(
             json.dumps(segment_summary, indent=2, ensure_ascii=False),
             encoding="utf-8",
+        )
+        (artifact_dir / "llm_control_full_prompt_payload.json").write_text(
+            json.dumps(full_prompt_payload, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        context_stats = self._llm_prompt_context_stats(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            full_payload=full_prompt_payload,
+            compact_payload=prompt_payload,
         )
         prompt_path = artifact_dir / "llm_control_prompt.json"
         prompt_path.write_text(
@@ -7507,6 +7842,8 @@ class Panel:
                     "system_prompt": system_prompt,
                     "user_prompt": user_prompt,
                     "control_prompt_payload": prompt_payload,
+                    "full_control_prompt_payload_path": str(artifact_dir / "llm_control_full_prompt_payload.json"),
+                    "prompt_context_stats": context_stats,
                     "source_labeling_dir": str(labeling_dir),
                     "labeling_inputs_manifest": labeling_inputs_manifest,
                     "artifact_dir": str(artifact_dir),
