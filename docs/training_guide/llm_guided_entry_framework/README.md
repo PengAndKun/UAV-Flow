@@ -54,6 +54,7 @@
 36. [`35_memory_ablation_experiment_report_zh.md`](35_memory_ablation_experiment_report_zh.md)
 37. [`36_v6_data_collection_and_retraining_plan_zh.md`](36_v6_data_collection_and_retraining_plan_zh.md)
 38. [`37_llm_multi_house_control_and_completion_spec_zh.md`](37_llm_multi_house_control_and_completion_spec_zh.md)
+39. [`38_deterministic_segment_search_memory_redesign_zh.md`](38_deterministic_segment_search_memory_redesign_zh.md)
 
 ## 这条路线的核心思想
 

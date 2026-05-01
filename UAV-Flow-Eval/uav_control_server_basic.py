@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -986,6 +987,46 @@ class BasicUAVControlBackend:
             self._write_memory_action_log()
             logger.info("Memory store reset path=%s", self.memory_store_path)
             return self.get_state(message="Memory store reset.")
+
+    def restore_memory_collection_snapshot(self, snapshot_path: str) -> Dict[str, Any]:
+        with self.lock:
+            path = os.path.abspath(str(snapshot_path or ""))
+            if not path or not os.path.exists(path):
+                return {"status": "error", "message": f"Snapshot not found: {snapshot_path}"}
+            try:
+                with open(path, "r", encoding="utf-8-sig") as fh:
+                    payload = json.load(fh)
+            except Exception as exc:
+                return {"status": "error", "message": f"Failed to read snapshot: {exc}"}
+            memory_payload = payload.get("memory", {}) if isinstance(payload, dict) else {}
+            if not isinstance(memory_payload, dict) or not memory_payload:
+                return {"status": "error", "message": "Snapshot does not contain a valid memory payload."}
+
+            backup_path = ""
+            if os.path.exists(self.memory_store_path):
+                backup_path = f"{self.memory_store_path}.bak_restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                try:
+                    shutil.copy2(self.memory_store_path, backup_path)
+                except Exception as exc:
+                    logger.warning("Failed to backup memory store before restore: %s", exc)
+                    backup_path = ""
+
+            self.memory_store = EntrySearchMemoryStore(self.memory_store_path)
+            self.memory_store.data = json.loads(json.dumps(memory_payload))
+            self.memory_store.ensure_from_houses_config(self.args.houses_config)
+            self._sync_memory_runtime_context()
+            self.memory_store.save()
+            try:
+                self.memory_collection_step_index = int(payload.get("step_index", self.memory_collection_step_index) or 0)
+            except Exception:
+                pass
+            self.last_memory_snapshot_after_path = path
+            self.last_memory_snapshot_time = str(payload.get("snapshot_time", "") or "")
+            logger.info("Memory restored from snapshot=%s backup=%s", path, backup_path or "none")
+            state = self.get_state(message=f"Memory restored from snapshot: {os.path.basename(path)}")
+            state["restored_memory_snapshot_path"] = path
+            state["memory_store_backup_path"] = backup_path
+            return state
 
     def save_memory_snapshot(self, *, note: str = "", snapshot_type: str = "manual") -> Dict[str, Any]:
         with self.lock:
@@ -2118,6 +2159,12 @@ def make_handler(backend: BasicUAVControlBackend):
                     self._send_json(backend.stop_memory_collection())
                 elif parsed.path == "/memory_collection_reset":
                     self._send_json(backend.reset_memory_collection())
+                elif parsed.path == "/memory_collection_restore_snapshot":
+                    self._send_json(
+                        backend.restore_memory_collection_snapshot(
+                            snapshot_path=str(data.get("snapshot_path", "") or "")
+                        )
+                    )
                 elif parsed.path == "/memory_snapshot":
                     self._send_json(
                         backend.save_memory_snapshot(

@@ -357,6 +357,8 @@ class Panel:
         self.llm_control_last_capture_var = tk.StringVar(value="Last capture: none")
         self.llm_control_reason_var = tk.StringVar(value="Reason: -")
         self.llm_collision_warning_var = tk.StringVar(value="Collision: clear")
+        self.llm_progress_status_var = tk.StringVar(value="Progress: idle")
+        self.llm_progress_new_episode_var = tk.StringVar(value="")
         self.llm_task_text_var = tk.StringVar(value="先探索 house 1，再探索 house 3。")
         self.llm_task_status_var = tk.StringVar(value="LLM Task: no plan")
         self.llm_task_plan_summary_var = tk.StringVar(value="Plan: none")
@@ -379,6 +381,9 @@ class Panel:
         self.memory_text: Optional[tk.Text] = None
         self.llm_control_window: Optional[tk.Toplevel] = None
         self.llm_control_log_text: Optional[tk.Text] = None
+        self.llm_progress_window: Optional[tk.Toplevel] = None
+        self.llm_progress_listbox: Optional[tk.Listbox] = None
+        self.llm_progress_points: List[Dict[str, Any]] = []
         self.llm_task_window: Optional[tk.Toplevel] = None
         self.llm_task_text: Optional[tk.Text] = None
         self.llm_task_preview_text: Optional[tk.Text] = None
@@ -560,6 +565,7 @@ class Panel:
         tk.Button(memory, text="Open LLM Control", command=self.toggle_llm_control_window).grid(row=8, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
         tk.Button(memory, text="Analyze LLM Task", command=self.toggle_llm_task_window).grid(row=8, column=2, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
         tk.Label(memory, textvariable=self.llm_task_plan_summary_var, anchor="w", justify="left").grid(row=9, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
+        tk.Button(memory, text="LLM Progress Manager", command=self.toggle_llm_progress_window).grid(row=10, column=0, columnspan=4, padx=6, pady=(0, 6), sticky="ew")
 
         fusion = tk.LabelFrame(left, text="Phase2 Fusion")
         fusion.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -2825,6 +2831,8 @@ class Panel:
         tk.Button(control, text="Stop", command=self.on_llm_control_stop).grid(row=1, column=4, columnspan=2, padx=6, pady=6, sticky="ew")
         tk.Button(control, text="Analyze LLM Task", command=self.toggle_llm_task_window).grid(row=2, column=0, columnspan=3, padx=6, pady=(0, 6), sticky="ew")
         tk.Label(control, textvariable=self.llm_task_plan_summary_var, anchor="w", justify="left").grid(row=2, column=3, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
+        tk.Button(control, text="Progress Manager", command=self.toggle_llm_progress_window).grid(row=3, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Label(control, textvariable=self.llm_progress_status_var, anchor="w", justify="left").grid(row=3, column=2, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
 
         status = tk.LabelFrame(self.llm_control_window, text="Live State")
         status.pack(fill="x", padx=8, pady=(0, 8))
@@ -2857,6 +2865,162 @@ class Panel:
             pass
         self.llm_control_window = None
         self.llm_control_log_text = None
+
+    def toggle_llm_progress_window(self) -> None:
+        if self.llm_progress_window and self.llm_progress_window.winfo_exists():
+            self._close_llm_progress_window()
+            return
+        self.llm_progress_window = tk.Toplevel(self.root)
+        self.llm_progress_window.title("LLM Progress Manager")
+        self.llm_progress_window.geometry("980x520")
+        self.llm_progress_window.protocol("WM_DELETE_WINDOW", self._close_llm_progress_window)
+
+        top = tk.LabelFrame(self.llm_progress_window, text="Decision Memory Points")
+        top.pack(fill="both", expand=True, padx=8, pady=8)
+        top.grid_rowconfigure(0, weight=1)
+        top.grid_columnconfigure(0, weight=1)
+        self.llm_progress_listbox = tk.Listbox(top, font=("Consolas", 10), exportselection=False)
+        self.llm_progress_listbox.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
+        scrollbar = tk.Scrollbar(top, orient="vertical", command=self.llm_progress_listbox.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
+        self.llm_progress_listbox.configure(yscrollcommand=scrollbar.set)
+
+        controls = tk.LabelFrame(self.llm_progress_window, text="Resume As New Exploration")
+        controls.pack(fill="x", padx=8, pady=(0, 8))
+        controls.grid_columnconfigure(1, weight=1)
+        tk.Label(controls, text="New Episode Name").grid(row=0, column=0, sticky="w", padx=6, pady=6)
+        tk.Entry(controls, textvariable=self.llm_progress_new_episode_var).grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        tk.Button(controls, text="Refresh Points", command=self.refresh_llm_progress_window).grid(row=0, column=2, padx=6, pady=6, sticky="ew")
+        tk.Button(controls, text="Start From Selected", command=self.on_llm_progress_start_from_selected).grid(row=0, column=3, padx=6, pady=6, sticky="ew")
+        tk.Label(controls, textvariable=self.llm_progress_status_var, anchor="w", justify="left").grid(row=1, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
+        self.refresh_llm_progress_window()
+
+    def _close_llm_progress_window(self) -> None:
+        try:
+            if self.llm_progress_window is not None and self.llm_progress_window.winfo_exists():
+                self.llm_progress_window.destroy()
+        except Exception:
+            pass
+        self.llm_progress_window = None
+        self.llm_progress_listbox = None
+
+    def refresh_llm_progress_window(self) -> None:
+        self.llm_progress_status_var.set("Progress: loading decision memory points...")
+        threading.Thread(target=self._refresh_llm_progress_points_worker, daemon=True).start()
+
+    def _refresh_llm_progress_points_worker(self) -> None:
+        points = self._load_llm_progress_points()
+        self.root.after(0, lambda p=points: self._apply_llm_progress_points(p))
+
+    def _apply_llm_progress_points(self, points: List[Dict[str, Any]]) -> None:
+        self.llm_progress_points = points
+        if self.llm_progress_listbox is not None and self.llm_progress_listbox.winfo_exists():
+            self.llm_progress_listbox.delete(0, "end")
+            for point in self.llm_progress_points:
+                self.llm_progress_listbox.insert("end", self._format_llm_progress_point_label(point))
+        if not self.llm_progress_new_episode_var.get().strip():
+            self.llm_progress_new_episode_var.set(f"resume_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        self.llm_progress_status_var.set(f"Progress: loaded {len(self.llm_progress_points)} decision memory points")
+
+    def _selected_llm_progress_point(self) -> Dict[str, Any]:
+        if self.llm_progress_listbox is None or not self.llm_progress_listbox.winfo_exists():
+            return {}
+        selection = self.llm_progress_listbox.curselection()
+        if not selection:
+            return {}
+        index = int(selection[0])
+        if 0 <= index < len(self.llm_progress_points):
+            return self.llm_progress_points[index]
+        return {}
+
+    def on_llm_progress_start_from_selected(self) -> None:
+        if self.llm_control_thread and self.llm_control_thread.is_alive():
+            self.llm_progress_status_var.set("Progress: stop LLM control before restoring a point.")
+            return
+        point = self._selected_llm_progress_point()
+        if not point:
+            self.llm_progress_status_var.set("Progress: select one decision memory point first.")
+            return
+        new_label = self.llm_progress_new_episode_var.get().strip()
+        if not new_label:
+            new_label = f"resume_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            self.llm_progress_new_episode_var.set(new_label)
+        threading.Thread(
+            target=lambda p=point, label=new_label: self._start_new_episode_from_progress_point(p, label),
+            daemon=True,
+        ).start()
+
+    def _start_new_episode_from_progress_point(self, point: Dict[str, Any], new_label: str) -> None:
+        self._set_llm_control_var(self.llm_progress_status_var, "Progress: restoring selected point...")
+        try:
+            if bool((self.latest_memory_collection_state or {}).get("active", False)):
+                stop_response = self.safe(self.client.post_json, "/memory_collection_stop", {}, label="Stop active memory episode")
+                if isinstance(stop_response, dict):
+                    self.root.after(0, lambda r=stop_response: self.apply_state(r))
+
+            pose = self._pose_from_llm_progress_point(point)
+            if not pose:
+                self._set_llm_control_var(self.llm_progress_status_var, "Progress: selected point has no valid pose.")
+                return
+            pose_response = self.safe(self.client.post_json, "/set_pose", pose, label="Restore progress pose")
+            if not isinstance(pose_response, dict) or str(pose_response.get("status", "")).lower() == "error":
+                message = str(pose_response.get("message", "") if isinstance(pose_response, dict) else "set_pose failed")
+                self._set_llm_control_var(self.llm_progress_status_var, f"Progress: pose restore failed: {message}")
+                return
+            self.root.after(0, lambda r=pose_response: self.apply_state(r))
+
+            snapshot_path = str(point.get("memory_snapshot_after_path") or point.get("memory_snapshot_path") or "").strip()
+            if snapshot_path and Path(snapshot_path).is_file():
+                restore_response = self.safe(
+                    self.client.post_json,
+                    "/memory_collection_restore_snapshot",
+                    {"snapshot_path": snapshot_path},
+                    label="Restore memory snapshot",
+                )
+                if isinstance(restore_response, dict):
+                    self.root.after(0, lambda r=restore_response: self.apply_state(r))
+                if not isinstance(restore_response, dict) or str(restore_response.get("status", "")).lower() == "error":
+                    message = str(restore_response.get("message", "") if isinstance(restore_response, dict) else "restore failed")
+                    self._set_llm_control_var(self.llm_progress_status_var, f"Progress: memory restore failed: {message}")
+                    return
+
+            target_house_id = str(point.get("target_house_id") or point.get("current_target_house_id") or "").strip()
+            if target_house_id:
+                target_response = self.safe(
+                    self.client.post_json,
+                    "/select_target_house",
+                    {"house_id": target_house_id},
+                    label=f"Restore target house {target_house_id}",
+                )
+                if isinstance(target_response, dict):
+                    self.root.after(0, lambda r=target_response: self.apply_state(r))
+                    self.root.after(0, lambda h=target_house_id: self._set_selected_target_house(h, mark_clean=True))
+
+            start_response = self.safe(
+                self.client.post_json,
+                "/memory_collection_start",
+                {"episode_label": str(new_label), "reset_store": False},
+                label="Start resumed memory episode",
+            )
+            if not isinstance(start_response, dict) or str(start_response.get("status", "")).lower() == "error":
+                message = str(start_response.get("message", "") if isinstance(start_response, dict) else "start failed")
+                self._set_llm_control_var(self.llm_progress_status_var, f"Progress: new episode failed: {message}")
+                return
+            self.root.after(0, lambda r=start_response: self._apply_response_and_reset_memory_auto(r))
+            self.root.after(0, lambda label=new_label: self.memory_episode_label_var.set(label))
+
+            self._restore_llm_task_snapshots_from_progress_point(point)
+            self._append_llm_control_log(
+                f"Started new memory episode from progress point: source={point.get('episode_id', '')} "
+                f"decision={point.get('decision_index', '')} as label={new_label}"
+            )
+            self._set_llm_control_var(
+                self.llm_progress_status_var,
+                f"Progress: restored decision {point.get('decision_index', '')} into new episode '{new_label}'",
+            )
+        except Exception as exc:
+            logger.exception("Failed to start from LLM progress point")
+            self._set_llm_control_var(self.llm_progress_status_var, f"Progress: restore failed: {exc}")
 
     def _append_llm_control_log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -3010,6 +3174,7 @@ class Panel:
                         + self._format_collision_warning_status(planned_collision_warning)
                     )
                 self._write_llm_control_decision(labeling_dir, decision, normalized, decision_index)
+                self._append_llm_progress_point(labeling_dir, decision_index, normalized, raw_decision=decision)
                 self.llm_control_decision_history.append(normalized)
                 self.llm_control_decision_history = self.llm_control_decision_history[-12:]
                 reason = str(normalized.get("reason", "") or "-")
@@ -6211,18 +6376,111 @@ class Panel:
         safe = "".join(ch if (ch.isalnum() or ch in {"-", "_", "."}) else "_" for ch in text)
         return safe[:120] or "unknown"
 
+    def _llm_control_session_info_from_path(self, value: str) -> Dict[str, str]:
+        if not str(value or "").strip():
+            return {}
+        try:
+            path = Path(str(value)).resolve()
+        except Exception:
+            path = Path(str(value))
+        candidates = [path] + list(path.parents)
+        for candidate in candidates:
+            try:
+                if candidate.parent.name == "llm_control_sessions":
+                    return {
+                        "root": str(candidate.parent),
+                        "episode_id": self._safe_llm_control_path_fragment(candidate.name),
+                        "session_dir": str(candidate),
+                    }
+            except Exception:
+                continue
+        for candidate in candidates:
+            try:
+                if candidate.parent.name == "memory_collection_sessions":
+                    root = candidate.parent.parent / "llm_control_sessions"
+                    return {
+                        "root": str(root),
+                        "episode_id": self._safe_llm_control_path_fragment(candidate.name),
+                        "session_dir": str(root / self._safe_llm_control_path_fragment(candidate.name)),
+                        "collection_dir": str(candidate),
+                    }
+            except Exception:
+                continue
+        return {}
+
+    def _llm_control_sessions_roots(self) -> List[Path]:
+        roots: List[Path] = []
+
+        def add(root: Path) -> None:
+            try:
+                resolved = root.resolve()
+            except Exception:
+                resolved = root
+            if not any(str(existing).lower() == str(resolved).lower() for existing in roots):
+                roots.append(resolved)
+
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        collection_dir_text = str(memory_collection.get("collection_dir", "") or "").strip()
+        if collection_dir_text:
+            info = self._llm_control_session_info_from_path(collection_dir_text)
+            if info.get("root"):
+                add(Path(info["root"]))
+        response = self.last_memory_capture_response if isinstance(self.last_memory_capture_response, dict) else {}
+        labeling_dir = str(response.get("labeling_dir", "") or "").strip()
+        if labeling_dir:
+            info = self._llm_control_session_info_from_path(labeling_dir)
+            if info.get("root"):
+                add(Path(info["root"]))
+        add(Path(PROJECT_ROOT) / "captures_remote" / "llm_control_sessions")
+        return roots
+
+    def _latest_memory_collection_session_dir(self) -> Optional[Path]:
+        candidates: List[Path] = []
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        collection_dir_text = str(memory_collection.get("collection_dir", "") or "").strip()
+        if collection_dir_text:
+            collection_dir = Path(collection_dir_text)
+            if collection_dir.exists():
+                candidates.append(collection_dir)
+        roots = [Path(PROJECT_ROOT) / "captures_remote" / "memory_collection_sessions"]
+        for root in roots:
+            if not root.exists():
+                continue
+            try:
+                candidates.extend([item for item in root.iterdir() if item.is_dir() and item.name.startswith("memory_episode_")])
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0.0, reverse=True)
+        return candidates[0]
+
     def _llm_control_session_dir_for_current_episode(self) -> Path:
         memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
         collection_dir_text = str(memory_collection.get("collection_dir", "") or "").strip()
         episode_id = str(memory_collection.get("episode_id", "") or "").strip()
         root = Path(PROJECT_ROOT) / "captures_remote" / "llm_control_sessions"
         if collection_dir_text:
-            collection_dir = Path(collection_dir_text)
-            if collection_dir.parent.name == "memory_collection_sessions":
-                root = collection_dir.parent.parent / "llm_control_sessions"
-                episode_id = episode_id or collection_dir.name
+            info = self._llm_control_session_info_from_path(collection_dir_text)
+            if info:
+                root = Path(info.get("root", str(root)))
+                episode_id = episode_id or str(info.get("episode_id", "") or "")
         if not episode_id:
-            episode_id = f"no_episode_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            response = self.last_memory_capture_response if isinstance(self.last_memory_capture_response, dict) else {}
+            response_labeling_dir = str(response.get("labeling_dir", "") or "").strip()
+            info = self._llm_control_session_info_from_path(response_labeling_dir)
+            if info:
+                root = Path(info.get("root", str(root)))
+                episode_id = str(info.get("episode_id", "") or "")
+        if not episode_id:
+            latest_collection_dir = self._latest_memory_collection_session_dir()
+            if latest_collection_dir is not None:
+                info = self._llm_control_session_info_from_path(str(latest_collection_dir))
+                if info:
+                    root = Path(info.get("root", str(root)))
+                    episode_id = str(info.get("episode_id", "") or "")
+        if not episode_id:
+            episode_id = f"unbound_llm_control_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         session_dir = root / self._safe_llm_control_path_fragment(episode_id)
         session_dir.mkdir(parents=True, exist_ok=True)
         return session_dir
@@ -6388,6 +6646,9 @@ class Panel:
             pass
 
     def _resolve_llm_control_capture_root(self, labeling_dir: str) -> Path:
+        info = self._llm_control_session_info_from_path(labeling_dir)
+        if info.get("root"):
+            return Path(info["root"])
         labeling_path = Path(labeling_dir).resolve()
         for parent in labeling_path.parents:
             if parent.name == "memory_collection_sessions":
@@ -6403,13 +6664,16 @@ class Panel:
         return Path(PROJECT_ROOT) / "captures_remote" / "llm_control_sessions"
 
     def _resolve_llm_control_episode_id(self, labeling_dir: str) -> str:
+        info = self._llm_control_session_info_from_path(labeling_dir)
+        if info.get("episode_id"):
+            return self._safe_llm_control_path_fragment(info["episode_id"])
         labeling_path = Path(labeling_dir).resolve()
         for parent in labeling_path.parents:
             if parent.parent.name == "memory_collection_sessions":
                 return self._safe_llm_control_path_fragment(parent.name)
         memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
         episode_id = str(memory_collection.get("episode_id", "") or "")
-        return self._safe_llm_control_path_fragment(episode_id or "no_episode")
+        return self._safe_llm_control_path_fragment(episode_id or f"unbound_llm_control_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
 
     def _llm_control_artifact_dir(self, labeling_dir: str, decision_index: int) -> Path:
         root = self._resolve_llm_control_capture_root(labeling_dir)
@@ -6418,6 +6682,300 @@ class Panel:
         artifact_dir = root / episode_id / f"decision_{int(decision_index):04d}_{capture_name}"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         return artifact_dir
+
+    def _pose_from_snapshot_payload(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        pose = snapshot.get("pose", {}) if isinstance(snapshot.get("pose"), dict) else {}
+        if not pose:
+            latest_pose = self.latest_state.get("pose", {}) if isinstance(self.latest_state.get("pose"), dict) else {}
+            pose = latest_pose
+        if not isinstance(pose, dict):
+            return {}
+        try:
+            x = float(pose.get("x"))
+            y = float(pose.get("y"))
+            z = float(pose.get("z"))
+            yaw = float(pose.get("task_yaw", pose.get("yaw", pose.get("yaw_deg", 0.0))))
+        except Exception:
+            return {}
+        return {"x": x, "y": y, "z": z, "yaw": yaw, "task_yaw": yaw}
+
+    def _pose_from_llm_progress_point(self, point: Dict[str, Any]) -> Dict[str, Any]:
+        for key in ("uav_pose_world", "pose"):
+            pose = point.get(key)
+            if not isinstance(pose, dict):
+                continue
+            try:
+                return {
+                    "x": float(pose.get("x")),
+                    "y": float(pose.get("y")),
+                    "z": float(pose.get("z")),
+                    "yaw": float(pose.get("yaw", pose.get("task_yaw", pose.get("yaw_deg", 0.0)))),
+                }
+            except Exception:
+                continue
+        return {}
+
+    def _labeling_snapshot_paths(self, labeling_dir: str) -> Dict[str, str]:
+        source = Path(labeling_dir)
+        paths = {
+            "after": str(source / "entry_search_memory_snapshot_after.json"),
+            "before": str(source / "entry_search_memory_snapshot_before.json"),
+        }
+        manifest = self._read_json_file(source / "labeling_inputs_manifest.json")
+        original = str(manifest.get("source_labeling_dir", "") or "").strip()
+        if original:
+            original_dir = Path(original)
+            paths.setdefault("original_labeling_dir", str(original_dir))
+            if not Path(paths["after"]).is_file():
+                paths["after"] = str(original_dir / "entry_search_memory_snapshot_after.json")
+            if not Path(paths["before"]).is_file():
+                paths["before"] = str(original_dir / "entry_search_memory_snapshot_before.json")
+        return paths
+
+    def _progress_memory_summary_for_labeling_dir(self, labeling_dir: str) -> Dict[str, Any]:
+        snapshot_paths = self._labeling_snapshot_paths(labeling_dir)
+        snapshot = self._read_json_file(Path(snapshot_paths.get("after", "")))
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        mission = snapshot.get("house_mission", {}) if isinstance(snapshot.get("house_mission"), dict) else {}
+        house_id = (
+            self._current_target_house_id_from_fusion(fusion)
+            or str(mission.get("target_house_id", "") or "")
+            or str(mission.get("current_house_id", "") or "")
+        )
+        face_coverage = self._face_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+        perimeter_coverage = self._perimeter_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
+        memory_payload = snapshot.get("memory", {}) if isinstance(snapshot.get("memory"), dict) else {}
+        memories = memory_payload.get("memories", {}) if isinstance(memory_payload.get("memories"), dict) else {}
+        house_memory = memories.get(str(house_id), {}) if isinstance(memories, dict) else {}
+        semantic_memory = house_memory.get("semantic_memory", {}) if isinstance(house_memory.get("semantic_memory"), dict) else {}
+        return {
+            "target_house_id": str(house_id or ""),
+            "current_house_id": str(mission.get("current_house_id", "") or ""),
+            "step_index": int(snapshot.get("step_index", 0) or 0),
+            "snapshot_time": str(snapshot.get("snapshot_time", "") or ""),
+            "entry_search_status": str(semantic_memory.get("entry_search_status", "") if house_id else ""),
+            "face_coverage_status": face_coverage,
+            "perimeter_coverage_status": perimeter_coverage,
+        }
+
+    def _build_llm_progress_point(
+        self,
+        labeling_dir: str,
+        decision_index: int,
+        normalized: Dict[str, Any],
+        *,
+        raw_decision: Optional[Dict[str, Any]] = None,
+        artifact_dir: Optional[Path] = None,
+        created_at: str = "",
+    ) -> Dict[str, Any]:
+        artifact = artifact_dir or self._llm_control_artifact_dir(labeling_dir, decision_index)
+        session_dir = artifact.parent
+        snapshot_paths = self._labeling_snapshot_paths(labeling_dir)
+        snapshot_after_path = snapshot_paths.get("after", "")
+        snapshot = self._read_json_file(Path(snapshot_after_path))
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        pose = self._pose_from_snapshot_payload(snapshot)
+        memory_progress = self._progress_memory_summary_for_labeling_dir(labeling_dir)
+        collision = normalized.get("collision_warning_status", {}) if isinstance(normalized, dict) else {}
+        if not isinstance(collision, dict):
+            collision = self._collision_warning_status(fusion, labeling_dir)
+        task_plan_snapshot = json.loads(json.dumps(self.llm_task_plan, ensure_ascii=False)) if isinstance(self.llm_task_plan, dict) else {}
+        task_trace_snapshot = (
+            json.loads(json.dumps(self.llm_task_execution_trace, ensure_ascii=False))
+            if isinstance(self.llm_task_execution_trace, dict)
+            else {}
+        )
+        target_house_id = str(memory_progress.get("target_house_id") or "")
+        return {
+            "version": "llm_control_progress_point_v1",
+            "record_type": "decision_memory_point",
+            "created_at": created_at or datetime.now().isoformat(timespec="seconds"),
+            "episode_id": str(session_dir.name),
+            "session_dir": str(session_dir),
+            "decision_index": int(decision_index),
+            "artifact_dir": str(artifact),
+            "labeling_dir": str(labeling_dir),
+            "labeling_inputs_dir": str(artifact / "labeling_inputs"),
+            "memory_snapshot_before_path": str(snapshot_paths.get("before", "")),
+            "memory_snapshot_after_path": str(snapshot_after_path),
+            "source_memory_episode_id": str(snapshot.get("episode_id", "") or ""),
+            "source_memory_episode_label": str(snapshot.get("episode_label", "") or ""),
+            "uav_pose_world": pose,
+            "target_house_id": target_house_id,
+            "current_target_house_id": target_house_id,
+            "current_house_id": str(memory_progress.get("current_house_id") or ""),
+            "memory_progress": memory_progress,
+            "normalized_decision": dict(normalized) if isinstance(normalized, dict) else {},
+            "raw_decision": dict(raw_decision) if isinstance(raw_decision, dict) else {},
+            "collision_warning_status": collision,
+            "task_plan_snapshot": task_plan_snapshot,
+            "task_execution_trace_snapshot": task_trace_snapshot,
+            "task_plan_path": str(session_dir / "task_plan.json"),
+            "execution_trace_path": str(session_dir / "execution_trace.json"),
+        }
+
+    def _append_llm_progress_point(
+        self,
+        labeling_dir: str,
+        decision_index: int,
+        normalized: Dict[str, Any],
+        *,
+        raw_decision: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        try:
+            artifact_dir = self._llm_control_artifact_dir(labeling_dir, decision_index)
+            point = self._build_llm_progress_point(
+                labeling_dir,
+                decision_index,
+                normalized,
+                raw_decision=raw_decision,
+                artifact_dir=artifact_dir,
+            )
+            (artifact_dir / "llm_progress_point.json").write_text(
+                json.dumps(point, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            session_dir = artifact_dir.parent
+            with (session_dir / "llm_progress_points.jsonl").open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(point, ensure_ascii=False) + "\n")
+            (session_dir / "llm_progress_latest.json").write_text(
+                json.dumps(point, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            self._set_llm_control_var(
+                self.llm_progress_status_var,
+                f"Progress: saved decision {decision_index} pose/memory point",
+            )
+        except Exception as exc:
+            logger.warning("Failed to append LLM progress point: %s", exc)
+
+    def _load_llm_progress_points(self, *, max_points: int = 300) -> List[Dict[str, Any]]:
+        points: List[Dict[str, Any]] = []
+        seen: Dict[str, Dict[str, Any]] = {}
+        for root in self._llm_control_sessions_roots():
+            if not root.exists():
+                continue
+            try:
+                session_dirs = [item for item in root.iterdir() if item.is_dir()]
+            except Exception:
+                continue
+            session_dirs.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0.0, reverse=True)
+            for session_dir in session_dirs:
+                if len(seen) >= int(max_points):
+                    break
+                log_path = session_dir / "llm_progress_points.jsonl"
+                if log_path.is_file():
+                    try:
+                        for line in log_path.read_text(encoding="utf-8-sig").splitlines():
+                            if not line.strip():
+                                continue
+                            item = json.loads(line)
+                            if isinstance(item, dict):
+                                key = str(item.get("artifact_dir") or f"{session_dir}:{item.get('decision_index', '')}")
+                                seen[key] = item
+                                if len(seen) >= int(max_points):
+                                    break
+                    except Exception:
+                        pass
+                if len(seen) >= int(max_points):
+                    break
+                artifact_dirs = [item for item in session_dir.glob("decision_*") if item.is_dir()]
+                artifact_dirs.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0.0, reverse=True)
+                for artifact_dir in artifact_dirs:
+                    if len(seen) >= int(max_points):
+                        break
+                    if not artifact_dir.is_dir():
+                        continue
+                    progress_path = artifact_dir / "llm_progress_point.json"
+                    if progress_path.is_file():
+                        item = self._read_json_file(progress_path)
+                        if item:
+                            key = str(item.get("artifact_dir") or str(artifact_dir))
+                            seen[key] = item
+                            continue
+                    decision_payload = self._read_json_file(artifact_dir / "llm_control_decision.json")
+                    if not decision_payload:
+                        continue
+                    labeling_dir = str(decision_payload.get("labeling_dir", "") or "").strip()
+                    if not labeling_dir or not Path(labeling_dir).exists():
+                        fallback_labeling = artifact_dir / "labeling_inputs"
+                        labeling_dir = str(fallback_labeling) if fallback_labeling.exists() else labeling_dir
+                    if not labeling_dir or not Path(labeling_dir).exists():
+                        continue
+                    try:
+                        decision_index = int(decision_payload.get("decision_index", 0) or 0)
+                    except Exception:
+                        decision_index = 0
+                    normalized = decision_payload.get("normalized_decision", {})
+                    if not isinstance(normalized, dict):
+                        normalized = {}
+                    try:
+                        item = self._build_llm_progress_point(
+                            labeling_dir,
+                            decision_index,
+                            normalized,
+                            raw_decision=decision_payload.get("raw_decision", {}) if isinstance(decision_payload.get("raw_decision"), dict) else {},
+                            artifact_dir=artifact_dir,
+                            created_at=str(decision_payload.get("created_at", "") or ""),
+                        )
+                        seen[str(artifact_dir)] = item
+                    except Exception:
+                        continue
+        points = list(seen.values())
+        points.sort(
+            key=lambda item: (
+                str(item.get("created_at", "")),
+                str(item.get("episode_id", "")),
+                int(item.get("decision_index", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return points[: int(max_points)]
+
+    def _format_llm_progress_point_label(self, point: Dict[str, Any]) -> str:
+        pose = point.get("uav_pose_world", {}) if isinstance(point.get("uav_pose_world"), dict) else {}
+        progress = point.get("memory_progress", {}) if isinstance(point.get("memory_progress"), dict) else {}
+        face = progress.get("face_coverage_status", {}) if isinstance(progress.get("face_coverage_status"), dict) else {}
+        perimeter = progress.get("perimeter_coverage_status", {}) if isinstance(progress.get("perimeter_coverage_status"), dict) else {}
+        decision = point.get("normalized_decision", {}) if isinstance(point.get("normalized_decision"), dict) else {}
+        try:
+            pose_text = f"({float(pose.get('x', 0.0)):.0f},{float(pose.get('y', 0.0)):.0f},{float(pose.get('z', 0.0)):.0f}) yaw={float(pose.get('yaw', pose.get('task_yaw', 0.0))):.1f}"
+        except Exception:
+            pose_text = "(pose=n/a)"
+        action_text = f"{decision.get('action_symbol', '?')}x{decision.get('repeat', '?')}"
+        return (
+            f"{str(point.get('created_at', ''))[:19]} | {point.get('episode_id', '')} | "
+            f"d{int(point.get('decision_index', 0) or 0):04d} | target={point.get('target_house_id', '') or '-'} | "
+            f"step={progress.get('step_index', 0)} | {pose_text} | "
+            f"face={float(face.get('observed_coverage_ratio', 0.0) or 0.0):.2f}/"
+            f"{int(face.get('observed_face_count', 0) or 0)} | "
+            f"peri={float(perimeter.get('observed_coverage_ratio', 0.0) or 0.0):.2f} | action={action_text}"
+        )
+
+    def _restore_llm_task_snapshots_from_progress_point(self, point: Dict[str, Any]) -> None:
+        plan = point.get("task_plan_snapshot", {}) if isinstance(point.get("task_plan_snapshot"), dict) else {}
+        trace = (
+            point.get("task_execution_trace_snapshot", {})
+            if isinstance(point.get("task_execution_trace_snapshot"), dict)
+            else {}
+        )
+        if not plan:
+            plan_path = str(point.get("task_plan_path", "") or "")
+            plan = self._read_json_file(Path(plan_path)) if plan_path else {}
+        if not trace:
+            trace_path = str(point.get("execution_trace_path", "") or "")
+            trace = self._read_json_file(Path(trace_path)) if trace_path else {}
+        if isinstance(plan, dict) and plan:
+            self.llm_task_plan = plan
+            self.llm_task_plan_applied = bool(plan.get("ordered_targets"))
+        if isinstance(trace, dict) and trace:
+            self.llm_task_execution_trace = trace
+            try:
+                self.llm_task_current_index = int(trace.get("current_target_index", self.llm_task_current_index) or 0)
+            except Exception:
+                pass
+        if plan or trace:
+            self.root.after(0, self._refresh_llm_task_preview)
 
     def _sync_llm_control_labeling_inputs(self, labeling_dir: str, artifact_dir: Path) -> Dict[str, Any]:
         source_dir = Path(labeling_dir)
@@ -7254,7 +7812,7 @@ class Panel:
 
     def on_close(self) -> None:
         self.on_llm_control_stop()
-        for window in (self.preview_window, self.depth_window, self.memory_window, self.llm_control_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
+        for window in (self.preview_window, self.depth_window, self.memory_window, self.llm_control_window, self.llm_progress_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
             try:
                 if window is not None: window.destroy()
             except Exception:
