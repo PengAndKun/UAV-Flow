@@ -140,6 +140,8 @@ LLM_BODY_CORRIDOR_CLEAR_P10_CM = 220.0
 LLM_BODY_CORRIDOR_MIN_CLEAR_CM = 180.0
 LLM_BODY_CLOSE_RATIO_MAX = 0.03
 LLM_LOW_CLOSE_RATIO_MIN = 0.08
+LLM_SEGMENT_MEMORY_DO_NOT_REVISIT_LIMIT = 16
+LLM_SEGMENT_MEMORY_NEXT_SEGMENT_LIMIT = 10
 LLM_CONTROL_LABELING_INPUT_FILES = (
     "fusion_result.json",
     "sample_metadata.json",
@@ -464,6 +466,7 @@ class Panel:
         self.llm_target_reacquire_lock: Dict[str, Any] = {}
         self.llm_obstacle_detour_lock: Dict[str, Any] = {}
         self.llm_search_altitude_lock: Dict[str, Any] = {}
+        self.llm_segment_search_report_cache: Dict[str, Dict[str, Any]] = {}
 
         self.eval_dir = os.path.dirname(os.path.abspath(__file__))
         self.houses_config_path = os.path.join(self.eval_dir, "houses_config.json")
@@ -3081,6 +3084,7 @@ class Panel:
 
     def _llm_control_loop(self, *, max_steps: int) -> None:
         self.llm_control_running = True
+        self.llm_segment_search_report_cache = {}
         resume_state = self._restore_llm_control_resume_state()
         if int(resume_state.get("existing_decision_count", 0) or 0) <= 0:
             self.llm_target_reacquire_lock = {}
@@ -3372,6 +3376,264 @@ class Panel:
         payload = self._read_json_file(Path(labeling_dir) / "fusion_result.json")
         fusion = payload.get("fusion", {}) if isinstance(payload.get("fusion"), dict) else {}
         return fusion if fusion else payload
+
+    def _memory_collection_session_dir_from_labeling_dir(self, labeling_dir: str) -> Optional[Path]:
+        if not str(labeling_dir or "").strip():
+            return None
+        try:
+            path = Path(str(labeling_dir)).resolve()
+        except Exception:
+            path = Path(str(labeling_dir))
+        for candidate in [path] + list(path.parents):
+            try:
+                if candidate.parent.name == "memory_collection_sessions":
+                    return candidate
+            except Exception:
+                continue
+        info = self._llm_control_session_info_from_path(str(labeling_dir))
+        collection_dir = str(info.get("collection_dir", "") or "").strip()
+        if collection_dir:
+            return Path(collection_dir)
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        collection_dir = str(memory_collection.get("collection_dir", "") or "").strip()
+        return Path(collection_dir) if collection_dir else None
+
+    def _load_or_update_segment_search_memory_report(self, labeling_dir: str) -> Dict[str, Any]:
+        cache_key = str(Path(str(labeling_dir))).lower()
+        cache = self.llm_segment_search_report_cache if isinstance(self.llm_segment_search_report_cache, dict) else {}
+        if cache_key in cache and isinstance(cache.get(cache_key), dict):
+            return cache[cache_key]
+        session_dir = self._memory_collection_session_dir_from_labeling_dir(labeling_dir)
+        if session_dir is None:
+            return {}
+        report_path = session_dir / "segment_search_memory_report.json"
+        try:
+            from phase2_multimodal_fusion_analysis.segment_search_memory_replay import replay_session
+
+            houses_config = Path(PROJECT_ROOT) / "UAV-Flow-Eval" / "houses_config.json"
+            report = replay_session(
+                session_dir,
+                houses_config_path=houses_config,
+                output_path=report_path,
+                target_house_id="",
+                segment_count=4,
+                max_captures=0,
+            )
+            if isinstance(report, dict):
+                self.llm_segment_search_report_cache = cache
+                cache[cache_key] = report
+                return report
+            return {}
+        except Exception as exc:
+            logger.warning("Failed to refresh segment search memory report: %s", exc)
+            report = self._read_json_file(report_path)
+            if report:
+                self.llm_segment_search_report_cache = cache
+                cache[cache_key] = report
+            return report
+
+    def _segment_record_for_prompt(self, house_id: str, face_id: str, segment_index: int, segment: Dict[str, Any]) -> Dict[str, Any]:
+        evidence = segment.get("best_evidence", {}) if isinstance(segment.get("best_evidence"), dict) else {}
+        candidate = evidence.get("candidate", {}) if isinstance(evidence.get("candidate"), dict) else {}
+        depth_roi = candidate.get("depth_roi", {}) if isinstance(candidate.get("depth_roi"), dict) else {}
+        return {
+            "house_id": str(house_id or ""),
+            "segment_key": f"{face_id}_{int(segment_index)}",
+            "segment_id": str(segment.get("segment_id", "") or f"H{house_id}_{face_id}_{int(segment_index)}"),
+            "face_id": str(face_id or ""),
+            "segment_index": int(segment_index),
+            "state": str(segment.get("state", "") or "unseen"),
+            "is_search_complete": bool(segment.get("is_search_complete", False)),
+            "observation_count": int(segment.get("observation_count", 0) or 0),
+            "last_observed_step": segment.get("last_observed_step"),
+            "last_capture_name": str(segment.get("last_capture_name", "") or ""),
+            "evidence_type": str(segment.get("evidence_type", "") or ""),
+            "candidate_class": str(candidate.get("class_name", "") or ""),
+            "candidate_confidence": self._as_float_or_none(candidate.get("confidence")),
+            "roi_depth_median_cm": self._as_float_or_none(depth_roi.get("roi_depth_median_cm")),
+            "depth_gap_cm": self._as_float_or_none(depth_roi.get("depth_gap_cm")),
+            "center_band_far_ratio": self._as_float_or_none(depth_roi.get("center_band_far_ratio")),
+            "vertical_clearance_ratio": self._as_float_or_none(depth_roi.get("vertical_clearance_ratio")),
+        }
+
+    def _segment_search_memory_control_summary(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
+        hid = str(house_id or "").strip()
+        report = self._load_or_update_segment_search_memory_report(labeling_dir)
+        if not report:
+            return {"available": False, "reason": "segment_search_memory_report_unavailable"}
+        memories = report.get("segment_memories", {}) if isinstance(report.get("segment_memories"), dict) else {}
+        memory = memories.get(hid, {}) if hid else {}
+        if not isinstance(memory, dict) or not memory:
+            return {
+                "available": False,
+                "reason": "target_house_not_in_segment_report",
+                "house_id": hid,
+                "report_path": str(report.get("output_path", "")),
+                "available_house_ids": sorted(str(key) for key in memories.keys()),
+            }
+
+        do_not_revisit: List[Dict[str, Any]] = []
+        next_unsearched: List[Dict[str, Any]] = []
+        entry_found_open_segments: List[Dict[str, Any]] = []
+        faces = memory.get("faces", {}) if isinstance(memory.get("faces"), dict) else {}
+        for face_id, face in faces.items():
+            if not isinstance(face, dict):
+                continue
+            segments = face.get("segments", []) if isinstance(face.get("segments"), list) else []
+            for index, segment in enumerate(segments):
+                if not isinstance(segment, dict):
+                    continue
+                record = self._segment_record_for_prompt(hid, str(face_id), int(index), segment)
+                state = str(record.get("state", "") or "")
+                if bool(record.get("is_search_complete", False)):
+                    do_not_revisit.append(record)
+                else:
+                    next_unsearched.append(record)
+                if state == "entry_found_open":
+                    entry_found_open_segments.append(record)
+
+        def record_sort_key(item: Dict[str, Any]) -> Any:
+            state = str(item.get("state", "") or "")
+            state_rank = {
+                "unseen": 0,
+                "observed_uncertain": 1,
+                "blocked_or_occluded": 2,
+                "needs_review": 3,
+            }.get(state, 4)
+            return (
+                state_rank,
+                int(item.get("observation_count", 0) or 0),
+                str(item.get("face_id", "")),
+                int(item.get("segment_index", 0) or 0),
+            )
+
+        next_unsearched = sorted(next_unsearched, key=record_sort_key)
+        entry_found_open_segments = sorted(
+            entry_found_open_segments,
+            key=lambda item: int(item.get("last_observed_step", -1) or -1),
+            reverse=True,
+        )
+        current_capture_name = Path(str(labeling_dir)).parent.name
+        current_event: Dict[str, Any] = {}
+        timeline = report.get("timeline", []) if isinstance(report.get("timeline"), list) else []
+        for event in reversed(timeline):
+            if isinstance(event, dict) and str(event.get("capture_name", "") or "") == current_capture_name:
+                current_event = event
+                break
+        current_updates = current_event.get("updates", []) if isinstance(current_event.get("updates"), list) else []
+        current_repeated_completed = [
+            update
+            for update in current_updates
+            if isinstance(update, dict) and bool(update.get("repeat_completed_observation", False))
+        ]
+        current_entry_found_open = [
+            update
+            for update in current_updates
+            if isinstance(update, dict) and str(update.get("new_state", "") or "") == "entry_found_open"
+        ]
+        summary = memory.get("summary", {}) if isinstance(memory.get("summary"), dict) else {}
+        best_open = entry_found_open_segments[0] if entry_found_open_segments else {}
+        return {
+            "available": True,
+            "version": "llm_segment_search_memory_control_summary_v1",
+            "house_id": hid,
+            "report_path": str(report.get("output_path", "")),
+            "capture_count": int(report.get("capture_count", 0) or 0),
+            "segment_count_per_face": int(report.get("segment_count_per_face", 0) or 0),
+            "summary": {
+                "total_segments": int(summary.get("total_segments", 0) or 0),
+                "complete_segment_count": int(summary.get("complete_segment_count", 0) or 0),
+                "remaining_segment_count": int(summary.get("remaining_segment_count", 0) or 0),
+                "completion_ratio": self._as_float_or_none(summary.get("completion_ratio")) or 0.0,
+                "state_counts": summary.get("state_counts", {}) if isinstance(summary.get("state_counts"), dict) else {},
+                "next_unsearched_segment": str(summary.get("next_unsearched_segment", "") or ""),
+            },
+            "do_not_revisit_segments": do_not_revisit[: int(LLM_SEGMENT_MEMORY_DO_NOT_REVISIT_LIMIT)],
+            "next_unsearched_segments": next_unsearched[: int(LLM_SEGMENT_MEMORY_NEXT_SEGMENT_LIMIT)],
+            "entry_found_open_gate": {
+                "present": bool(entry_found_open_segments),
+                "current_capture_entry_found_open": bool(current_entry_found_open),
+                "entry_found_open_segments": entry_found_open_segments[:4],
+                "best_entry_segment": best_open,
+                "best_entry_distance_cm": best_open.get("roi_depth_median_cm") if isinstance(best_open, dict) else None,
+                "policy": "If present, prioritize re-centering/approaching this open entry. Stop only when the entry is actually reached or close enough by the depth/pose gate.",
+            },
+            "current_capture": {
+                "capture_name": current_capture_name,
+                "has_event": bool(current_event),
+                "repeat_completed_observation": bool(current_repeated_completed),
+                "repeated_completed_segments": current_repeated_completed[:6],
+                "entry_found_open_updates": current_entry_found_open[:4],
+                "instruction": "If repeat_completed_observation=true and no entry gate is active, leave this completed segment and move toward next_unsearched_segments.",
+            },
+        }
+
+    def _segment_entry_found_gate_status(self, labeling_dir: str, fusion: Dict[str, Any], house_id: str) -> Dict[str, Any]:
+        segment_summary = self._segment_search_memory_control_summary(labeling_dir, house_id)
+        entry_gate = segment_summary.get("entry_found_open_gate", {}) if isinstance(segment_summary.get("entry_found_open_gate"), dict) else {}
+        if not bool(entry_gate.get("present", False)):
+            return {"active": False, "reason": "no_entry_found_open_segment", "segment_search_memory": segment_summary}
+
+        target_entry_visible = self._target_entry_visible_for_current_house(fusion)
+        enterable_evidence = self._is_enterable_entry_evidence(fusion)
+        current_capture_open = bool(entry_gate.get("current_capture_entry_found_open", False))
+        distance_cm = self._candidate_entry_distance_cm(fusion)
+        segment_distance_cm = self._as_float_or_none(entry_gate.get("best_entry_distance_cm"))
+        effective_distance_cm = distance_cm if distance_cm is not None else segment_distance_cm
+        visible_or_current = bool(target_entry_visible or current_capture_open)
+        enterable_or_current = bool(enterable_evidence or current_capture_open)
+        stop_gate = self._entry_stop_gate_status(labeling_dir, fusion, house_id) if house_id else {}
+        alignment = self._target_entry_alignment_status(fusion)
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        front_clear = bool(
+            self._front_path_clear_for_approach(fusion)
+            or bool(obstacle.get("low_obstacle_passable", False))
+        )
+        should_stop = bool(
+            visible_or_current
+            and enterable_or_current
+            and (
+                bool(stop_gate.get("actual_entry_reached", False))
+                or bool(stop_gate.get("proxy_stop_allowed", False))
+                or (
+                    bool(current_capture_open)
+                    and effective_distance_cm is not None
+                    and effective_distance_cm <= float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM)
+                )
+            )
+        )
+        should_align = bool(
+            visible_or_current
+            and enterable_or_current
+            and not should_stop
+            and bool(alignment.get("needed", False))
+        )
+        should_approach = bool(
+            visible_or_current
+            and enterable_or_current
+            and not should_stop
+            and not should_align
+            and front_clear
+        )
+        return {
+            "active": True,
+            "house_id": str(house_id or ""),
+            "should_stop": should_stop,
+            "should_align": should_align,
+            "should_approach": should_approach,
+            "target_entry_visible": bool(target_entry_visible),
+            "enterable_evidence": bool(enterable_evidence),
+            "current_capture_entry_found_open": bool(current_capture_open),
+            "entry_distance_cm": distance_cm,
+            "segment_entry_distance_cm": segment_distance_cm,
+            "effective_distance_cm": effective_distance_cm,
+            "front_clear_for_approach": front_clear,
+            "target_entry_alignment": alignment,
+            "front_obstacle": obstacle,
+            "stop_gate_status": stop_gate,
+            "segment_search_memory": segment_summary,
+            "reason": "segment_search_memory reports an open entry; use approach/stop gate before generic search/orbit behavior",
+        }
 
     def _metadata_from_labeling_dir(self, labeling_dir: str) -> Dict[str, Any]:
         return self._read_json_file(Path(labeling_dir) / "sample_metadata.json")
@@ -5299,6 +5561,21 @@ class Panel:
         threshold = float(execution_policy.get("entry_reached_distance_cm", LLM_ENTRY_REACHED_DISTANCE_CM))
         centered_depth_proxy_cm = float(execution_policy.get("entry_reached_centered_depth_proxy_cm", LLM_ENTRY_REACHED_CENTERED_DEPTH_PROXY_CM))
         stop_gate = self._entry_stop_gate_status(labeling_dir, fusion, house_id, actual_threshold_cm=threshold)
+        segment_entry_gate = self._segment_entry_found_gate_status(labeling_dir, fusion, house_id)
+        if bool(segment_entry_gate.get("should_stop", False)):
+            return {
+                "completed": True,
+                "finish_type": "target_entry_reached_segment_open_gate",
+                "house_id": house_id,
+                "step_index": step_index,
+                "source_labeling_dir": str(labeling_dir),
+                "entry_distance_cm": segment_entry_gate.get("effective_distance_cm"),
+                "distance_threshold_cm": threshold,
+                "semantic_class": class_name,
+                "segment_entry_found_gate": segment_entry_gate,
+                "stop_gate_status": stop_gate,
+                "reason": "segment search memory reports an open entry and the current capture satisfies the approach/stop gate",
+            }
         if (
             target_entry_visible
             and self._is_enterable_entry_evidence(fusion)
@@ -6073,7 +6350,110 @@ class Panel:
             routed.setdefault("stop_gate_status", gate)
         return routed
 
+    def _apply_segment_entry_found_gate_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        gate = self._segment_entry_found_gate_status(labeling_dir, fusion, house_id)
+        if not bool(gate.get("active", False)):
+            return normalized
+
+        original = dict(normalized)
+        if bool(gate.get("should_stop", False)):
+            normalized = dict(normalized)
+            normalized["action_symbol"] = "x"
+            normalized["repeat"] = 1
+            normalized["stop"] = True
+            normalized["need_capture_after"] = False
+            normalized["segment_entry_found_gate"] = gate
+            normalized["rule_override"] = {
+                "type": "segment_entry_found_open_stop_gate",
+                "original_action_symbol": original.get("action_symbol"),
+                "original_repeat": original.get("repeat"),
+                "original_stop": original.get("stop"),
+                "segment_entry_found_gate": gate,
+                "reason": "segment search memory has an open-entry segment and the current capture satisfies actual/proxy reach conditions",
+            }
+            reason = str(normalized.get("reason", "") or "")
+            distance = gate.get("effective_distance_cm")
+            gate_text = f"segment open-entry stop gate: reached/open entry distance={distance}"
+            normalized["reason"] = (reason + " | " if reason else "") + gate_text
+            self._append_llm_control_log(
+                f"Segment open-entry stop gate: house={house_id} distance={distance} stop current target."
+            )
+            return normalized
+
+        if bool(gate.get("should_align", False)):
+            alignment = gate.get("target_entry_alignment", {}) if isinstance(gate.get("target_entry_alignment"), dict) else {}
+            action_symbol = str(alignment.get("action_symbol", "") or "")
+            if action_symbol not in LLM_CONTROL_ALLOWED_SYMBOLS:
+                action_symbol = "q" if str(alignment.get("side", "")) == "left" else "e"
+            normalized = dict(normalized)
+            normalized["action_symbol"] = action_symbol
+            normalized["repeat"] = 1
+            normalized["stop"] = False
+            normalized["need_capture_after"] = True
+            normalized["segment_entry_found_gate"] = gate
+            normalized["rule_override"] = {
+                "type": "segment_entry_found_open_align_gate",
+                "original_action_symbol": original.get("action_symbol"),
+                "original_repeat": original.get("repeat"),
+                "action_symbol": action_symbol,
+                "segment_entry_found_gate": gate,
+                "reason": "segment search memory found an open entry; re-center the current door evidence before forward approach",
+            }
+            reason = str(normalized.get("reason", "") or "")
+            normalized["reason"] = (reason + " | " if reason else "") + f"segment open-entry align gate: {action_symbol} x1"
+            self._append_llm_control_log(
+                f"Segment open-entry align gate: house={house_id} action={action_symbol}."
+            )
+            return normalized
+
+        if bool(gate.get("should_approach", False)):
+            distance = self._as_float_or_none(gate.get("effective_distance_cm"))
+            remaining_cm = max(0.0, distance - float(LLM_ENTRY_REACHED_DISTANCE_CM)) if distance is not None else None
+            repeat = self._safe_forward_repeat_from_depth(
+                gate.get("front_obstacle", {}) if isinstance(gate.get("front_obstacle"), dict) else {},
+                fallback_repeat=3,
+                remaining_cm=remaining_cm,
+            )
+            repeat = max(1, min(int(repeat), int(self._llm_control_repeat_cap())))
+            normalized = dict(normalized)
+            normalized["action_symbol"] = "w"
+            normalized["repeat"] = repeat
+            normalized["stop"] = False
+            normalized["need_capture_after"] = True
+            normalized["segment_entry_found_gate"] = gate
+            normalized["rule_override"] = {
+                "type": "segment_entry_found_open_approach_gate",
+                "original_action_symbol": original.get("action_symbol"),
+                "original_repeat": original.get("repeat"),
+                "action_symbol": "w",
+                "repeat": int(repeat),
+                "segment_entry_found_gate": gate,
+                "reason": "segment search memory found an open target-house entry; approach it instead of continuing generic orbit/full-coverage search",
+            }
+            reason = str(normalized.get("reason", "") or "")
+            normalized["reason"] = (
+                reason + " | " if reason else ""
+            ) + f"segment open-entry approach gate: w x{repeat}, distance={distance}"
+            self._append_llm_control_log(
+                f"Segment open-entry approach gate: action={original.get('action_symbol')} -> w repeat={repeat}; "
+                f"house={house_id} distance={distance}"
+            )
+            return normalized
+        return normalized
+
     def _apply_llm_control_rule_overrides(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        normalized = self._apply_segment_entry_found_gate_override(normalized, labeling_dir)
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type in {
+            "segment_entry_found_open_stop_gate",
+            "segment_entry_found_open_align_gate",
+            "segment_entry_found_open_approach_gate",
+        }:
+            return normalized
         if bool(normalized.get("stop", False)):
             normalized = self._apply_premature_stop_continue_search_override(normalized, labeling_dir)
             if bool(normalized.get("stop", False)):
@@ -6216,6 +6596,7 @@ class Panel:
         face_coverage_status = self._face_coverage_status_for_house(labeling_dir, house_id) if house_id else {}
         non_enterable_entry_status = self._non_enterable_entry_status(fusion)
         coverage_altitude_status = self._coverage_altitude_status(fusion, labeling_dir, house_id) if house_id else {}
+        segment_search_memory = self._segment_search_memory_control_summary(labeling_dir, house_id) if house_id else {"available": False, "reason": "no_target_house_id"}
         return {
             "version": "memory_aware_llm_control_prompt_v1",
             "prompt_type": "memory_aware_direct_control",
@@ -6247,6 +6628,7 @@ class Panel:
             "target_entry_alignment": target_entry_alignment,
             "perimeter_coverage_status": perimeter_coverage_status,
             "face_coverage_status": face_coverage_status,
+            "segment_search_memory": segment_search_memory,
             "non_enterable_entry_status": non_enterable_entry_status,
             "coverage_altitude_status": coverage_altitude_status,
             "completion_rules": {
@@ -6258,6 +6640,8 @@ class Panel:
                 "face_edge_coverage": "During no-entry/closed-entry search, use face_coverage_status to avoid revisiting the same house face segment. Continue orbiting toward unobserved face segments before declaring no enterable entry.",
                 "face_corner_forward": "If the current face edge segment is already repeatedly observed and the front corridor has enough clearance, advance forward along the house edge to reveal the next face instead of continuing lateral strafe into side obstacles. Do not use corner-forward when the front wall/porch/ceiling is closer than the safety clearance.",
                 "face_range_advance": "If the current house-face segment/range has already been repeatedly observed and only rejected window/closed/narrow non-enterable evidence is present, move forward to the next observation range first, then yaw to continue searching. Do not re-sample the same closed-door area.",
+                "segment_search_memory": "Use segment_search_memory.do_not_revisit_segments and segment_search_memory.next_unsearched_segments as deterministic progress memory. Completed segments are hard no-repeat search units. If current_capture.repeat_completed_observation=true and no open-entry gate is active, leave that segment and move toward next_unsearched_segments.",
+                "segment_entry_found_open_gate": "If segment_search_memory.entry_found_open_gate.present=true, prioritize the open-entry gate: re-center if needed, approach with safe forward motion if not reached, and stop once actual/proxy reach conditions are met. Do not continue generic orbit/full-coverage search around a known open entry.",
                 "face_range_followup_yaw": "After a face-range forward advance, yaw once and capture to inspect the new sector before moving forward again.",
                 "temporary_search_altitude": "Only during incomplete target-house perimeter search, if a wall-like front obstacle blocks ground-level orbiting, climb temporarily with r, recapture, then continue only if depth becomes safe. Restore altitude after the current house search finishes.",
                 "pose_memory_proxy": "If semantic detection disappears at close range, a reliable remembered target-house entry plus target-house distance below about 350cm is enough to finish the current house.",
@@ -6321,6 +6705,17 @@ class Panel:
             "and face_coverage_status.full_coverage_ready=false, do not turn back to resample the same edge. Continue "
             "toward unobserved face segments, but if this requires a/d, yaw toward that side and capture first; after "
             "confirmation, move with w rather than blind side strafe.\n"
+            "Use segment_search_memory as the strongest deterministic search-progress memory. "
+            "segment_search_memory.do_not_revisit_segments lists house-face segments that RGB/YOLO+Depth has already "
+            "closed as searched_no_entry, searched_closed_entry, searched_window_only, or entry_found_open. Do not "
+            "actively re-sample those segments. segment_search_memory.next_unsearched_segments lists the next useful "
+            "search units. If segment_search_memory.current_capture.repeat_completed_observation=true and there is no "
+            "entry_found_open gate to approach, leave the repeated completed segment and move toward the next unsearched "
+            "segment instead of yawing back to the same window/closed-door/wall evidence.\n"
+            "If segment_search_memory.entry_found_open_gate.present=true, treat that as a high-priority open-entry "
+            "memory. Do not continue generic full-coverage orbit around the house. Re-center the door if it is near "
+            "the image edge, approach it with safe forward motion if it is not reached, and stop the current house "
+            "when the actual/proxy reach gate says the entry is reached.\n"
             "If the same house-face segment/range has already been observed many times and the visible evidence is only "
             "closed/narrow/non-traversable door or rejected windows, do not keep yawing back to the same area. If the "
             "front/body-height corridor is safe and the non-enterable door is not immediately close, move forward with "
@@ -7100,6 +7495,11 @@ class Panel:
         if isinstance(self.llm_task_plan, dict) and self.llm_task_plan:
             self._save_llm_task_plan_files(labeling_dir)
         labeling_inputs_manifest = self._sync_llm_control_labeling_inputs(labeling_dir, artifact_dir)
+        segment_summary = prompt_payload.get("segment_search_memory", {}) if isinstance(prompt_payload.get("segment_search_memory"), dict) else {}
+        (artifact_dir / "segment_search_memory_control_summary.json").write_text(
+            json.dumps(segment_summary, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         prompt_path = artifact_dir / "llm_control_prompt.json"
         prompt_path.write_text(
             json.dumps(

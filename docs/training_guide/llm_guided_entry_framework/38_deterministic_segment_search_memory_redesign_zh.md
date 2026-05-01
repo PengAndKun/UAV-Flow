@@ -828,7 +828,156 @@ C:\Users\Administrator\miniconda3\envs\unrealcv\python.exe `
 
 ---
 
-## 17. 一句话总结
+## 17. 当前批量验证工具
+
+为了判断这套规则是否能稳定覆盖不同采集 episode，已经增加批量 replay 汇总脚本：
+
+- [batch_segment_search_memory_replay.py](/E:/github/UAV-Flow/phase2_multimodal_fusion_analysis/batch_segment_search_memory_replay.py)
+- [run_batch_segment_search_memory_replay.py](/E:/github/UAV-Flow/phase2_multimodal_fusion_analysis/run_batch_segment_search_memory_replay.py)
+
+快速测试前 3 个 episode：
+
+```powershell
+C:\Users\Administrator\miniconda3\envs\unrealcv\python.exe `
+  E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_batch_segment_search_memory_replay.py `
+  --limit 3 `
+  --max_captures 12 `
+  --overwrite_reports
+```
+
+完整批量验证所有历史 episode：
+
+```powershell
+C:\Users\Administrator\miniconda3\envs\unrealcv\python.exe `
+  E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_batch_segment_search_memory_replay.py `
+  --overwrite_reports
+```
+
+输出目录默认是：
+
+```text
+E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\results\segment_search_memory_batch
+```
+
+每次运行会生成三类文件：
+
+- `segment_search_memory_batch_summary_*.json`：完整总报告。
+- `segment_search_memory_batch_sessions_*.csv`：episode 级汇总。
+- `segment_search_memory_batch_houses_*.csv`：house 级 segment 状态汇总。
+
+批量汇总重点看这些指标：
+
+- `repeated_completed_segment_observations`：是否仍在重复探索已完成 segment。
+- `needs_review_count`：YOLO 与 depth 规则冲突或证据不足的数量。
+- `complete_segment_count / total_segments`：目标 house 的分段搜索完成度。
+- `entry_found_open_count`：规则确认的可进入入口数量。
+- `skip_reasons`：target house 不在视野、缺少数据等跳过原因。
+
+这个批处理仍然是离线验证工具，不直接影响控制器状态。只有当批量结果稳定后，才建议把 segment summary 接入 LLM prompt 和在线 memory update。
+
+---
+
+## 18. 重复探索诊断工具
+
+批量 replay 之后，可以进一步定位“到底是哪一个 segment 被反复搜索”：
+
+- [analyze_segment_search_repetition.py](/E:/github/UAV-Flow/phase2_multimodal_fusion_analysis/analyze_segment_search_repetition.py)
+- [run_analyze_segment_search_repetition.py](/E:/github/UAV-Flow/phase2_multimodal_fusion_analysis/run_analyze_segment_search_repetition.py)
+
+运行：
+
+```powershell
+C:\Users\Administrator\miniconda3\envs\unrealcv\python.exe `
+  E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\run_analyze_segment_search_repetition.py
+```
+
+输出仍然写入：
+
+```text
+E:\github\UAV-Flow\phase2_multimodal_fusion_analysis\results\segment_search_memory_batch
+```
+
+生成文件：
+
+- `segment_search_repetition_diagnostics_*.json`
+- `segment_search_repetition_segments_*.csv`
+- `segment_search_repetition_sessions_*.csv`
+
+其中 `segment_search_repetition_segments_*.csv` 是最适合人工检查的表。每一行对应一个被重复观察的 completed segment，包含：
+
+- `session_name`
+- `house_id`
+- `face_id`
+- `segment_index`
+- `first_complete_capture`
+- `first_complete_state`
+- `repeat_count`
+- `repeat_step_preview`
+- `likely_issue`
+
+`likely_issue` 是一个粗略归因标签，例如：
+
+- `open_entry_not_used_as_stop_or_approach_gate`
+- `closed_entry_revisited_after_completion`
+- `window_or_wall_segment_revisited`
+- `no_entry_segment_revisited`
+- `long_span_repeat_possible_memory_prompt_or_control_issue`
+
+这个诊断工具的作用是把“LLM 为什么回头搜”从主观观察变成可统计问题。后续接入控制器时，可以直接把高重复 segment 作为 memory override 的优先目标：如果一个 segment 已经 completed 且 repeat_count 增长，就强制 planner 转向 next segment，而不是继续让 LLM 犹豫。
+
+---
+
+## 19. 控制器最小接入版本
+
+当前已经在 [uav_control_panel_basic.py](/E:/github/UAV-Flow/UAV-Flow-Eval/uav_control_panel_basic.py) 中加入一个最小接入版本。
+
+这个版本不是完整在线 memory 重构，而是在每次 LLM control 决策前做三件事：
+
+1. 自动刷新当前 memory episode 的 `segment_search_memory_report.json`。
+2. 把目标 house 的 segment summary 压缩进 LLM prompt。
+3. 如果发现 `entry_found_open`，优先触发 approach/stop gate。
+
+新增 prompt 字段：
+
+```json
+{
+  "segment_search_memory": {
+    "do_not_revisit_segments": [],
+    "next_unsearched_segments": [],
+    "entry_found_open_gate": {},
+    "current_capture": {}
+  }
+}
+```
+
+字段语义：
+
+- `do_not_revisit_segments`：RGB/YOLO + Depth 已经确认完成搜索的 house-face segment，不应该再主动重复探索。
+- `next_unsearched_segments`：下一批应该继续探索的 segment。
+- `entry_found_open_gate.present=true`：已经发现 open-entry segment，后续策略应优先 re-center / approach / stop。
+- `current_capture.repeat_completed_observation=true`：当前截图又看到了已完成 segment，说明应该离开该区域去下一个未搜索 segment。
+
+新增 rule override：
+
+- `segment_entry_found_open_stop_gate`：open entry 已满足实际/代理到达条件，直接停止当前 house 搜索。
+- `segment_entry_found_open_align_gate`：open entry 在图像边缘，先对准入口。
+- `segment_entry_found_open_approach_gate`：open entry 已确认但还没到达，直接转为安全前进接近。
+
+每次 LLM decision 的 artifact 目录中也会额外保存：
+
+```text
+segment_search_memory_control_summary.json
+```
+
+这样重跑实验后，可以直接检查当前 prompt 是否正确看到了：
+
+- 哪些 segment 不要再搜
+- 下一步应该搜哪些 segment
+- 是否触发了 open-entry approach/stop gate
+
+---
+
+## 20. 一句话总结
 
 新版搜索记忆的重点不是继续让 LLM 猜“我是不是看过这里”，而是让 RGB/YOLO + Depth 规则直接把 house 外立面分段变成可关闭的搜索单元：
 
