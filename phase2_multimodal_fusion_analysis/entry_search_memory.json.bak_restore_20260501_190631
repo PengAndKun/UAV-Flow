@@ -1,0 +1,4673 @@
+{
+  "version": "v1",
+  "updated_at": "2026-05-01 19:06:31",
+  "current_target_house_id": "002",
+  "house_registry": {
+    "001": {
+      "house_id": "001",
+      "house_name": "House_1",
+      "house_status": "IN_PROGRESS",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "002": {
+      "house_id": "002",
+      "house_name": "House_2",
+      "house_status": "UNSEARCHED",
+      "mission_status": "TARGET_ACTIVE",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "003": {
+      "house_id": "003",
+      "house_name": "House_3",
+      "house_status": "IN_PROGRESS",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "004": {
+      "house_id": "004",
+      "house_name": "House_4",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "005": {
+      "house_id": "005",
+      "house_name": "House_5",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "006": {
+      "house_id": "006",
+      "house_name": "House_6",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "007": {
+      "house_id": "007",
+      "house_name": "House_7",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "008": {
+      "house_id": "008",
+      "house_name": "House_8",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    },
+    "009": {
+      "house_id": "009",
+      "house_name": "House_9",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "entry_search_status": "not_started",
+      "candidate_entry_count": 0,
+      "best_entry_id": "",
+      "best_target_match_score": 0.0,
+      "searched": false,
+      "updated_at": "2026-05-01 19:06:31",
+      "visited_coverage_ratio": 0.0,
+      "observed_coverage_ratio": 0.0,
+      "face_observed_coverage_ratio": 0.0,
+      "observed_face_count": 0,
+      "no_entry_after_full_coverage": false
+    }
+  },
+  "planner_context": {
+    "target_house_id": "002",
+    "current_house_id": "002",
+    "current_best_entry_id": "",
+    "unsearched_houses": [
+      "001",
+      "002",
+      "003",
+      "004",
+      "005",
+      "006",
+      "007",
+      "008",
+      "009"
+    ],
+    "decision_hint": "",
+    "updated_at": "2026-05-01 19:06:31"
+  },
+  "memories": {
+    "001": {
+      "house_id": "001",
+      "house_name": "House_1",
+      "house_status": "IN_PROGRESS",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "002": {
+      "house_id": "002",
+      "house_name": "House_2",
+      "house_status": "UNSEARCHED",
+      "mission_status": "TARGET_ACTIVE",
+      "search_status": "UNSEARCHED",
+      "target_match_active": true,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "002",
+        "current_house_id": "002",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [
+          "set_pose"
+        ],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "003": {
+      "house_id": "003",
+      "house_name": "House_3",
+      "house_status": "IN_PROGRESS",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "004": {
+      "house_id": "004",
+      "house_name": "House_4",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "005": {
+      "house_id": "005",
+      "house_name": "House_5",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "006": {
+      "house_id": "006",
+      "house_name": "House_6",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "007": {
+      "house_id": "007",
+      "house_name": "House_7",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "008": {
+      "house_id": "008",
+      "house_name": "House_8",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    },
+    "009": {
+      "house_id": "009",
+      "house_name": "House_9",
+      "house_status": "UNSEARCHED",
+      "mission_status": "NOT_TARGET",
+      "search_status": "UNSEARCHED",
+      "target_match_active": false,
+      "created_at": "2026-05-01 19:06:05",
+      "updated_at": "2026-05-01 19:06:31",
+      "working_memory": {
+        "target_house_id": "",
+        "current_house_id": "",
+        "last_best_entry_id": "",
+        "perception_buffer": {
+          "max_frames": 5,
+          "frames": []
+        },
+        "recent_actions": [],
+        "recent_target_decisions": [],
+        "top_candidates": []
+      },
+      "episodic_memory": [],
+      "semantic_memory": {
+        "entry_search_status": "not_started",
+        "last_best_entry_id": "",
+        "search_summary": {
+          "observed_sector_count": 0,
+          "candidate_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "rejected_entry_count": 0
+        },
+        "perimeter_coverage": {
+          "bin_count": 8,
+          "visited_bin_count": 0,
+          "observed_bin_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "closed_loop_score": 0.0,
+          "last_viewpoint_angle_deg": null,
+          "last_viewpoint_bin": "",
+          "last_target_bearing_deg": null,
+          "last_distance_cm": null,
+          "bins": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "north_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            },
+            "south_east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "last_visit_time": null,
+              "last_viewpoint_angle_deg": null,
+              "last_target_bearing_deg": null,
+              "last_distance_cm": null
+            }
+          },
+          "visited_bins": [],
+          "observed_bins": []
+        },
+        "face_coverage": {
+          "face_count": 4,
+          "segment_count_per_face": 5,
+          "total_segment_count": 20,
+          "visited_face_count": 0,
+          "observed_face_count": 0,
+          "visited_segment_count": 0,
+          "observed_segment_count": 0,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "total_observations": 0,
+          "visual_observation_count": 0,
+          "last_face_id": "",
+          "last_segment_index": null,
+          "last_edge_t": null,
+          "last_viewpoint_angle_deg": null,
+          "last_distance_cm": null,
+          "faces": {
+            "east": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "north": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "west": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            },
+            "south": {
+              "visited": false,
+              "observed": false,
+              "visit_count": 0,
+              "visual_observation_count": 0,
+              "visited_segment_count": 0,
+              "observed_segment_count": 0,
+              "coverage_ratio": 0.0,
+              "observed_coverage_ratio": 0.0,
+              "last_visit_time": null,
+              "last_edge_t": null,
+              "last_segment_index": null,
+              "segments": [
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                },
+                {
+                  "visited": false,
+                  "observed": false,
+                  "visit_count": 0,
+                  "visual_observation_count": 0,
+                  "last_visit_time": null,
+                  "last_viewpoint_angle_deg": null,
+                  "last_target_bearing_deg": null,
+                  "last_distance_cm": null
+                }
+              ]
+            }
+          },
+          "visited_faces": [],
+          "observed_faces": [],
+          "unobserved_faces": [
+            "east",
+            "north",
+            "west",
+            "south"
+          ]
+        },
+        "search_completion_evidence": {
+          "no_entry_after_full_coverage": false,
+          "full_coverage_ready": false,
+          "perimeter_coverage_ready": false,
+          "face_coverage_ready": false,
+          "has_reliable_entry": false,
+          "visited_coverage_ratio": 0.0,
+          "observed_coverage_ratio": 0.0,
+          "face_visited_coverage_ratio": 0.0,
+          "face_observed_coverage_ratio": 0.0,
+          "observed_face_count": 0,
+          "total_observations": 0,
+          "candidate_entry_count": 0,
+          "rejected_entry_count": 0,
+          "non_enterable_entry_count": 0,
+          "unresolved_entry_count": 0,
+          "approachable_entry_count": 0,
+          "blocked_entry_count": 0,
+          "reasons": [
+            "perimeter_coverage_incomplete",
+            "no_reliable_entry",
+            "all_candidates_rejected_non_enterable_or_no_candidate"
+          ],
+          "thresholds": {
+            "min_visited_coverage_ratio": 0.75,
+            "min_observed_coverage_ratio": 0.5,
+            "min_face_observed_coverage_ratio": 0.45,
+            "min_observed_face_count": 3,
+            "min_total_observations": 8,
+            "reliable_entry_association_threshold": 0.65,
+            "non_enterable_max_opening_width_cm": 90.0
+          },
+          "updated_at": "2026-05-01 19:06:31",
+          "rejected_or_non_enterable_entry_count": 0
+        },
+        "searched_sectors": {
+          "front_left": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_center": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "front_right": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "left_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          },
+          "right_side": {
+            "observed": false,
+            "observation_count": 0,
+            "last_visit_time": null,
+            "best_entry_state": "",
+            "best_target_conditioned_subgoal": "",
+            "best_target_match_score": 0.0
+          }
+        },
+        "candidate_entries": []
+      }
+    }
+  }
+}

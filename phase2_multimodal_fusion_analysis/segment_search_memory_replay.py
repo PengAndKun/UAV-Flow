@@ -82,14 +82,32 @@ def clamp(value: float, lo: float, hi: float) -> float:
 
 
 def discover_labeling_dirs(session_dir: Path, max_captures: int = 0) -> List[Path]:
-    capture_root = session_dir / "memory_fusion_captures"
-    if not capture_root.exists():
-        return []
     items: List[Path] = []
-    for capture_dir in sorted(capture_root.iterdir(), key=lambda p: p.name):
-        labeling_dir = capture_dir / "labeling"
-        if labeling_dir.is_dir() and (labeling_dir / "fusion_result.json").is_file():
-            items.append(labeling_dir)
+    seen: set[str] = set()
+
+    def add_candidate(labeling_dir: Path) -> None:
+        if not labeling_dir.is_dir() or not (labeling_dir / "fusion_result.json").is_file():
+            return
+        key = str(labeling_dir.resolve()).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        items.append(labeling_dir)
+
+    # Memory collection sessions store captures as memory_fusion_captures/*/labeling.
+    capture_root = session_dir / "memory_fusion_captures"
+    if capture_root.exists():
+        for capture_dir in sorted(capture_root.iterdir(), key=lambda p: p.name):
+            add_candidate(capture_dir / "labeling")
+
+    # LLM control sessions store each decision snapshot as decision_*/labeling_inputs.
+    if session_dir.exists():
+        for decision_dir in sorted(session_dir.iterdir(), key=lambda p: p.name):
+            if not decision_dir.is_dir():
+                continue
+            add_candidate(decision_dir / "labeling_inputs")
+            add_candidate(decision_dir / "labeling")
+
     if max_captures > 0:
         return items[:max_captures]
     return items
@@ -478,8 +496,13 @@ def default_segment(segment_id: str) -> Dict[str, Any]:
         "last_observed_time": "",
         "last_capture_name": "",
         "last_labeling_dir": "",
+        "last_observed_pose": {},
+        "observed_pose_extent": {},
+        "edge_t_min": None,
+        "edge_t_max": None,
         "evidence_type": "",
         "best_evidence": {},
+        "post_completion_conflicts": [],
         "candidate_entries": [],
     }
 
@@ -516,6 +539,20 @@ def state_priority(state: str) -> int:
     return order.get(str(state), 0)
 
 
+def resolve_segment_state(previous_state: str, requested_state: str, previous_complete: bool) -> Tuple[str, bool]:
+    previous_state = str(previous_state or "unseen")
+    requested_state = str(requested_state or "observed_uncertain")
+    if previous_complete and requested_state not in COMPLETED_STATES:
+        return previous_state, True
+    if previous_state == "entry_found_open" and requested_state != "entry_found_open":
+        return previous_state, True
+    if requested_state == "entry_found_open":
+        return requested_state, False
+    if state_priority(requested_state) >= state_priority(previous_state):
+        return requested_state, False
+    return previous_state, False
+
+
 def update_segment(
     memory: Dict[str, Any],
     face_id: str,
@@ -526,6 +563,8 @@ def update_segment(
     step_index: int,
     labeling_dir: Path,
     visibility_ratio: float,
+    pose: Optional[Dict[str, float]] = None,
+    edge_t: Optional[float] = None,
 ) -> Dict[str, Any]:
     faces = memory.setdefault("faces", {})
     face = faces.setdefault(face_id, {"segments": []})
@@ -535,9 +574,8 @@ def update_segment(
     segment = segments[int(segment_index)]
     previous_state = str(segment.get("state", "unseen") or "unseen")
     previous_complete = bool(segment.get("is_search_complete", False))
-    selected_state = previous_state
-    if state_priority(new_state) >= state_priority(previous_state):
-        selected_state = str(new_state)
+    requested_state = str(new_state)
+    selected_state, completion_lock_applied = resolve_segment_state(previous_state, requested_state, previous_complete)
     segment["state"] = selected_state
     segment["is_search_complete"] = selected_state in COMPLETED_STATES
     segment["completion_confidence"] = 1.0 if segment["is_search_complete"] else 0.0
@@ -550,8 +588,58 @@ def update_segment(
     segment["last_observed_time"] = datetime.now().isoformat(timespec="seconds")
     segment["last_capture_name"] = labeling_dir.parent.name
     segment["last_labeling_dir"] = str(labeling_dir)
-    segment["evidence_type"] = str(evidence.get("evidence_type", new_state) or new_state)
-    segment["best_evidence"] = evidence
+    pose_payload: Dict[str, float] = {}
+    if isinstance(pose, dict):
+        pose_x = safe_float(pose.get("x"), None)
+        pose_y = safe_float(pose.get("y"), None)
+        pose_z = safe_float(pose.get("z"), None)
+        pose_yaw = safe_float(pose.get("yaw"), None)
+        if pose_x is not None and pose_y is not None:
+            pose_payload = {"x": float(pose_x), "y": float(pose_y)}
+            if pose_z is not None:
+                pose_payload["z"] = float(pose_z)
+            if pose_yaw is not None:
+                pose_payload["yaw"] = float(pose_yaw)
+            extent = segment.get("observed_pose_extent", {}) if isinstance(segment.get("observed_pose_extent"), dict) else {}
+            if not extent:
+                extent = {
+                    "min_x": float(pose_x),
+                    "max_x": float(pose_x),
+                    "min_y": float(pose_y),
+                    "max_y": float(pose_y),
+                    "sample_count": 0,
+                }
+            extent["min_x"] = min(float(extent.get("min_x", pose_x)), float(pose_x))
+            extent["max_x"] = max(float(extent.get("max_x", pose_x)), float(pose_x))
+            extent["min_y"] = min(float(extent.get("min_y", pose_y)), float(pose_y))
+            extent["max_y"] = max(float(extent.get("max_y", pose_y)), float(pose_y))
+            extent["sample_count"] = int(extent.get("sample_count", 0) or 0) + 1
+            segment["observed_pose_extent"] = extent
+            segment["last_observed_pose"] = pose_payload
+    edge_t_value = safe_float(edge_t, None)
+    if edge_t_value is not None:
+        previous_min = safe_float(segment.get("edge_t_min"), None)
+        previous_max = safe_float(segment.get("edge_t_max"), None)
+        segment["edge_t_min"] = float(edge_t_value) if previous_min is None else min(float(previous_min), float(edge_t_value))
+        segment["edge_t_max"] = float(edge_t_value) if previous_max is None else max(float(previous_max), float(edge_t_value))
+    if completion_lock_applied:
+        conflicts = segment.setdefault("post_completion_conflicts", [])
+        if isinstance(conflicts, list):
+            conflicts.append(
+                {
+                    "requested_state": requested_state,
+                    "kept_state": selected_state,
+                    "step_index": int(step_index),
+                    "capture_id": labeling_dir.parent.name,
+                    "labeling_dir": str(labeling_dir),
+                    "evidence_type": str(evidence.get("evidence_type", requested_state) or requested_state),
+                    "evidence": evidence,
+                }
+            )
+            segment["post_completion_conflicts"] = conflicts[-8:]
+    else:
+        segment["evidence_type"] = str(evidence.get("evidence_type", requested_state) or requested_state)
+        segment["best_evidence"] = evidence
     candidate = evidence.get("candidate")
     if isinstance(candidate, dict):
         candidates = segment.setdefault("candidate_entries", [])
@@ -564,11 +652,19 @@ def update_segment(
         "segment_index": int(segment_index),
         "previous_state": previous_state,
         "new_state": selected_state,
-        "requested_state": str(new_state),
+        "requested_state": requested_state,
         "was_complete": previous_complete,
         "is_search_complete": bool(segment["is_search_complete"]),
         "repeat_completed_observation": bool(previous_complete),
+        "completion_lock_applied": bool(completion_lock_applied),
         "evidence_type": segment.get("evidence_type", ""),
+        "pose": pose_payload,
+        "observed_pose_extent": segment.get("observed_pose_extent", {}),
+        "edge_t": float(edge_t_value) if edge_t_value is not None else None,
+        "edge_t_range": {
+            "min": segment.get("edge_t_min"),
+            "max": segment.get("edge_t_max"),
+        },
     }
 
 
@@ -718,6 +814,8 @@ def process_capture(
                     step_index=step_index,
                     labeling_dir=labeling_dir,
                     visibility_ratio=0.82,
+                    pose=pose,
+                    edge_t=safe_float(face_hit.get("edge_t"), None),
                 )
             )
         else:
@@ -746,6 +844,8 @@ def process_capture(
                     step_index=step_index,
                     labeling_dir=labeling_dir,
                     visibility_ratio=0.74,
+                    pose=pose,
+                    edge_t=safe_float(face_hit.get("edge_t"), None),
                 )
             )
 

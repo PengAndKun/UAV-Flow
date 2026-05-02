@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import json
 import logging
 import os
@@ -68,13 +69,17 @@ def now_timestamp() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
 
 
-def sanitize_fragment(value: Any) -> str:
+def sanitize_fragment(value: Any, max_len: int = 80) -> str:
     text = str(value or "").strip()
     if not text:
         return ""
     text = re.sub(r"[^0-9A-Za-z_\-]+", "_", text)
     text = re.sub(r"_+", "_", text).strip("_")
-    return text[:80]
+    limit = max(8, int(max_len))
+    if len(text) <= limit:
+        return text
+    digest = hashlib.sha1(text.encode("utf-8", errors="ignore")).hexdigest()[:8]
+    return f"{text[: max(1, limit - 9)].rstrip('_')}_{digest}"
 
 
 def normalize_angle_deg(angle_deg: float) -> float:
@@ -909,7 +914,8 @@ class BasicUAVControlBackend:
     def start_memory_collection(self, *, episode_label: str = "", reset_store: bool = True) -> Dict[str, Any]:
         with self.lock:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            label_suffix = f"_{str(episode_label).strip()}" if str(episode_label or "").strip() else ""
+            safe_episode_label = sanitize_fragment(episode_label, max_len=28)
+            label_suffix = f"_{safe_episode_label}" if safe_episode_label else ""
             episode_id = f"memory_episode_{timestamp}{label_suffix}"
             collection_dir = os.path.join(self.memory_collection_root, episode_id)
             os.makedirs(collection_dir, exist_ok=True)
@@ -1052,66 +1058,105 @@ class BasicUAVControlBackend:
         note: str = "",
     ) -> Dict[str, Any]:
         with self.lock:
+            run_dir = ""
+            labeling_dir = ""
+            stage = "precheck"
             if not self.memory_collection_active or not self.memory_collection_dir:
                 return self.get_state(status="error", message="Start a memory collection episode first.")
 
-            self._sync_memory_runtime_context()
-            if self.last_raw_frame is None or self.last_depth_frame is None:
-                self.refresh_observations()
-            if self.last_raw_frame is None or self.last_depth_frame is None:
-                raise RuntimeError("No synchronized RGB/depth frame available for memory capture.")
+            try:
+                stage = "sync_memory_context"
+                self._sync_memory_runtime_context()
+                if self.last_raw_frame is None or self.last_depth_frame is None:
+                    stage = "refresh_observations"
+                    self.refresh_observations()
+                if self.last_raw_frame is None or self.last_depth_frame is None:
+                    raise RuntimeError("No synchronized RGB/depth frame available for memory capture.")
 
-            step_index = int(self.memory_collection_step_index)
-            action_history_since_capture = [dict(item) for item in self.memory_collection_actions_since_capture]
-            action_count_since_capture = int(len(action_history_since_capture))
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_label = sanitize_fragment(label)
-            safe_source = sanitize_fragment(capture_source) or "manual"
-            label_suffix = f"_{safe_label}" if safe_label else ""
-            run_name = f"memory_capture_{timestamp}_step{step_index:04d}_{safe_source}{label_suffix}"
-            capture_root = self.memory_capture_root or os.path.join(self.memory_collection_dir, "memory_fusion_captures")
-            os.makedirs(capture_root, exist_ok=True)
-            run_dir = os.path.join(capture_root, run_name)
-            labeling_dir = os.path.join(run_dir, "labeling")
-            os.makedirs(labeling_dir, exist_ok=True)
-            action_history_path = os.path.join(labeling_dir, "action_history_since_last_capture.json")
+                step_index = int(self.memory_collection_step_index)
+                action_history_since_capture = [dict(item) for item in self.memory_collection_actions_since_capture]
+                action_count_since_capture = int(len(action_history_since_capture))
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                safe_label = sanitize_fragment(label, max_len=18)
+                safe_source = sanitize_fragment(capture_source, max_len=18) or "manual"
+                label_suffix = f"_{safe_label}" if safe_label else ""
+                run_name = f"memory_capture_{timestamp}_step{step_index:04d}_{safe_source}{label_suffix}"
+                capture_root = self.memory_capture_root or os.path.join(self.memory_collection_dir, "memory_fusion_captures")
+                stage = "create_capture_dirs"
+                os.makedirs(capture_root, exist_ok=True)
+                run_dir = os.path.join(capture_root, run_name)
+                labeling_dir = os.path.join(run_dir, "labeling")
+                os.makedirs(labeling_dir, exist_ok=True)
+                action_history_path = os.path.join(labeling_dir, "action_history_since_last_capture.json")
 
-            step_note = str(note or "").strip()
-            state = self.get_state()
-            camera_info = self.get_camera_info()
-            rgb_bgr = np.ascontiguousarray(self.last_raw_frame.copy())
-            depth_raw = np.clip(
-                np.nan_to_num(self.last_depth_frame, nan=0.0, posinf=0.0, neginf=0.0),
-                0.0,
-                65535.0,
-            ).astype(np.uint16)
+                step_note = str(note or "").strip()
+                stage = "build_state"
+                state = self.get_state()
+                stage = "get_camera_info"
+                camera_info = self.get_camera_info()
+                stage = "copy_rgb_depth_frames"
+                rgb_bgr = np.ascontiguousarray(self.last_raw_frame.copy())
+                depth_raw = np.clip(
+                    np.nan_to_num(self.last_depth_frame, nan=0.0, posinf=0.0, neginf=0.0),
+                    0.0,
+                    65535.0,
+                ).astype(np.uint16)
 
-            extra = {
-                "capture_source": safe_source,
-                "step_index": step_index,
-                "requested_label": str(label or ""),
-                "note": step_note,
-                "run_dir": run_dir,
-                "action_count_since_last_capture": action_count_since_capture,
-                "action_history_since_last_capture_path": action_history_path,
-            }
-            before_snapshot_path = os.path.join(labeling_dir, "entry_search_memory_snapshot_before.json")
-            self.last_memory_snapshot_before_path = self._save_memory_snapshot_file(
-                before_snapshot_path,
-                "before_memory_capture",
-                note="Snapshot before memory capture analyze.",
-                extra=extra,
-                step_index=step_index,
-            )
+                extra = {
+                    "capture_source": safe_source,
+                    "step_index": step_index,
+                    "requested_label": str(label or ""),
+                    "note": step_note,
+                    "run_dir": run_dir,
+                    "action_count_since_last_capture": action_count_since_capture,
+                    "action_history_since_last_capture_path": action_history_path,
+                }
+                before_snapshot_path = os.path.join(labeling_dir, "entry_search_memory_snapshot_before.json")
+                stage = "save_before_snapshot"
+                self.last_memory_snapshot_before_path = self._save_memory_snapshot_file(
+                    before_snapshot_path,
+                    "before_memory_capture",
+                    note="Snapshot before memory capture analyze.",
+                    extra=extra,
+                    step_index=step_index,
+                )
 
-            result = run_phase2_fusion_analysis(
-                rgb_bgr=rgb_bgr,
-                depth_raw=depth_raw,
-                existing_run_dir=Path(run_dir),
-                label="",
-                camera_info=camera_info if isinstance(camera_info, dict) else {},
-                state=state if isinstance(state, dict) else {},
-            )
+                stage = "run_phase2_fusion_analysis"
+                result = run_phase2_fusion_analysis(
+                    rgb_bgr=rgb_bgr,
+                    depth_raw=depth_raw,
+                    existing_run_dir=Path(run_dir),
+                    label="",
+                    camera_info=camera_info if isinstance(camera_info, dict) else {},
+                    state=state if isinstance(state, dict) else {},
+                )
+            except Exception as exc:
+                import traceback
+
+                error_payload = {
+                    "status": "error",
+                    "message": f"Memory capture analyze failed at {stage}: {exc}",
+                    "error_class": exc.__class__.__name__,
+                    "stage": stage,
+                    "run_dir": str(run_dir or ""),
+                    "labeling_dir": str(labeling_dir or ""),
+                    "traceback": traceback.format_exc(),
+                }
+                if labeling_dir:
+                    try:
+                        os.makedirs(labeling_dir, exist_ok=True)
+                        error_path = os.path.join(labeling_dir, "capture_error.json")
+                        with open(error_path, "w", encoding="utf-8") as fh:
+                            json.dump(error_payload, fh, indent=2, ensure_ascii=False)
+                        error_payload["error_path"] = error_path
+                    except Exception as write_exc:
+                        logger.warning("Failed to write memory capture error payload: %s", write_exc)
+                logger.exception("Memory capture analyze failed at stage=%s run_dir=%s", stage, run_dir or "")
+                try:
+                    error_payload["state"] = self.get_state(status="error", message=error_payload["message"])
+                except Exception:
+                    pass
+                return error_payload
 
             # Reload the shared memory store after fusion so the "after" snapshot
             # reflects the same updated memory that fusion_result.json embeds.

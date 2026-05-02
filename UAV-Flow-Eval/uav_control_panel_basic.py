@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Dict, List, Optional
-from urllib import request
+from urllib import error, request
 
 import cv2
 import numpy as np
@@ -391,6 +391,10 @@ class Panel:
         self.llm_progress_window: Optional[tk.Toplevel] = None
         self.llm_progress_listbox: Optional[tk.Listbox] = None
         self.llm_progress_points: List[Dict[str, Any]] = []
+        self.llm_memory_viz_window: Optional[tk.Toplevel] = None
+        self.llm_memory_viz_canvas: Optional[tk.Canvas] = None
+        self.llm_memory_viz_text: Optional[tk.Text] = None
+        self.llm_memory_viz_status_var = tk.StringVar(value="Memory Viz: idle")
         self.llm_task_window: Optional[tk.Toplevel] = None
         self.llm_task_text: Optional[tk.Text] = None
         self.llm_task_preview_text: Optional[tk.Text] = None
@@ -574,6 +578,7 @@ class Panel:
         tk.Button(memory, text="Analyze LLM Task", command=self.toggle_llm_task_window).grid(row=8, column=2, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
         tk.Label(memory, textvariable=self.llm_task_plan_summary_var, anchor="w", justify="left").grid(row=9, column=0, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
         tk.Button(memory, text="LLM Progress Manager", command=self.toggle_llm_progress_window).grid(row=10, column=0, columnspan=4, padx=6, pady=(0, 6), sticky="ew")
+        tk.Button(memory, text="LLM Memory Viz", command=self.toggle_llm_memory_viz_window).grid(row=11, column=0, columnspan=4, padx=6, pady=(0, 6), sticky="ew")
 
         fusion = tk.LabelFrame(left, text="Phase2 Fusion")
         fusion.grid(row=2, column=0, sticky="ew", pady=(0, 8))
@@ -692,6 +697,22 @@ class Panel:
     def safe(self, func, *args, label: str = "Request", **kwargs):
         try:
             return func(*args, **kwargs)
+        except error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                body = ""
+            message = body.strip() or str(exc)
+            try:
+                payload = json.loads(message)
+                if isinstance(payload, dict):
+                    message = str(payload.get("message", "") or message)
+            except Exception:
+                pass
+            logger.warning("%s failed: HTTP %s %s", label, getattr(exc, "code", ""), message)
+            self.status_var.set(f"{label} failed: {message}")
+            return {"status": "error", "message": message, "http_status": getattr(exc, "code", None), "raw_body": body}
         except Exception as exc:
             logger.warning("%s failed: %s", label, exc)
             self.status_var.set(f"{label} failed: {exc}")
@@ -1923,8 +1944,10 @@ class Panel:
 
     def _run_memory_capture_analyze(self, *, capture_source: str, note: str, update_status: bool) -> bool:
         if self.memory_capture_inflight:
+            self.last_memory_capture_response = {"status": "error", "message": "memory capture already in flight"}
             return False
         self.memory_capture_inflight = True
+        self.last_memory_capture_response = {}
         self.root.after(0, self._refresh_memory_auto_status)
         try:
             response = self.safe(
@@ -1939,6 +1962,7 @@ class Panel:
                 timeout_s=max(float(self.args.timeout_s), 180.0),
             ) or {}
             if not isinstance(response, dict):
+                self.last_memory_capture_response = {"status": "error", "message": "memory capture returned a non-JSON response"}
                 return False
             self.last_memory_capture_response = dict(response)
             ok = str(response.get("status", "")) == "ok"
@@ -2841,6 +2865,8 @@ class Panel:
         tk.Label(control, textvariable=self.llm_task_plan_summary_var, anchor="w", justify="left").grid(row=2, column=3, columnspan=3, sticky="ew", padx=6, pady=(0, 6))
         tk.Button(control, text="Progress Manager", command=self.toggle_llm_progress_window).grid(row=3, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
         tk.Label(control, textvariable=self.llm_progress_status_var, anchor="w", justify="left").grid(row=3, column=2, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
+        tk.Button(control, text="Memory Exploration Viz", command=self.toggle_llm_memory_viz_window).grid(row=4, column=0, columnspan=2, padx=6, pady=(0, 6), sticky="ew")
+        tk.Label(control, textvariable=self.llm_memory_viz_status_var, anchor="w", justify="left").grid(row=4, column=2, columnspan=4, sticky="ew", padx=6, pady=(0, 6))
 
         status = tk.LabelFrame(self.llm_control_window, text="Live State")
         status.pack(fill="x", padx=8, pady=(0, 8))
@@ -2912,6 +2938,275 @@ class Panel:
         self.llm_progress_window = None
         self.llm_progress_listbox = None
 
+    def toggle_llm_memory_viz_window(self) -> None:
+        if self.llm_memory_viz_window and self.llm_memory_viz_window.winfo_exists():
+            self._close_llm_memory_viz_window()
+            return
+        self.llm_memory_viz_window = tk.Toplevel(self.root)
+        self.llm_memory_viz_window.title("LLM Memory Exploration Viz")
+        self.llm_memory_viz_window.geometry("1120x720")
+        self.llm_memory_viz_window.protocol("WM_DELETE_WINDOW", self._close_llm_memory_viz_window)
+
+        toolbar = tk.LabelFrame(self.llm_memory_viz_window, text="Segment Search Memory")
+        toolbar.pack(fill="x", padx=8, pady=8)
+        tk.Button(toolbar, text="Refresh", command=self.refresh_llm_memory_viz_window).grid(row=0, column=0, padx=6, pady=6, sticky="ew")
+        tk.Label(toolbar, textvariable=self.llm_memory_viz_status_var, anchor="w", justify="left").grid(row=0, column=1, sticky="ew", padx=6, pady=6)
+        toolbar.grid_columnconfigure(1, weight=1)
+
+        body = tk.Frame(self.llm_memory_viz_window)
+        body.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=3)
+        body.grid_columnconfigure(1, weight=2)
+        self.llm_memory_viz_canvas = tk.Canvas(body, bg="white", width=660, height=560)
+        self.llm_memory_viz_canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        text_frame = tk.Frame(body)
+        text_frame.grid(row=0, column=1, sticky="nsew")
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+        self.llm_memory_viz_text = tk.Text(text_frame, wrap="word", font=("Consolas", 10))
+        self.llm_memory_viz_text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = tk.Scrollbar(text_frame, orient="vertical", command=self.llm_memory_viz_text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.llm_memory_viz_text.configure(yscrollcommand=scrollbar.set, state="disabled")
+        self.refresh_llm_memory_viz_window()
+
+    def _close_llm_memory_viz_window(self) -> None:
+        try:
+            if self.llm_memory_viz_window is not None and self.llm_memory_viz_window.winfo_exists():
+                self.llm_memory_viz_window.destroy()
+        except Exception:
+            pass
+        self.llm_memory_viz_window = None
+        self.llm_memory_viz_canvas = None
+        self.llm_memory_viz_text = None
+
+    def refresh_llm_memory_viz_window(self) -> None:
+        self.llm_memory_viz_status_var.set("Memory Viz: refreshing...")
+        threading.Thread(target=self._refresh_llm_memory_viz_worker, daemon=True).start()
+
+    def _latest_llm_control_session_dir(self) -> Optional[Path]:
+        candidates: List[Path] = []
+        for root in self._llm_control_sessions_roots():
+            if not root.exists():
+                continue
+            try:
+                candidates.extend([item for item in root.iterdir() if item.is_dir()])
+            except Exception:
+                continue
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item.stat().st_mtime if item.exists() else 0.0, reverse=True)
+        return candidates[0]
+
+    def _memory_viz_session_dir(self) -> Optional[Path]:
+        latest_llm = self._latest_llm_control_session_dir()
+        if latest_llm is not None and latest_llm.exists():
+            return latest_llm
+        memory_collection = self.latest_memory_collection_state if isinstance(self.latest_memory_collection_state, dict) else {}
+        collection_dir = str(memory_collection.get("collection_dir", "") or "").strip()
+        if collection_dir and Path(collection_dir).exists():
+            return Path(collection_dir)
+        latest = self._latest_memory_collection_session_dir()
+        return latest if latest is not None and latest.exists() else None
+
+    def _refresh_llm_memory_viz_worker(self) -> None:
+        try:
+            session_dir = self._memory_viz_session_dir()
+            if session_dir is None:
+                payload = {"status": "error", "message": "No memory collection session found."}
+            else:
+                from phase2_multimodal_fusion_analysis.segment_search_memory_replay import replay_session
+
+                report_path = session_dir / "segment_search_memory_report.json"
+                report = replay_session(
+                    session_dir,
+                    houses_config_path=Path(PROJECT_ROOT) / "UAV-Flow-Eval" / "houses_config.json",
+                    output_path=report_path,
+                    target_house_id="",
+                    segment_count=4,
+                    max_captures=0,
+                )
+                payload = {
+                    "status": "ok",
+                    "session_dir": str(session_dir),
+                    "report": report if isinstance(report, dict) else {},
+                }
+        except Exception as exc:
+            payload = {"status": "error", "message": str(exc)}
+        self.root.after(0, lambda p=payload: self._apply_llm_memory_viz_payload(p))
+
+    def _apply_llm_memory_viz_payload(self, payload: Dict[str, Any]) -> None:
+        status = str(payload.get("status", "") or "")
+        if status != "ok":
+            self.llm_memory_viz_status_var.set(f"Memory Viz: {payload.get('message', 'error')}")
+            return
+        report = payload.get("report", {}) if isinstance(payload.get("report"), dict) else {}
+        memories = report.get("segment_memories", {}) if isinstance(report.get("segment_memories"), dict) else {}
+        active_target = self._current_llm_plan_target()
+        target_house_id = str(active_target.get("house_id", "") or "")
+        if not target_house_id and memories:
+            target_house_id = sorted(str(key) for key in memories.keys())[0]
+        self._draw_llm_memory_viz(report, target_house_id)
+        self._write_llm_memory_viz_text(report, target_house_id)
+        summary = report.get("summary", {}) if isinstance(report.get("summary"), dict) else {}
+        self.llm_memory_viz_status_var.set(
+            f"Memory Viz: {Path(str(payload.get('session_dir', ''))).name} | "
+            f"houses={summary.get('house_count', len(memories))} repeated={summary.get('repeated_completed_segment_observations', 0)}"
+        )
+
+    def _draw_llm_memory_viz(self, report: Dict[str, Any], target_house_id: str) -> None:
+        canvas = self.llm_memory_viz_canvas
+        if canvas is None or not canvas.winfo_exists():
+            return
+        canvas.delete("all")
+        width = max(300, int(canvas.winfo_width() or 660))
+        height = max(300, int(canvas.winfo_height() or 560))
+        memory = (report.get("segment_memories", {}) if isinstance(report.get("segment_memories"), dict) else {}).get(str(target_house_id), {})
+        bbox = self._house_world_bbox_for_id(target_house_id)
+        timeline = report.get("timeline", []) if isinstance(report.get("timeline"), list) else []
+        points = []
+        for event in timeline:
+            pose = event.get("pose", {}) if isinstance(event, dict) and isinstance(event.get("pose"), dict) else {}
+            x = self._as_float_or_none(pose.get("x"))
+            y = self._as_float_or_none(pose.get("y"))
+            if x is not None and y is not None:
+                points.append((float(x), float(y), event))
+        xs = [point[0] for point in points]
+        ys = [point[1] for point in points]
+        if bbox:
+            xs.extend([float(bbox["min_x"]), float(bbox["max_x"])])
+            ys.extend([float(bbox["min_y"]), float(bbox["max_y"])])
+        if not xs or not ys:
+            canvas.create_text(width / 2, height / 2, text="No pose/house memory to draw.", fill="#666")
+            return
+        margin_world = 450.0
+        min_x, max_x = min(xs) - margin_world, max(xs) + margin_world
+        min_y, max_y = min(ys) - margin_world, max(ys) + margin_world
+        scale = min((width - 80) / max(1.0, max_x - min_x), (height - 80) / max(1.0, max_y - min_y))
+
+        def to_canvas(x: float, y: float) -> tuple[float, float]:
+            return 40.0 + (float(x) - min_x) * scale, height - 40.0 - (float(y) - min_y) * scale
+
+        if bbox:
+            x1, y1 = to_canvas(float(bbox["min_x"]), float(bbox["min_y"]))
+            x2, y2 = to_canvas(float(bbox["max_x"]), float(bbox["max_y"]))
+            canvas.create_rectangle(x1, y1, x2, y2, outline="#222", width=2)
+            canvas.create_text((x1 + x2) / 2, min(y1, y2) - 12, text=f"House {target_house_id}", fill="#222", font=("Consolas", 11, "bold"))
+
+        color_by_state = {
+            "unseen": "#cfcfcf",
+            "observed_uncertain": "#b58cff",
+            "blocked_or_occluded": "#eb5757",
+            "searched_no_entry": "#6fcf97",
+            "searched_closed_entry": "#f2994a",
+            "searched_window_only": "#27ae60",
+            "entry_found_open": "#2f80ed",
+            "needs_review": "#9b51e0",
+        }
+        segment_count = int(report.get("segment_count_per_face", 4) or 4)
+        faces = memory.get("faces", {}) if isinstance(memory, dict) and isinstance(memory.get("faces"), dict) else {}
+        for face_id, face in faces.items():
+            segments = face.get("segments", []) if isinstance(face, dict) and isinstance(face.get("segments"), list) else []
+            for index, segment in enumerate(segments):
+                line = self._segment_world_line_for_bbox(bbox, str(face_id), int(index), segment_count) if bbox else None
+                if not line:
+                    continue
+                cx1, cy1 = to_canvas(line[0], line[1])
+                cx2, cy2 = to_canvas(line[2], line[3])
+                state = str(segment.get("state", "unseen") or "unseen")
+                color = color_by_state.get(state, "#999")
+                width_px = 7 if bool(segment.get("is_search_complete", False)) else 4
+                canvas.create_line(cx1, cy1, cx2, cy2, fill=color, width=width_px)
+                mx, my = (cx1 + cx2) / 2, (cy1 + cy2) / 2
+                canvas.create_text(mx, my, text=f"{str(face_id)[:1]}{index}", fill="#111", font=("Consolas", 8))
+
+        if len(points) >= 2:
+            flat = []
+            for x, y, _event in points:
+                cx, cy = to_canvas(x, y)
+                flat.extend([cx, cy])
+            canvas.create_line(*flat, fill="#9aa7b2", width=2, smooth=True)
+        for x, y, event in points[-120:]:
+            cx, cy = to_canvas(x, y)
+            updates = event.get("updates", []) if isinstance(event.get("updates"), list) else []
+            repeated = any(isinstance(update, dict) and bool(update.get("repeat_completed_observation", False)) for update in updates)
+            entry_open = any(isinstance(update, dict) and str(update.get("new_state", "") or "") == "entry_found_open" for update in updates)
+            fill = "#d63031" if repeated else ("#0984e3" if entry_open else "#2d9cdb")
+            radius = 5 if repeated else 3
+            canvas.create_oval(cx - radius, cy - radius, cx + radius, cy + radius, fill=fill, outline="")
+        if points:
+            cx, cy = to_canvas(points[-1][0], points[-1][1])
+            canvas.create_oval(cx - 7, cy - 7, cx + 7, cy + 7, fill="#f2c94c", outline="#111", width=2)
+            canvas.create_text(cx + 10, cy - 10, text="latest", anchor="w", fill="#111", font=("Consolas", 9, "bold"))
+
+        legend = "grey=unseen  green=searched  orange=closed  blue=open entry  red=repeated completed"
+        canvas.create_text(12, 14, text=legend, anchor="w", fill="#333", font=("Consolas", 9))
+
+    def _write_llm_memory_viz_text(self, report: Dict[str, Any], target_house_id: str) -> None:
+        text = self.llm_memory_viz_text
+        if text is None or not text.winfo_exists():
+            return
+        memories = report.get("segment_memories", {}) if isinstance(report.get("segment_memories"), dict) else {}
+        memory = memories.get(str(target_house_id), {}) if isinstance(memories.get(str(target_house_id), {}), dict) else {}
+        summary = memory.get("summary", {}) if isinstance(memory.get("summary"), dict) else {}
+        timeline = report.get("timeline", []) if isinstance(report.get("timeline"), list) else []
+        repeated_events = []
+        for event in timeline:
+            updates = event.get("updates", []) if isinstance(event, dict) and isinstance(event.get("updates"), list) else []
+            if any(isinstance(update, dict) and bool(update.get("repeat_completed_observation", False)) for update in updates):
+                repeated_events.append(event)
+        lines = [
+            f"Session: {report.get('session_dir', '')}",
+            f"Target house: {target_house_id}",
+            f"Captures: {report.get('capture_count', 0)}",
+            f"Completed: {summary.get('complete_segment_count', 0)}/{summary.get('total_segments', 0)}",
+            f"State counts: {json.dumps(summary.get('state_counts', {}), ensure_ascii=False)}",
+            f"Next unsearched: {summary.get('next_unsearched_segment', '')}",
+            f"Repeated completed observations: {len(repeated_events)}",
+            "",
+            "Segments:",
+        ]
+        faces = memory.get("faces", {}) if isinstance(memory.get("faces"), dict) else {}
+        for face_id in ("south", "east", "north", "west"):
+            face = faces.get(face_id, {}) if isinstance(faces.get(face_id, {}), dict) else {}
+            segments = face.get("segments", []) if isinstance(face.get("segments"), list) else []
+            for index, segment in enumerate(segments):
+                extent = segment.get("observed_pose_extent", {}) if isinstance(segment.get("observed_pose_extent"), dict) else {}
+                extent_text = ""
+                if extent:
+                    min_x = self._as_float_or_none(extent.get("min_x"))
+                    max_x = self._as_float_or_none(extent.get("max_x"))
+                    min_y = self._as_float_or_none(extent.get("min_y"))
+                    max_y = self._as_float_or_none(extent.get("max_y"))
+                    extent_text = (
+                        f" pose_x=[{min_x:.0f},{max_x:.0f}]"
+                        f" pose_y=[{min_y:.0f},{max_y:.0f}]"
+                        if None not in (min_x, max_x, min_y, max_y)
+                        else ""
+                    )
+                lines.append(
+                    f"  {face_id}_{index}: state={segment.get('state')} complete={int(bool(segment.get('is_search_complete')))} "
+                    f"obs={segment.get('observation_count', 0)} last_step={segment.get('last_observed_step')}{extent_text}"
+                )
+        lines.extend(["", "Recent repeated observations:"])
+        for event in repeated_events[-8:]:
+            pose = event.get("pose", {}) if isinstance(event.get("pose"), dict) else {}
+            updates = event.get("updates", []) if isinstance(event.get("updates"), list) else []
+            segs = [
+                f"{update.get('face_id')}_{update.get('segment_index')}"
+                for update in updates
+                if isinstance(update, dict) and bool(update.get("repeat_completed_observation", False))
+            ]
+            lines.append(
+                f"  step={event.get('step_index')} capture={event.get('capture_name')} "
+                f"pose=({pose.get('x')},{pose.get('y')}) yaw={pose.get('yaw')} repeated={','.join(segs)}"
+            )
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        text.insert("1.0", "\n".join(lines))
+        text.configure(state="disabled")
+
     def refresh_llm_progress_window(self) -> None:
         self.llm_progress_status_var.set("Progress: loading decision memory points...")
         threading.Thread(target=self._refresh_llm_progress_points_worker, daemon=True).start()
@@ -2953,8 +3248,11 @@ class Panel:
         if not new_label:
             new_label = f"resume_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             self.llm_progress_new_episode_var.set(new_label)
+        safe_new_label = self._safe_llm_control_path_fragment(new_label)[:28] or f"resume_{datetime.now().strftime('%H%M%S')}"
+        if safe_new_label != new_label:
+            self.llm_progress_new_episode_var.set(safe_new_label)
         threading.Thread(
-            target=lambda p=point, label=new_label: self._start_new_episode_from_progress_point(p, label),
+            target=lambda p=point, label=safe_new_label: self._start_new_episode_from_progress_point(p, label),
             daemon=True,
         ).start()
 
@@ -3452,6 +3750,10 @@ class Panel:
             "observation_count": int(segment.get("observation_count", 0) or 0),
             "last_observed_step": segment.get("last_observed_step"),
             "last_capture_name": str(segment.get("last_capture_name", "") or ""),
+            "last_observed_pose": segment.get("last_observed_pose", {}) if isinstance(segment.get("last_observed_pose"), dict) else {},
+            "observed_pose_extent": segment.get("observed_pose_extent", {}) if isinstance(segment.get("observed_pose_extent"), dict) else {},
+            "edge_t_min": self._as_float_or_none(segment.get("edge_t_min")),
+            "edge_t_max": self._as_float_or_none(segment.get("edge_t_max")),
             "evidence_type": str(segment.get("evidence_type", "") or ""),
             "candidate_class": str(candidate.get("class_name", "") or ""),
             "candidate_confidence": self._as_float_or_none(candidate.get("confidence")),
@@ -3459,6 +3761,89 @@ class Panel:
             "depth_gap_cm": self._as_float_or_none(depth_roi.get("depth_gap_cm")),
             "center_band_far_ratio": self._as_float_or_none(depth_roi.get("center_band_far_ratio")),
             "vertical_clearance_ratio": self._as_float_or_none(depth_roi.get("vertical_clearance_ratio")),
+        }
+
+    def _segment_revisit_escape_plan_from_memory(
+        self,
+        house_id: str,
+        current_event: Dict[str, Any],
+        repeated_updates: List[Dict[str, Any]],
+        next_unsearched: List[Dict[str, Any]],
+        do_not_revisit: List[Dict[str, Any]],
+        segment_count: int,
+    ) -> Dict[str, Any]:
+        if not repeated_updates:
+            return {"active": False, "reason": "no_repeated_completed_segment"}
+        if not next_unsearched:
+            return {"active": False, "reason": "no_next_unsearched_segment"}
+        pose = current_event.get("pose", {}) if isinstance(current_event.get("pose"), dict) else {}
+        pose_x = self._as_float_or_none(pose.get("x"))
+        pose_y = self._as_float_or_none(pose.get("y"))
+        pose_yaw = self._as_float_or_none(pose.get("yaw"))
+        if pose_x is None or pose_y is None or pose_yaw is None:
+            return {"active": False, "reason": "missing_current_pose_for_escape_plan"}
+
+        repeated_keys = {
+            f"{str(update.get('face_id', '') or '')}_{int(update.get('segment_index', 0) or 0)}"
+            for update in repeated_updates
+            if isinstance(update, dict)
+        }
+        repeated_records = [
+            record
+            for record in do_not_revisit
+            if isinstance(record, dict) and str(record.get("segment_key", "") or "") in repeated_keys
+        ]
+        next_segment = next_unsearched[0] if isinstance(next_unsearched[0], dict) else {}
+        next_face = str(next_segment.get("face_id", "") or "")
+        try:
+            next_index = int(next_segment.get("segment_index", 0) or 0)
+        except Exception:
+            next_index = 0
+        target = self._segment_world_target_for_house(house_id, next_face, next_index, segment_count)
+        if not target:
+            return {"active": False, "reason": "missing_next_segment_world_target"}
+
+        dx = float(target["x"]) - float(pose_x)
+        dy = float(target["y"]) - float(pose_y)
+        desired_yaw = math.degrees(math.atan2(dy, dx))
+        yaw_delta = self._normalize_angle_deg(desired_yaw - float(pose_yaw))
+        yaw_symbol = "e" if yaw_delta > 0.0 else "q"
+        needs_yaw = abs(yaw_delta) > float(LLM_TARGET_REACQUIRE_ALIGN_TOLERANCE_DEG)
+
+        in_repeated_extent = False
+        for record in repeated_records:
+            extent = record.get("observed_pose_extent", {}) if isinstance(record.get("observed_pose_extent"), dict) else {}
+            min_x = self._as_float_or_none(extent.get("min_x"))
+            max_x = self._as_float_or_none(extent.get("max_x"))
+            min_y = self._as_float_or_none(extent.get("min_y"))
+            max_y = self._as_float_or_none(extent.get("max_y"))
+            if None in (min_x, max_x, min_y, max_y):
+                continue
+            margin = 120.0
+            if (
+                float(min_x) - margin <= float(pose_x) <= float(max_x) + margin
+                and float(min_y) - margin <= float(pose_y) <= float(max_y) + margin
+            ):
+                in_repeated_extent = True
+                break
+
+        return {
+            "active": True,
+            "policy": "current capture repeats completed segment(s); do not yaw/backtrack into their explored coordinate ranges",
+            "house_id": str(house_id or ""),
+            "current_pose": {"x": float(pose_x), "y": float(pose_y), "yaw": float(pose_yaw)},
+            "repeated_segment_keys": sorted(repeated_keys),
+            "repeated_segment_records": repeated_records[:4],
+            "in_repeated_observed_pose_extent": bool(in_repeated_extent),
+            "next_segment": next_segment,
+            "escape_target_world": target,
+            "desired_yaw_deg": round(float(desired_yaw), 2),
+            "yaw_delta_deg": round(float(yaw_delta), 2),
+            "yaw_symbol": yaw_symbol,
+            "action_symbol": yaw_symbol if needs_yaw else "w",
+            "repeat": 1 if needs_yaw else 3,
+            "distance_to_next_segment_cm": round(float(math.hypot(dx, dy)), 2),
+            "reason": "leave the completed coordinate range and move toward the next unsearched house-face segment",
         }
 
     def _segment_search_memory_control_summary(self, labeling_dir: str, house_id: str) -> Dict[str, Any]:
@@ -3534,10 +3919,22 @@ class Panel:
         current_entry_found_open = [
             update
             for update in current_updates
-            if isinstance(update, dict) and str(update.get("new_state", "") or "") == "entry_found_open"
+            if (
+                isinstance(update, dict)
+                and str(update.get("new_state", "") or "") == "entry_found_open"
+                and not bool(update.get("repeat_completed_observation", False))
+            )
         ]
         summary = memory.get("summary", {}) if isinstance(memory.get("summary"), dict) else {}
         best_open = entry_found_open_segments[0] if entry_found_open_segments else {}
+        repeat_escape_plan = self._segment_revisit_escape_plan_from_memory(
+            hid,
+            current_event,
+            current_repeated_completed,
+            next_unsearched,
+            do_not_revisit,
+            int(report.get("segment_count_per_face", 0) or 0),
+        )
         return {
             "available": True,
             "version": "llm_segment_search_memory_control_summary_v1",
@@ -3571,6 +3968,7 @@ class Panel:
                 "entry_found_open_updates": current_entry_found_open[:4],
                 "instruction": "If repeat_completed_observation=true and no entry gate is active, leave this completed segment and move toward next_unsearched_segments.",
             },
+            "repeat_escape_plan": repeat_escape_plan,
         }
 
     def _segment_entry_found_gate_status(self, labeling_dir: str, fusion: Dict[str, Any], house_id: str) -> Dict[str, Any]:
@@ -3581,18 +3979,33 @@ class Panel:
 
         target_entry_visible = self._target_entry_visible_for_current_house(fusion)
         enterable_evidence = self._is_enterable_entry_evidence(fusion)
+        semantic_class = self._semantic_class_name(fusion)
+        semantic_class_known = bool(semantic_class)
+        doorlike_candidate = self._is_doorlike_class(semantic_class)
         current_capture_open = bool(entry_gate.get("current_capture_entry_found_open", False))
+        current_capture_open_doorlike = bool(current_capture_open and (doorlike_candidate or not semantic_class_known))
         distance_cm = self._candidate_entry_distance_cm(fusion)
         segment_distance_cm = self._as_float_or_none(entry_gate.get("best_entry_distance_cm"))
         effective_distance_cm = distance_cm if distance_cm is not None else segment_distance_cm
-        visible_or_current = bool(target_entry_visible or current_capture_open)
-        enterable_or_current = bool(enterable_evidence or current_capture_open)
+        visible_or_current = bool(target_entry_visible or current_capture_open_doorlike)
+        enterable_or_current = bool(enterable_evidence or current_capture_open_doorlike)
         stop_gate = self._entry_stop_gate_status(labeling_dir, fusion, house_id) if house_id else {}
         alignment = self._target_entry_alignment_status(fusion)
         obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        height_corridor = obstacle.get("height_aware_front_corridor", {}) if isinstance(obstacle.get("height_aware_front_corridor"), dict) else {}
+        obstacle_severity = str(obstacle.get("severity", "") or "").lower()
+        obstacle_blocks_body = bool(
+            obstacle.get("blocking", False)
+            or obstacle.get("too_close", False)
+            or obstacle_severity in {"high", "severe", "blocked", "critical"}
+            or bool(height_corridor.get("body_corridor_blocking", False))
+        )
         front_clear = bool(
-            self._front_path_clear_for_approach(fusion)
-            or bool(obstacle.get("low_obstacle_passable", False))
+            (
+                self._front_path_clear_for_approach(fusion)
+                or bool(obstacle.get("low_obstacle_passable", False))
+            )
+            and not obstacle_blocks_body
         )
         should_stop = bool(
             visible_or_current
@@ -3600,13 +4013,15 @@ class Panel:
             and (
                 bool(stop_gate.get("actual_entry_reached", False))
                 or bool(stop_gate.get("proxy_stop_allowed", False))
-                or (
-                    bool(current_capture_open)
-                    and effective_distance_cm is not None
-                    and effective_distance_cm <= float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM)
-                )
             )
         )
+        segment_stop_blocked_reason = ""
+        if current_capture_open and not current_capture_open_doorlike:
+            segment_stop_blocked_reason = "segment memory reports an open entry, but the current semantic class is not door-like"
+        elif current_capture_open and not should_stop and effective_distance_cm is not None and effective_distance_cm <= float(LLM_ENTRY_REACHED_LARGE_BBOX_PROXY_CM):
+            segment_stop_blocked_reason = "segment memory cannot finish the house without current YOLO+Depth stop-gate evidence"
+        elif enterable_or_current and not front_clear:
+            segment_stop_blocked_reason = "front/body corridor obstacle blocks safe segment-entry approach"
         should_align = bool(
             visible_or_current
             and enterable_or_current
@@ -3628,11 +4043,16 @@ class Panel:
             "should_approach": should_approach,
             "target_entry_visible": bool(target_entry_visible),
             "enterable_evidence": bool(enterable_evidence),
+            "semantic_class": semantic_class,
+            "doorlike_candidate": bool(doorlike_candidate),
             "current_capture_entry_found_open": bool(current_capture_open),
+            "current_capture_entry_found_open_doorlike": bool(current_capture_open_doorlike),
             "entry_distance_cm": distance_cm,
             "segment_entry_distance_cm": segment_distance_cm,
             "effective_distance_cm": effective_distance_cm,
             "front_clear_for_approach": front_clear,
+            "obstacle_blocks_body": bool(obstacle_blocks_body),
+            "segment_stop_blocked_reason": segment_stop_blocked_reason,
             "target_entry_alignment": alignment,
             "front_obstacle": obstacle,
             "stop_gate_status": stop_gate,
@@ -4499,6 +4919,129 @@ class Panel:
             if isinstance(house, dict) and str(house.get("id", "") or "").strip() == hid:
                 return self._as_float_or_none(house.get("radius_cm"))
         return None
+
+    def _house_world_bbox_for_id(self, house_id: str) -> Dict[str, float]:
+        hid = str(house_id or "").strip()
+        if not hid:
+            return {}
+        raw = self._read_local_houses_config()
+        houses = raw.get("houses", []) if isinstance(raw.get("houses"), list) else []
+        overhead = raw.get("overhead_map", {}) if isinstance(raw.get("overhead_map"), dict) else {}
+        calibration = overhead.get("calibration", {}) if isinstance(overhead.get("calibration"), dict) else {}
+        for house in houses:
+            if not isinstance(house, dict) or str(house.get("id", "") or "").strip() != hid:
+                continue
+            points: List[tuple[float, float]] = []
+            bbox_image = house.get("map_bbox_image", {}) if isinstance(house.get("map_bbox_image"), dict) else {}
+            x1 = self._as_float_or_none(bbox_image.get("x1"))
+            y1 = self._as_float_or_none(bbox_image.get("y1"))
+            x2 = self._as_float_or_none(bbox_image.get("x2"))
+            y2 = self._as_float_or_none(bbox_image.get("y2"))
+            if None not in (x1, y1, x2, y2):
+                for image_x, image_y in ((x1, y1), (x1, y2), (x2, y1), (x2, y2)):
+                    world_point = self._image_to_world_point(float(image_x), float(image_y), calibration)
+                    if world_point:
+                        points.append(world_point)
+            if points:
+                xs = [float(point[0]) for point in points]
+                ys = [float(point[1]) for point in points]
+                return {
+                    "min_x": min(xs),
+                    "max_x": max(xs),
+                    "min_y": min(ys),
+                    "max_y": max(ys),
+                    "center_x": 0.5 * (min(xs) + max(xs)),
+                    "center_y": 0.5 * (min(ys) + max(ys)),
+                    "source": "map_bbox_image_affine",
+                }
+            center_x = self._as_float_or_none(house.get("center_x"))
+            center_y = self._as_float_or_none(house.get("center_y"))
+            radius = self._as_float_or_none(house.get("radius_cm"))
+            if center_x is not None and center_y is not None and radius is not None:
+                half = max(150.0, float(radius) * 0.45)
+                return {
+                    "min_x": float(center_x) - half,
+                    "max_x": float(center_x) + half,
+                    "min_y": float(center_y) - half,
+                    "max_y": float(center_y) + half,
+                    "center_x": float(center_x),
+                    "center_y": float(center_y),
+                    "source": "center_radius_fallback",
+                }
+        return {}
+
+    def _segment_world_target_for_house(
+        self,
+        house_id: str,
+        face_id: str,
+        segment_index: int,
+        segment_count: int,
+        *,
+        offset_cm: float = 260.0,
+    ) -> Dict[str, float]:
+        bbox = self._house_world_bbox_for_id(house_id)
+        if not bbox:
+            return {}
+        count = max(1, int(segment_count or 1))
+        index = max(0, min(count - 1, int(segment_index)))
+        t = (float(index) + 0.5) / float(count)
+        min_x = float(bbox["min_x"])
+        max_x = float(bbox["max_x"])
+        min_y = float(bbox["min_y"])
+        max_y = float(bbox["max_y"])
+        face = str(face_id or "").strip().lower()
+        if face == "east":
+            return {"x": max_x + float(offset_cm), "y": min_y + t * (max_y - min_y)}
+        if face == "west":
+            return {"x": min_x - float(offset_cm), "y": min_y + t * (max_y - min_y)}
+        if face == "north":
+            return {"x": min_x + t * (max_x - min_x), "y": max_y + float(offset_cm)}
+        if face == "south":
+            return {"x": min_x + t * (max_x - min_x), "y": min_y - float(offset_cm)}
+        return {}
+
+    def _segment_world_line_for_bbox(
+        self,
+        bbox: Dict[str, float],
+        face_id: str,
+        segment_index: int,
+        segment_count: int,
+    ) -> Optional[tuple[float, float, float, float]]:
+        if not bbox:
+            return None
+        count = max(1, int(segment_count or 1))
+        index = max(0, min(count - 1, int(segment_index)))
+        t0 = float(index) / float(count)
+        t1 = float(index + 1) / float(count)
+        min_x = float(bbox["min_x"])
+        max_x = float(bbox["max_x"])
+        min_y = float(bbox["min_y"])
+        max_y = float(bbox["max_y"])
+        face = str(face_id or "").strip().lower()
+        if face == "east":
+            return max_x, min_y + t0 * (max_y - min_y), max_x, min_y + t1 * (max_y - min_y)
+        if face == "west":
+            return min_x, min_y + t0 * (max_y - min_y), min_x, min_y + t1 * (max_y - min_y)
+        if face == "north":
+            return min_x + t0 * (max_x - min_x), max_y, min_x + t1 * (max_x - min_x), max_y
+        if face == "south":
+            return min_x + t0 * (max_x - min_x), min_y, min_x + t1 * (max_x - min_x), min_y
+        return None
+
+    def _pose_from_labeling_dir_or_fusion(self, labeling_dir: str, fusion: Dict[str, Any]) -> Dict[str, float]:
+        pose = self._uav_pose_from_fusion_or_state(fusion)
+        if pose:
+            return pose
+        labeling_path = Path(labeling_dir) if labeling_dir else Path()
+        for candidate in (labeling_path / "pose_history_summary.json", labeling_path / "state.json"):
+            payload = self._read_json_file(candidate)
+            pose_payload = payload.get("pose", {}) if isinstance(payload.get("pose"), dict) else {}
+            x = self._as_float_or_none(pose_payload.get("x"))
+            y = self._as_float_or_none(pose_payload.get("y"))
+            yaw = self._as_float_or_none(pose_payload.get("yaw", pose_payload.get("task_yaw")))
+            if x is not None and y is not None and yaw is not None:
+                return {"x": x, "y": y, "yaw": yaw}
+        return {}
 
     def _house_records_for_route_planning(self) -> List[Dict[str, Any]]:
         raw = self._read_local_houses_config()
@@ -6450,6 +6993,78 @@ class Panel:
             return normalized
         return normalized
 
+    def _apply_segment_revisit_escape_override(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
+        fusion = self._fusion_payload_from_labeling_dir(labeling_dir)
+        house_id = self._current_target_house_id_from_fusion(fusion)
+        if not house_id:
+            return normalized
+        memory = self._segment_search_memory_control_summary(labeling_dir, house_id)
+        if not bool(memory.get("available", False)):
+            return normalized
+        current_capture = memory.get("current_capture", {}) if isinstance(memory.get("current_capture"), dict) else {}
+        if not bool(current_capture.get("repeat_completed_observation", False)):
+            return normalized
+        entry_gate = memory.get("entry_found_open_gate", {}) if isinstance(memory.get("entry_found_open_gate"), dict) else {}
+        if bool(entry_gate.get("current_capture_entry_found_open", False)):
+            return normalized
+        escape = memory.get("repeat_escape_plan", {}) if isinstance(memory.get("repeat_escape_plan"), dict) else {}
+        if not bool(escape.get("active", False)):
+            return normalized
+
+        original = dict(normalized)
+        obstacle = self._front_obstacle_status(fusion, labeling_dir)
+        planned_action = str(escape.get("action_symbol", "") or "").strip().lower()
+        if planned_action not in LLM_CONTROL_ALLOWED_SYMBOLS:
+            planned_action = str(escape.get("yaw_symbol", "") or "q")
+        if bool(obstacle.get("blocking", False)) or bool(obstacle.get("too_close", False)):
+            # Rotating in place is safer than repeatedly backing/yawing into an already searched coordinate band.
+            planned_action = str(escape.get("yaw_symbol", "") or planned_action or "q")
+            if planned_action not in YAW_IMMEDIATE_CAPTURE_SYMBOLS:
+                planned_action = "q"
+            repeat = 1
+            need_capture = True
+        elif planned_action == "w":
+            repeat = self._safe_forward_repeat_from_depth(
+                obstacle,
+                fallback_repeat=int(escape.get("repeat", 3) or 3),
+                remaining_cm=self._as_float_or_none(escape.get("distance_to_next_segment_cm")),
+            )
+            repeat = max(1, min(int(repeat), int(self._llm_control_repeat_cap())))
+            need_capture = True
+        else:
+            repeat = 1
+            need_capture = planned_action in YAW_IMMEDIATE_CAPTURE_SYMBOLS
+
+        normalized = dict(normalized)
+        normalized["action_symbol"] = planned_action
+        normalized["repeat"] = int(repeat)
+        normalized["stop"] = False
+        normalized["need_capture_after"] = bool(need_capture)
+        normalized["segment_revisit_escape_plan"] = escape
+        normalized["rule_override"] = {
+            "type": "segment_revisit_escape_to_next_unsearched",
+            "original_action_symbol": original.get("action_symbol"),
+            "original_repeat": original.get("repeat"),
+            "original_stop": original.get("stop"),
+            "action_symbol": planned_action,
+            "repeat": int(repeat),
+            "segment_search_memory": memory,
+            "front_obstacle": obstacle,
+            "reason": "current capture is revisiting a completed segment coordinate range; leave it and move/yaw toward the next unsearched segment",
+        }
+        reason = str(normalized.get("reason", "") or "")
+        escape_text = (
+            f"segment revisit escape: repeated={escape.get('repeated_segment_keys')} "
+            f"-> next={escape.get('next_segment', {}).get('segment_key') if isinstance(escape.get('next_segment'), dict) else ''} "
+            f"action={planned_action} x{repeat}"
+        )
+        normalized["reason"] = (reason + " | " if reason else "") + escape_text
+        self._append_llm_control_log(
+            f"Segment revisit escape: action={original.get('action_symbol')} -> {planned_action} x{repeat}; "
+            f"target={house_id} repeated={escape.get('repeated_segment_keys')} next={escape.get('next_segment', {}).get('segment_key') if isinstance(escape.get('next_segment'), dict) else ''}"
+        )
+        return normalized
+
     def _apply_llm_control_rule_overrides(self, normalized: Dict[str, Any], labeling_dir: str) -> Dict[str, Any]:
         normalized = self._apply_segment_entry_found_gate_override(normalized, labeling_dir)
         rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
@@ -6458,6 +7073,10 @@ class Panel:
             "segment_entry_found_open_align_gate",
             "segment_entry_found_open_approach_gate",
         }:
+            return normalized
+        normalized = self._apply_segment_revisit_escape_override(normalized, labeling_dir)
+        rule_type = str((normalized.get("rule_override", {}) if isinstance(normalized.get("rule_override"), dict) else {}).get("type", "") or "")
+        if rule_type == "segment_revisit_escape_to_next_unsearched":
             return normalized
         if bool(normalized.get("stop", False)):
             normalized = self._apply_premature_stop_continue_search_override(normalized, labeling_dir)
@@ -6759,6 +7378,10 @@ class Panel:
                 "is_search_complete",
                 "observation_count",
                 "last_observed_step",
+                "last_observed_pose",
+                "observed_pose_extent",
+                "edge_t_min",
+                "edge_t_max",
                 "evidence_type",
                 "candidate_class",
                 "candidate_confidence",
@@ -6774,6 +7397,7 @@ class Panel:
             return memory if isinstance(memory, dict) else {}
         entry_gate = memory.get("entry_found_open_gate", {}) if isinstance(memory.get("entry_found_open_gate"), dict) else {}
         current_capture = memory.get("current_capture", {}) if isinstance(memory.get("current_capture"), dict) else {}
+        repeat_escape_plan = memory.get("repeat_escape_plan", {}) if isinstance(memory.get("repeat_escape_plan"), dict) else {}
         return {
             "available": True,
             "house_id": memory.get("house_id", ""),
@@ -6818,6 +7442,24 @@ class Panel:
                     if isinstance(update, dict)
                 ],
             },
+            "repeat_escape_plan": self._compact_dict_for_prompt(
+                repeat_escape_plan,
+                [
+                    "active",
+                    "policy",
+                    "repeated_segment_keys",
+                    "in_repeated_observed_pose_extent",
+                    "next_segment",
+                    "escape_target_world",
+                    "desired_yaw_deg",
+                    "yaw_delta_deg",
+                    "yaw_symbol",
+                    "action_symbol",
+                    "repeat",
+                    "distance_to_next_segment_cm",
+                    "reason",
+                ],
+            ),
         }
 
     def _compact_recent_llm_decisions_for_prompt(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -6937,6 +7579,7 @@ class Panel:
             ),
             "completion_rules": [
                 "Do not revisit completed segment_search_memory.do_not_revisit_segments.",
+                "If segment_search_memory.repeat_escape_plan.active=true, do not yaw/backtrack into its repeated explored coordinate range; follow repeat_escape_plan toward the next unsearched segment.",
                 "If current_capture.repeat_completed_observation=true and no open-entry gate is active, move toward next_unsearched_segments.",
                 "If entry_found_open_gate.present=true, prioritize align/approach/stop for that open entry.",
                 "Stop current house when enterable target entry is actually reached or proxy gate allows it.",
@@ -7032,6 +7675,7 @@ class Panel:
                 "face_corner_forward": "If the current face edge segment is already repeatedly observed and the front corridor has enough clearance, advance forward along the house edge to reveal the next face instead of continuing lateral strafe into side obstacles. Do not use corner-forward when the front wall/porch/ceiling is closer than the safety clearance.",
                 "face_range_advance": "If the current house-face segment/range has already been repeatedly observed and only rejected window/closed/narrow non-enterable evidence is present, move forward to the next observation range first, then yaw to continue searching. Do not re-sample the same closed-door area.",
                 "segment_search_memory": "Use segment_search_memory.do_not_revisit_segments and segment_search_memory.next_unsearched_segments as deterministic progress memory. Completed segments are hard no-repeat search units. If current_capture.repeat_completed_observation=true and no open-entry gate is active, leave that segment and move toward next_unsearched_segments.",
+                "segment_coordinate_memory": "Each completed segment stores observed UAV pose extent. If repeat_escape_plan.active=true, the current view is revisiting an already explored coordinate band; do not turn back into it, and follow the escape target toward the next unsearched segment.",
                 "segment_entry_found_open_gate": "If segment_search_memory.entry_found_open_gate.present=true, prioritize the open-entry gate: re-center if needed, approach with safe forward motion if not reached, and stop once actual/proxy reach conditions are met. Do not continue generic orbit/full-coverage search around a known open entry.",
                 "face_range_followup_yaw": "After a face-range forward advance, yaw once and capture to inspect the new sector before moving forward again.",
                 "temporary_search_altitude": "Only during incomplete target-house perimeter search, if a wall-like front obstacle blocks ground-level orbiting, climb temporarily with r, recapture, then continue only if depth becomes safe. Restore altitude after the current house search finishes.",
@@ -7061,7 +7705,8 @@ class Panel:
             "intermediate door/window evidence until inside the target search boundary.\n"
             "Use segment_search_memory as hard progress memory: do_not_revisit_segments are closed search units; "
             "next_unsearched_segments are the preferred next search units. If current_capture.repeat_completed_observation=true "
-            "and no open-entry gate is active, leave that segment instead of resampling it.\n"
+            "and no open-entry gate is active, leave that segment instead of resampling it. If repeat_escape_plan.active=true, "
+            "do not yaw/backtrack into the repeated explored coordinate extent; follow the escape plan toward the next unsearched segment.\n"
             "If entry_found_open_gate.present=true, prioritize that open entry: align if near image edge, approach with "
             "safe forward motion if not reached, and stop when actual/proxy reach gate allows. Do not continue generic orbit.\n"
             "Closed/narrow/non-traversable door is not final house completion unless coverage says full/no-entry ready. "
@@ -8549,7 +9194,7 @@ class Panel:
 
     def on_close(self) -> None:
         self.on_llm_control_stop()
-        for window in (self.preview_window, self.depth_window, self.memory_window, self.llm_control_window, self.llm_progress_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
+        for window in (self.preview_window, self.depth_window, self.memory_window, self.llm_control_window, self.llm_progress_window, self.llm_memory_viz_window, self.fusion_window, self.review_window, self.indicator_review_window, self.map_window, self.open_map_window):
             try:
                 if window is not None: window.destroy()
             except Exception:
